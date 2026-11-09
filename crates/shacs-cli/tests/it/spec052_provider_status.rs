@@ -1,17 +1,19 @@
 //! Spec 052 PRD 000 acceptance 4 and 6 through the binary: `provider status`
 //! judges the runtime's credential place without writing or showing secrets,
 //! and a gateway without a provider credential says so once it has started
-//! and keeps running.
+//! and keeps running. PRD 040 acceptance 4: an empty provider variable no
+//! longer hides an imported key, and importing again saves the current
+//! declaration with the key.
 
 use serde_json::{json, Value};
 use shacs_config::{
     config_migration_marker_path, save_auth_store_to_path, secrets_migration_marker_path,
-    AuthStore, ProviderAuth,
+    AuthStore, CredentialFingerprint, ProviderAuth,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -162,13 +164,10 @@ fn status_reports_what_is_missing_and_what_to_do() -> TestResult {
     // Given
     let none = Home::new(json!({}))?;
     let unknown = Home::new(json!({"provider": "no-such-provider"}))?;
-    let shadowed = Home::new(json!({}))?;
-    shadowed.save_auth(&[("anthropic", ProviderAuth::api_key(ANTHROPIC_KEY))])?;
 
     // When
     let none_output = none.status(&[])?;
     let unknown_output = unknown.status(&[])?;
-    let shadowed_output = shadowed.status(&[("ANTHROPIC_API_KEY", "")])?;
 
     // Then
     let none_stdout = String::from_utf8_lossy(&none_output.stdout);
@@ -195,20 +194,111 @@ fn status_reports_what_is_missing_and_what_to_do() -> TestResult {
         "{unknown_stdout}"
     );
     assert!(!unknown_next.contains("login"), "{unknown_stdout}");
+    Ok(())
+}
 
-    let shadowed_stdout = String::from_utf8_lossy(&shadowed_output.stdout);
-    assert!(
-        shadowed_output.status.success(),
-        "{}",
-        text(&shadowed_output)
-    );
+fn import_anthropic_key(home: &Home, key: &str) -> TestResult {
+    let mut child = home
+        .command(
+            &["provider", "anthropic", "import-key", "--token-stdin"],
+            &[("ANTHROPIC_API_KEY", "")],
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or("import-key stdin")?
+        .write_all(format!("{key}\n").as_bytes())?;
+    let output = child.wait_with_output()?;
+    assert!(output.status.success(), "{}", text(&output));
+    assert_no_secrets(&output);
+    Ok(())
+}
+
+#[test]
+fn an_empty_provider_variable_does_not_hide_an_imported_key() -> TestResult {
+    // Given
+    let home = Home::new(json!({}))?;
+    import_anthropic_key(&home, ANTHROPIC_KEY)?;
+
+    // When
+    let output = home.status(&[("ANTHROPIC_API_KEY", "")])?;
+    let gateway = started_gateway(&home, &[("ANTHROPIC_API_KEY", "")])?;
+    let gateway_lines = gateway.stop(&home)?;
+
+    // Then
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(stdout.lines().next(), Some("provider: ready anthropic"));
     assert_eq!(
-        shadowed_stdout.lines().next(),
+        line_starting_with(&stdout, "credential:"),
+        "credential: API key saved in the auth store"
+    );
+    assert_no_secrets(&output);
+    assert!(
+        !gateway_lines
+            .iter()
+            .any(|line| line.starts_with("provider:")),
+        "{gateway_lines:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_key_saved_under_another_declaration_is_used_again_once_imported_again() -> TestResult {
+    // Given: a key saved before the declaration it was saved under changed.
+    let home = Home::new(json!({}))?;
+    let mut auth = AuthStore::default();
+    auth.providers
+        .insert("anthropic".to_owned(), ProviderAuth::api_key(ANTHROPIC_KEY));
+    auth.set_fingerprint("anthropic", CredentialFingerprint::from_descriptor("old"));
+    save_auth_store_to_path(&auth, &home.data().join("auth.json"))?;
+
+    // When
+    let stale = home.status(&[])?;
+    import_anthropic_key(&home, ANTHROPIC_KEY)?;
+    let imported = home.status(&[])?;
+    let mut config: Value = serde_json::from_slice(&fs::read(home.config())?)?;
+    config["providers"]["anthropic"]["credentialSource"] =
+        json!({"schemaVersion": 1, "environment": "SHACS_SPEC052_OTHER_ANTHROPIC_KEY"});
+    home.write_config(&config)?;
+    let changed = home.status(&[])?;
+
+    // Then
+    let stale_stdout = String::from_utf8_lossy(&stale.stdout);
+    assert_eq!(
+        stale_stdout.lines().next(),
         Some("provider: missing anthropic")
     );
-    assert!(line_starting_with(&shadowed_stdout, "reason:").contains("ANTHROPIC_API_KEY"));
-    assert!(line_starting_with(&shadowed_stdout, "next:").contains("ANTHROPIC_API_KEY"));
-    assert_no_secrets(&shadowed_output);
+    let next = line_starting_with(&stale_stdout, "next:");
+    assert!(
+        next.contains("restore providers.anthropic.credentialSource")
+            && next.contains("provider anthropic import-key --token-stdin"),
+        "{stale_stdout}"
+    );
+    let imported_stdout = String::from_utf8_lossy(&imported.stdout);
+    assert_eq!(
+        imported_stdout.lines().next(),
+        Some("provider: ready anthropic"),
+        "{imported_stdout}"
+    );
+    let changed_stdout = String::from_utf8_lossy(&changed.stdout);
+    assert_eq!(
+        changed_stdout.lines().next(),
+        Some("provider: missing anthropic"),
+        "{changed_stdout}"
+    );
+    assert!(
+        line_starting_with(&changed_stdout, "reason:")
+            .contains("saved under a different credential setting"),
+        "{changed_stdout}"
+    );
+    for output in [&stale, &imported, &changed] {
+        assert_no_secrets(output);
+    }
     Ok(())
 }
 
@@ -277,12 +367,12 @@ struct Gateway {
 }
 
 impl Gateway {
-    fn start(home: &Home) -> Result<Self, Box<dyn Error>> {
+    fn start(home: &Home, environment: &[(&str, &str)]) -> Result<Self, Box<dyn Error>> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port().to_string();
         drop(listener);
         let mut child = home
-            .command(&["run", "--websocket-port", &port], &[])
+            .command(&["run", "--websocket-port", &port], environment)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -346,8 +436,8 @@ impl Gateway {
     }
 }
 
-fn started_gateway(home: &Home) -> Result<Gateway, Box<dyn Error>> {
-    let mut gateway = Gateway::start(home)?;
+fn started_gateway(home: &Home, environment: &[(&str, &str)]) -> Result<Gateway, Box<dyn Error>> {
+    let mut gateway = Gateway::start(home, environment)?;
     gateway.wait_for("WebSocket:")?;
     Ok(gateway)
 }
@@ -356,7 +446,7 @@ fn started_gateway(home: &Home) -> Result<Gateway, Box<dyn Error>> {
 fn a_gateway_without_a_provider_credential_says_so_and_keeps_running() -> TestResult {
     // Given
     let home = Home::new(json!({}))?;
-    let mut gateway = Gateway::start(&home)?;
+    let mut gateway = Gateway::start(&home, &[])?;
 
     // When
     let hint = gateway.wait_for("provider:")?;
@@ -386,7 +476,7 @@ fn a_gateway_with_a_provider_credential_adds_no_provider_line() -> TestResult {
     config["providers"] =
         json!({"custom": {"apiKey": "sk-fixture", "apiBase": "http://127.0.0.1:1/v1"}});
     home.write_config(&config)?;
-    let gateway = started_gateway(&home)?;
+    let gateway = started_gateway(&home, &[])?;
 
     // When
     let lines = gateway.stop(&home)?;
@@ -404,7 +494,7 @@ fn a_gateway_with_an_unreadable_auth_store_warns_and_keeps_running() -> TestResu
     // Given
     let home = Home::new(json!({}))?;
     fs::write(home.data().join("auth.json"), "{not json")?;
-    let mut gateway = Gateway::start(&home)?;
+    let mut gateway = Gateway::start(&home, &[])?;
 
     // When
     let hint = gateway.wait_for("provider:")?;

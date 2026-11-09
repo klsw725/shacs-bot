@@ -206,7 +206,15 @@ cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin s
 
 Delivery와 readiness projection은 보수적인 hint입니다. Remote ACK/read receipt, replay 방지, exactly-once delivery를 보장하지 않습니다. SSE final delivery는 현재 pending 또는 unknown으로 남을 수 있고, 외부 owner fact가 없으면 성공으로 합성하지 않습니다. Approval durable request는 owner terminal event가 기록되기 전까지 Requested로 표시됩니다.
 
-Docker Compose로 초기 설정과 장기 실행 서비스를 다룹니다. 이 경로가 현재 primary zero-setup containment path이며, 기본 Compose 설정은 Docker socket mount, privileged mode, host network를 사용하지 않습니다:
+Docker Compose로 초기 설정과 장기 실행 서비스를 다룹니다. 이 경로가 현재 primary zero-setup containment path이며, 기본 Compose 설정은 Docker socket mount, privileged mode, host network를 사용하지 않습니다. 처음 실행은 저장소의 설정 스크립트 하나로 끝납니다:
+
+```sh
+./scripts/docker-setup.sh
+```
+
+스크립트는 `~/.shacs-bot`을 실행한 사용자로 만들고, 저장소 `.env`(Compose가 읽고 git은 무시합니다)에 `SHACS_UID`·`SHACS_GID`를 그 사용자의 번호로 적어 container가 같은 번호로 돌게 합니다. 그다음 image를 만들고(처음에는 몇 분 걸립니다) 처음 설정(`onboard`)을 한 뒤, ChatGPT 계정 로그인과 Discord bot 연결(토큰은 화면에 보이지 않게 받고, 봇이 답할 Discord 사용자 ID를 묻습니다)을 묻고 gateway를 띄웁니다. 다시 실행해도 되고, 이미 된 것은 확인만 합니다. terminal이 아닌 곳에서 실행하면 묻지 않고 남은 일을 명령과 함께 알립니다. root로 실행하면 멈추고(container가 관리자로 돌게 되므로), `sudo`를 부르지 않습니다. Compose를 스크립트보다 먼저 돌려 Docker가 `~/.shacs-bot`을 `root` 소유로 만들었으면 스크립트가 알려 주는 `sudo chown -R "$(id -u):$(id -g)" ~/.shacs-bot`으로 고친 뒤 다시 실행하세요. 스크립트 없이 쓰다 data 폴더에 쓸 수 없으면 `onboard`·`run` 같은 쓰는 명령이 시작할 때 `Permission denied` 대신 폴더 경로, 주인과 실행 번호, 고치는 방법을 알리고 멈춥니다. rootless Docker·Podman·Docker Desktop·WSL 안내는 [Docker Compose](docs/USAGE.md#docker-compose)를 참고하세요.
+
+스크립트 없이 손으로 할 때는 `SHACS_UID`·`SHACS_GID`를 정해야 합니다(정하지 않으면 container는 1000:1000으로 돌고, host 사용자 번호가 다르면 `~/.shacs-bot`에 쓰지 못합니다):
 
 ```sh
 export SHACS_UID=$(id -u)
@@ -226,9 +234,10 @@ docker compose up -d shacs-gateway
 
 ```sh
 ./docs/scripts/spec023-compose-smoke.sh
+./docs/scripts/spec052-docker-setup-smoke.sh --yes   # setup script, rebuilds shacs-bot:local, non-1000 UID
 ```
 
-Compose는 host의 `~/.shacs-bot`을 container의 `/home/shacs/.shacs-bot`에 mount합니다. 기본 `docker compose up`은 단일 owner인 `shacs-gateway`만 시작하며, `shacs-api`는 명시적으로 서비스 이름을 지정할 때 시작되는 opt-in profile입니다. Container가 실행 중일 때는 host에서 같은 `~/.shacs-bot`으로 shacs-bot 명령을 실행하지 마세요. durable event 저장소(SQLite)는 host와 container가 동시에 열면 안전하지 않습니다. Provider·channel secret은 image에 넣지 말고 `~/.shacs-bot/.env.json`(config에는 `${이름}`), auth workflow, 또는 `.env.example`을 참고한 shell environment로 제공하세요. config에 적은 값은 위의 `runtime config-migrate --apply`가 `.env.json`으로 옮깁니다. 다만 공식 Compose는 `ANTHROPIC_API_KEY` 같은 provider 환경 변수를 host에서 정하지 않으면 빈 값으로 넘기고, provider credential은 그 환경 변수를 `auth.json`·config(`.env.json`으로 푼 값 포함)보다 먼저 보고 비어 있어도 씁니다(`${이름}` 풀기와 다릅니다). 그래서 Docker에서 API key provider를 쓰려면 `docker-compose.yml` 옆 `.env`에 key를 적거나 ChatGPT 계정 로그인(`docker compose run --rm shacs-cli provider codex login --headless`)을 쓰세요. `docker compose run --rm shacs-cli provider status`가 runtime이 쓸 provider와 그 인증이 있는지 알립니다([provider 인증 확인](docs/USAGE.md#provider-인증-확인)). 기본 UID/GID는 nanobot과 같은 `1000:1000`이고, 위 예시처럼 `SHACS_UID`/`SHACS_GID`를 지정하면 host user 소유권에 맞춰 실행합니다. `bwrap`는 공식 image/package에 포함되어 자동 설정된 경우가 아니라면 optional hardening입니다. 로컬 OpenAI 호환 API만 띄우려면 gateway를 중지한 뒤 provider 설정 후 `docker compose up -d shacs-api`와 `curl http://127.0.0.1:8900/health`를 사용하세요.
+Compose는 host의 `~/.shacs-bot`을 container의 `/home/shacs/.shacs-bot`에 mount합니다. 기본 `docker compose up`은 단일 owner인 `shacs-gateway`만 시작하며, `shacs-api`는 명시적으로 서비스 이름을 지정할 때 시작되는 opt-in profile입니다. Container가 실행 중일 때는 host에서 같은 `~/.shacs-bot`으로 shacs-bot 명령을 실행하지 마세요. durable event 저장소(SQLite)는 host와 container가 동시에 열면 안전하지 않습니다. Provider·channel secret은 image에 넣지 말고 `~/.shacs-bot/.env.json`(config에는 `${이름}`), auth workflow, 또는 `.env.example`을 참고한 shell environment로 제공하세요. config에 적은 값은 위의 `runtime config-migrate --apply`가 `.env.json`으로 옮깁니다. 공식 Compose는 `ANTHROPIC_API_KEY` 같은 provider 환경 변수를 host에서 정하지 않으면 빈 값으로 넘기는데, 빈 값은 없는 것으로 보므로 `auth.json`이나 config(`.env.json`으로 푼 값 포함)에 둔 key를 가리지 않습니다(`${이름}` 풀기와 같은 뜻). 값이 있는 provider 환경 변수(공백만인 값 포함)는 지금처럼 저장한 key보다 먼저 쓰입니다. API key를 넣는 길은 저장소 `.env`의 provider 환경 변수, config의 provider 항목(`.env.json`의 `${이름}`), key를 표준 입력으로만 넘기는 `printf '%s\n' "$PROVIDER_KEY" | docker compose run --rm -T shacs-cli provider <id> import-key --token-stdin` 셋이고, ChatGPT 계정 로그인(`docker compose run --rm shacs-cli provider codex login --headless`)도 됩니다. 로그인하거나 가져온 인증(가져온 API key 포함)은 그때의 credential 선언(`credentialSource`, `apiKeyRef`)을 함께 기록하므로, 그 뒤 선언을 바꾸면 쓰이지 않고 다시 로그인하거나 가져오면 다시 쓰입니다. 바뀐 선언이 `auth.json`을 허용하지 않으면(`localAuth: false`) 다시 저장해도 쓰이지 않으니, 그 허용을 되돌리거나 선언된 환경 변수나 config 값을 쓰세요. `-T` 없이 terminal에서 `import-key`를 실행하면 붙여넣은 key가 화면에 보입니다. `docker compose run --rm shacs-cli provider status`가 runtime이 쓸 provider와 그 인증이 있는지 알립니다([provider 인증 확인](docs/USAGE.md#provider-인증-확인)). 기본 UID/GID는 nanobot과 같은 `1000:1000`이고, 설정 스크립트나 `SHACS_UID`/`SHACS_GID`로 host 사용자 번호에 맞춰 실행합니다. image의 HOME은 어느 번호로 돌아도 쓸 수 있게 `/tmp`처럼(1777) 두었으므로 HOME 권한을 엄격히 보는 도구는 경고할 수 있습니다. `bwrap`는 공식 image/package에 포함되어 자동 설정된 경우가 아니라면 optional hardening입니다. 로컬 OpenAI 호환 API만 띄우려면 gateway를 중지한 뒤 provider 설정 후 `docker compose up -d shacs-api`와 `curl http://127.0.0.1:8900/health`를 사용하세요.
 
 스킬의 `requires.env` 확인이나 `exec`/subagent 실행에 필요한 환경 변수는 `config.json`의 top-level `env`에 둘 수 있습니다. `tools.exec.env`도 계속 지원하며 같은 key가 있으면 더 구체적인 `tools.exec.env` 값이 우선합니다. MCP 서버별 환경 변수는 기존처럼 `tools.mcpServers.<name>.env`에 별도로 둡니다. MCP `tools.mcpServers.<name>.enabledTools`는 기본값이 빈 배열인 default-deny opt-in입니다. MCP tools/resources/prompts를 노출하려면 `*`, raw capability name, 또는 `mcp_<server>_<kind>_<name>` 형태의 wrapped capability name을 명시하세요. 빈 문자열은 `requires.env`를 만족하지 않습니다. 비밀 값은 `.env.json`에 두고 config에는 `${이름}`을 쓰세요. Secret 값을 넣은 config 파일이나 `.env.json`은 커밋하거나 공유하지 마세요.
 

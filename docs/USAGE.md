@@ -1430,10 +1430,10 @@ shacs-bot provider status
 
 출력 첫 줄은 `provider: ready <provider>` 또는 `provider: missing <provider 또는 none>`입니다. `ready`면 `credential:` 줄에 쓸 자리(환경 변수 이름, `auth.json`의 key나 로그인, credential command, `providers.<id>.apiKey`)가, `missing`이면 `reason:` 줄에 까닭과 `next:` 줄에 할 일이 나옵니다. 두 경우 모두 종료 코드 0이고, config·`.env.json`·`auth.json`을 읽지 못하면 종료 코드 1입니다. 비밀 값은 출력하지 않습니다.
 
-- credential 자리 순서는 runtime과 같습니다: provider에 선언된 환경 변수(기본은 `ANTHROPIC_API_KEY`처럼 provider마다 정해진 이름) → `auth.json` → credential command → `providers.<id>.apiKey`. 환경 변수는 비어 있어도 그 자리를 차지합니다. 그래서 빈 환경 변수가 저장한 key를 가리면 `missing`과 그 이름을 보입니다.
+- credential 자리 순서는 runtime과 같습니다: provider에 선언된 환경 변수(기본은 `ANTHROPIC_API_KEY`처럼 provider마다 정해진 이름) → `auth.json` → credential command → `providers.<id>.apiKey`. 빈 환경 변수(`ANTHROPIC_API_KEY=`)는 없는 것으로 보고 다음 자리로 갑니다(`${이름}` 풀기와 같은 뜻). 공백만인 값은 값이라 그 자리를 차지하고, 그러면 `missing`과 그 이름을 보입니다. 값이 있는 환경 변수는 저장한 key보다 먼저 쓰입니다.
 - 만료된 로그인은 refresh token이 있으면 `ready`(첫 호출에서 갱신)이고, 없으면 `missing`입니다.
 - config와 `auth.json`에 항목이 없는 provider는 환경 변수가 있어도 runtime이 고르지 않으므로 `missing none`입니다.
-- `auth.json`의 로그인이나 key가 그 provider의 credential 선언(`credentialSource`, `apiKeyRef`)을 바꾸기 전에 갱신된 것이면 runtime이 건너뜁니다. 다시 로그인해도 이 표시는 지워지지 않으므로, 이때는 선언을 되돌리라고 안내합니다.
+- 로그인(`provider codex login`, `import-token`), key 가져오기(`import-key`), OAuth 갱신은 그때의 credential 선언(`credentialSource`, `apiKeyRef`)을 `auth.json`에 함께 적습니다. 그 뒤 선언을 바꾸면 runtime이 그 인증을 건너뛰고, `provider status`는 선언을 되돌리거나 다시 로그인·가져오라고 안내합니다. 다시 로그인하거나 가져오면 지금 선언이 적혀 다시 쓰입니다. 바뀐 선언이 `auth.json`을 허용하지 않으면(`localAuth: false`) 다시 저장해도 쓰이지 않으므로, 되돌리기나 환경 변수·config 값만 안내합니다. 선언이 적히기 전에 저장한 인증은 지금 선언의 것으로 봅니다.
 - 끊긴 config migration의 진행 표시가 있으면 판정은 그대로 보이고, 할 일로는 `runtime config-migrate --recover`만 안내합니다. 로그인과 key 가져오기는 그 표시를 보지 않고 파일을 쓰기 때문입니다.
 - 명령을 실행한 process의 환경 변수가 판정에 들어가므로 runtime과 같은 환경에서 실행하세요. Docker에서는 `docker compose run --rm shacs-cli provider status`로 실행하면 gateway와 같은 Compose 환경을 받고, 안내도 `docker compose run --rm shacs-cli …` 꼴로 나옵니다.
 
@@ -1634,7 +1634,38 @@ cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin s
 
 ## Docker Compose
 
-저장소에는 개인 사용 서비스로 로컬 HTTP API와 channel runtime을 실행하기 위한 multi-stage Dockerfile과 `docker-compose.yml`이 포함되어 있습니다. Docker/Compose는 현재 zero-setup containment의 primary path입니다. 사용자가 host에 gVisor, Firecracker, Kata, bubblewrap 같은 별도 sandbox runtime을 직접 설치하는 것을 기본 경로로 요구하지 않습니다. Docker 동작은 upstream nanobot deployment와 같이 먼저 host config directory를 초기화하고, host의 `~/.shacs-bot`을 non-root container user의 `/home/shacs/.shacs-bot`에 mount하는 방식을 따릅니다:
+저장소에는 개인 사용 서비스로 로컬 HTTP API와 channel runtime을 실행하기 위한 multi-stage Dockerfile과 `docker-compose.yml`이 포함되어 있습니다. Docker/Compose는 현재 zero-setup containment의 primary path입니다. 사용자가 host에 gVisor, Firecracker, Kata, bubblewrap 같은 별도 sandbox runtime을 직접 설치하는 것을 기본 경로로 요구하지 않습니다. Compose는 host의 `~/.shacs-bot`을 container의 `/home/shacs/.shacs-bot`에 mount하고, container는 처음부터 일반 사용자로 돕니다.
+
+### 설정 스크립트로 처음 실행
+
+저장소를 받은 뒤 스크립트 하나를 실행하면 봇이 뜹니다(Spec 052). 몇 가지를 묻고, 다시 실행해도 됩니다.
+
+```sh
+./scripts/docker-setup.sh
+```
+
+스크립트가 하는 일은 이 순서입니다.
+
+1. root로 실행하면 멈춥니다(`.env`에 0이 적혀 container가 관리자로 돌게 되므로). `docker`나 Compose v2(`docker compose`)가 없어도 멈춥니다.
+2. `~/.shacs-bot`이 없으면 실행한 사용자로 만듭니다. 있는데 쓸 수 없으면 주인 번호와 고치는 명령(`sudo chown -R "$(id -u):$(id -g)" ~/.shacs-bot`)을 알리고 멈춥니다. 스크립트는 `sudo`를 부르지 않습니다.
+3. 저장소 루트의 `.env`(Compose가 자동으로 읽고 git은 무시합니다)에 `SHACS_UID`·`SHACS_GID`를 실행한 사용자의 번호로 적습니다. 그래서 container가 host 사용자와 같은 번호로 돌고, `~/.shacs-bot`의 파일도 그 사용자 것이 됩니다. `.env`의 다른 줄과 권한은 그대로 두고, 새로 만들면 0600입니다. shell이 다른 `SHACS_UID`·`SHACS_GID`를 내보내고 있으면(Compose는 그 값을 `.env`보다 먼저 씁니다) 지우라고 알립니다.
+4. image를 만들고(`docker compose build`, 처음에는 몇 분 걸립니다) 처음 설정(`onboard`)을 합니다. 끊긴 config migration이 있으면 `onboard`가 멈추고 스크립트도 멈춥니다(`runtime config-migrate --recover`).
+5. `provider status`가 `ready`가 아니면 ChatGPT 계정 로그인을 할지 묻습니다. 고르면 `provider codex login --headless`가 주소와 코드를 보이고, 브라우저에서 그 주소를 열어 코드를 넣으면 끝납니다.
+6. Discord가 연결돼 있지 않으면 연결할지 묻습니다. bot 토큰은 화면에 보이지 않게 받고, 봇이 답할 자기 Discord 사용자 ID(숫자)를 묻습니다. ID를 비우면 봇이 볼 수 있는 누구나 봇을 쓸 수 있고 gateway는 명령 실행·파일 쓰기 도구를 켠 채 돌므로 한 번 더 확인합니다. 토큰은 container 명령의 표준 입력으로만 넘기고 화면, `.env`, 명령줄에 남기지 않습니다.
+7. gateway를 띄웁니다(`docker compose up -d shacs-gateway`). 이미 돌고 있었고 이번에 로그인이나 연결을 했으면 다시 띄웁니다(gateway는 시작할 때 설정을 읽습니다).
+8. 로그 보기(`docker compose logs -f shacs-gateway`)와 상태 확인 명령, 하지 않은 일의 명령을 알립니다.
+
+terminal이 아닌 곳(CI 등)에서 실행하면 아무것도 묻지 않고 1–4, 두 확인, 시작만 한 뒤 남은 일을 명령과 함께 알립니다. API key로 쓰는 provider와 다른 channel은 아래 손 설정을 따릅니다.
+
+- Compose를 스크립트보다 먼저 돌리면 Docker가 없는 `~/.shacs-bot`을 `root` 소유로 만듭니다. 위의 `sudo chown` 명령으로 고친 뒤 다시 실행하세요.
+- 스크립트 없이 쓰다 data 폴더에 쓸 수 없으면, data 폴더에 쓰는 명령(`onboard`, `run`·`serve`·`gateway`·`web`·`ask`·`agent`, `runtime`의 쓰는 명령, provider 로그인·가져오기, `channels connect discord`, `plugins enable`·`disable`, `permissions revoke`·`auto-mode reset`·`setup`, `memory model install`·`index`, `--workspace`·`--data-dir` 없이 준 `tasks`의 recovery action)이 시작할 때 `Permission denied` 대신 폴더 경로, 주인과 실행 번호(UID:GID), 고치는 방법을 알리고 멈춥니다. container 안이면 host에서 `./scripts/docker-setup.sh`를 실행하거나 저장소 `.env`의 `SHACS_UID`·`SHACS_GID`를 폴더 주인으로 맞추라고 알리고, 폴더가 `root` 소유면 Docker가 없는 폴더를 만들 때 그렇게 된다고 함께 알립니다.
+- rootless Docker나 Podman은 사용자 번호가 다르게 이어지므로 스크립트가 적는 번호가 맞지 않을 수 있습니다. 스크립트 없이 아래 손 설정을 따르고, Podman은 `--userns=keep-id` 같은 방법을 쓰세요.
+- Docker Desktop(macOS, Windows)은 mount 폴더의 주인을 번역하므로 번호를 맞추지 않아도 대개 됩니다. 맞춰도 해가 없습니다. Windows는 WSL 안에서 스크립트를 실행하세요.
+- container는 `/etc/passwd`에 없는 번호로 돌 수 있어, 사용자 이름을 찾는 도구는 이름 없이 돌거나 경고할 수 있습니다. image의 HOME(`/home/shacs`)은 어느 번호로 돌아도 쓸 수 있게 `/tmp`처럼(1777) 두었으므로, HOME 권한을 엄격히 보는 도구는 경고할 수 있습니다.
+
+### 스크립트 없이
+
+손으로 할 때의 순서입니다. `SHACS_UID`·`SHACS_GID`를 정하지 않으면 container는 1000:1000으로 돌고, host 사용자 번호가 1000이 아니면 `~/.shacs-bot`에 쓰지 못합니다. 저장소 `.env`에 두 값을 적거나, 쓰는 terminal마다 내보내세요.
 
 ```sh
 export SHACS_UID=$(id -u)
@@ -1656,6 +1687,12 @@ Spec023의 공식 Compose smoke gate는 opt-in으로 실행합니다. 이 명령
 
 ```sh
 ./docs/scripts/spec023-compose-smoke.sh
+```
+
+Spec052 설정 스크립트의 실제 Docker 확인도 opt-in입니다. 지금 commit을 임시 git worktree에 받아 빈 임시 data 폴더로 스크립트를 terminal 없이 돌리고, gateway가 뜨는지, data 폴더 파일이 실행한 사용자 것인지, container가 HOME에 쓸 수 있는지, `runtime inspect`의 official-container 증거와 시작 출력의 provider 줄을 확인한 뒤 만든 것을 지웁니다. image `shacs-bot:local`을 다시 만들므로 `--yes`가 있어야 돌고, UID가 1000이 아닌 일반 사용자로 실행해야 합니다. `shacs-gateway` container가 이미 있으면 멈춥니다:
+
+```sh
+./docs/scripts/spec052-docker-setup-smoke.sh --yes
 ```
 
 로컬 OpenAI 호환 API를 시작하려면 같은 config/workspace를 사용해 별도 API service를 띄웁니다:
@@ -1680,7 +1717,7 @@ docker compose logs -f shacs-gateway
 docker compose down
 ```
 
-Provider secret은 `.env.json`(config에는 `${이름}`), `auth.json` workflow, 또는 Compose가 넘기는 환경 변수로 제공하세요. 다만 공식 Compose는 `ANTHROPIC_API_KEY`·`OPENAI_API_KEY`·`OPENROUTER_API_KEY`·`GROQ_API_KEY`·`DEEPSEEK_API_KEY`·`GEMINI_API_KEY`·`HF_TOKEN`을 host에서 정하지 않으면 빈 값으로 넘깁니다. `${이름}`을 풀 때는 빈 값이 `.env.json`을 가리지 않지만, provider credential은 그 provider의 환경 변수를 `auth.json`과 config보다 먼저 보고 비어 있어도 씁니다. 그래서 그 provider의 key를 `auth.json`이나 config(`.env.json`으로 푼 값 포함)에 두어도 key 없이 요청합니다. Docker에서 이런 API key provider를 쓰려면 `docker-compose.yml` 옆 `.env`에 그 변수의 key를 적거나, ChatGPT 계정 로그인(`docker compose run --rm shacs-cli provider codex login --headless`)을 쓰세요. `provider status`가 이 경우를 `missing`과 변수 이름으로 알립니다. Image 안에 secret을 bake하지 마세요. 기본 container UID/GID는 nanobot과 같은 `1000:1000`이고, 위 예시처럼 `SHACS_UID`/`SHACS_GID`를 지정하면 host user 소유권에 맞춰 실행합니다. Docker containment는 permission mode나 side-effect gate를 없애는 근거가 아니며, unsafe privileged evidence가 보이면 permissive permission mode는 safe fallback으로 내려갑니다. Permission denied가 계속 나면 host에서 `sudo chown -R 1000:1000 ~/.shacs-bot`로 ownership을 맞추거나 Podman의 `--userns=keep-id` 같은 실행 user 전략을 사용하세요.
+Docker에서 API key provider를 쓰는 길은 셋입니다. 저장소 `.env`에 provider 환경 변수(`ANTHROPIC_API_KEY=` 등, `.env.example` 참고)를 적기, config의 provider 항목(`apiKey`에 `${이름}`을 쓰고 값은 `.env.json`), key를 표준 입력으로만 넘기는 `printf '%s\n' "$PROVIDER_KEY" | docker compose run --rm -T shacs-cli provider <id> import-key --token-stdin`입니다. `-T` 없이 terminal에서 `import-key`를 실행하면 입력을 숨기지 않아 붙여넣은 key가 화면에 보입니다. 넣은 뒤 `docker compose run --rm shacs-cli provider status`로 확인하고 gateway를 다시 띄우세요. Provider secret은 `.env.json`(config에는 `${이름}`), `auth.json` workflow, 또는 Compose가 넘기는 환경 변수로 제공하세요. 공식 Compose는 `ANTHROPIC_API_KEY`·`OPENAI_API_KEY`·`OPENROUTER_API_KEY`·`GROQ_API_KEY`·`DEEPSEEK_API_KEY`·`GEMINI_API_KEY`·`HF_TOKEN`을 host에서 정하지 않으면 빈 값으로 넘깁니다. 빈 값은 `${이름}`을 풀 때도 provider credential을 찾을 때도 없는 것으로 보므로, `auth.json`이나 config(`.env.json`으로 푼 값 포함)에 둔 key를 가리지 않습니다. 값이 있는 변수(공백만인 값 포함)는 저장한 key보다 먼저 쓰이므로, 저장한 key를 쓰려면 저장소 `.env`에서 그 변수를 비워 두세요. 가져온 key도 그때의 credential 선언을 함께 기록하므로, 그 뒤 `credentialSource`·`apiKeyRef`를 바꾸면 다시 가져오세요([provider 인증 확인](#provider-인증-확인)). `provider status`가 runtime이 쓸 자리를 알립니다. Image 안에 secret을 bake하지 마세요. 기본 container UID/GID는 nanobot과 같은 `1000:1000`이고, 설정 스크립트나 `SHACS_UID`/`SHACS_GID`로 host 사용자 번호에 맞춰 실행합니다. Docker containment는 permission mode나 side-effect gate를 없애는 근거가 아니며, unsafe privileged evidence가 보이면 permissive permission mode는 safe fallback으로 내려갑니다. data 폴더에 쓸 수 없으면 data 폴더에 쓰는 명령이 시작할 때 폴더 경로, 주인과 실행 번호, 고치는 방법을 알리고 멈춥니다(위 "설정 스크립트로 처음 실행"). container 밖에서는 `chmod`·`chown` 명령을 알리는데, 주인을 바꾸는 명령은 shacs-bot 전용인 기본 data 폴더(`~/.shacs-bot`)에만 알리고 `--config`로 준 다른 폴더나 link에는 알리지 않습니다. mode가 이미 허용하는데도 막히면 ACL이나 SELinux 같은 보안 정책 때문이라고 알립니다(SELinux에서는 Docker volume에 `:z` 옵션). 이 확인은 미리 알리는 것뿐이라, 폴더 안 파일의 주인이 다른 경우처럼 확인 뒤의 쓰기 실패는 원래 오류 그대로입니다. 그럴 때는 `./scripts/docker-setup.sh`를 다시 실행하거나 host에서 `sudo chown -R "$(id -u):$(id -g)" ~/.shacs-bot`으로 주인을 맞춘 뒤 `.env`의 `SHACS_UID`·`SHACS_GID`를 그 번호로 두세요. Podman은 `--userns=keep-id` 같은 실행 user 전략을 사용하세요.
 
 ## 아직 남은 명령 범위
 

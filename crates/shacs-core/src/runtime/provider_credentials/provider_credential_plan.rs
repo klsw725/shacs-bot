@@ -39,7 +39,7 @@ pub struct PlannedProvider {
     pub local_auth_skip: Option<LocalAuthSkip>,
     /// The auth store keeps a declaration fingerprint for this provider that
     /// differs from the current declaration, whatever its entry's kind.
-    /// Logging in or importing again does not clear it.
+    /// Logging in or importing again replaces it with the current one.
     pub fingerprint_differs: bool,
 }
 
@@ -233,9 +233,23 @@ impl ProviderCredentialRuntime {
             })
     }
 
+    /// The fingerprint of the credential declaration the runtime uses for
+    /// `provider_id`; logins and imports save it with the credential (Spec
+    /// 052 PRD 040).
+    pub fn declaration_fingerprint(
+        &self,
+        provider_id: &str,
+        config: &ProviderConfig,
+        spec: &ProviderSpec,
+    ) -> CredentialFingerprint {
+        self.declaration_for(provider_id, config, spec)
+            .fingerprint()
+    }
+
     /// The first place, in runtime order, that supplies the credential:
-    /// override, declared environment variable (present even if empty), auth
-    /// store, credential command, then a non-empty config `apiKey`.
+    /// override, declared environment variable (set and not the empty
+    /// string, as `${NAME}` resolution reads it), auth store, credential
+    /// command, then a non-empty config `apiKey`.
     pub(super) fn choose_slot(
         &self,
         provider_id: &str,
@@ -254,7 +268,10 @@ impl ProviderCredentialRuntime {
                 return choice.at(CredentialSlot::RuntimeOverride, Some(raw));
             }
             if let Some(name) = declaration.environment.as_deref() {
-                if let Some(value) = self.environment_value(name) {
+                if let Some(value) = self
+                    .environment_value(name)
+                    .filter(|value| !value.is_empty())
+                {
                     let slot = CredentialSlot::Environment {
                         name: name.to_owned(),
                         empty: value.trim().is_empty(),

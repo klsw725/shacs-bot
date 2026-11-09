@@ -7,6 +7,8 @@ use super::{
     default_config_path, local_provider_credential_runtime, runtime_containment_inspect, take_path,
     ArgParser, CliCommand, CliError, ProviderCommand, RuntimeContainmentInspect,
 };
+#[cfg(unix)]
+use super::{runtime_containment_classify, RuntimeContainmentEvidence};
 use shacs_config::{
     config_migration_marker_path, load_config_with_env, secrets_migration_marker_path,
     AgentDefaults, ConfigBundle, CredentialFamily, LoadOptions, ProcessEnv,
@@ -118,13 +120,23 @@ fn plan(bundle: &ConfigBundle) -> ProviderCredentialPlan {
 /// How advice writes commands: directly, or through the Compose `shacs-cli`
 /// service when running in the official container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CommandForm {
+pub(super) enum CommandForm {
     Host,
     OfficialContainer,
 }
 
 impl CommandForm {
-    fn of(inspect: &RuntimeContainmentInspect) -> Self {
+    /// The form for this process before any config is read (Spec 052 PRD
+    /// 030); config would only add the exec sandbox name, which the form
+    /// ignores.
+    #[cfg(unix)]
+    pub(super) fn observed() -> Self {
+        Self::of(&runtime_containment_classify(
+            RuntimeContainmentEvidence::detect_process(),
+        ))
+    }
+
+    pub(super) fn of(inspect: &RuntimeContainmentInspect) -> Self {
         let official = inspect.contained == Some(true)
             && inspect
                 .backend
@@ -270,7 +282,12 @@ fn judge(
                 "the sign-in or key for {id} was saved under a different credential setting (providers.{id}.credentialSource or apiKeyRef)"
             ),
             format!(
-                "restore providers.{id}.credentialSource and apiKeyRef to what they were when it was saved"
+                "restore providers.{id}.credentialSource and apiKeyRef to what they were when it was saved, or {}",
+                if provider.local_auth_allowed {
+                    format!("save it again: {}", add_credential(provider, form))
+                } else {
+                    without_auth_store(provider)
+                }
             ),
         ),
         None if !provider.local_auth_allowed => missing(
@@ -278,10 +295,7 @@ fn judge(
             format!(
                 "no credential for {id}, and providers.{id}.credentialSource does not allow the auth store"
             ),
-            match &provider.declared_environment {
-                Some(name) => format!("set {name} or providers.{id}.apiKey"),
-                None => format!("set providers.{id}.apiKey or a credential command"),
-            },
+            without_auth_store(provider),
         ),
         None => missing(
             id,
@@ -296,6 +310,16 @@ fn judge(
             },
             add_credential(provider, form),
         ),
+    }
+}
+
+/// Where a credential can come from when the declaration keeps the auth
+/// store out.
+fn without_auth_store(provider: &PlannedProvider) -> String {
+    let id = provider.provider_id.as_str();
+    match &provider.declared_environment {
+        Some(name) => format!("set {name} or providers.{id}.apiKey"),
+        None => format!("set providers.{id}.apiKey or a credential command"),
     }
 }
 

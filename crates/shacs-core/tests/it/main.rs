@@ -106,5 +106,7 @@ pub mod spec047_memory_search;
 pub mod spec047_model_files;
 #[path = "spec048_auto_mode.rs"]
 pub mod spec048_auto_mode;
+#[path = "spec052_empty_provider_environment.rs"]
+pub mod spec052_empty_provider_environment;
 #[path = "token_estimator_consistency.rs"]
 pub mod token_estimator_consistency;

@@ -1,6 +1,7 @@
-//! Spec 052 PRD 000 acceptance 1–3: the plan picks the provider and the
-//! place the runtime resolves from, writes nothing, and the runtime still
-//! skips a local sign-in that turns stale under the store's lock.
+//! Spec 052 PRD 000 acceptance 1–3 and PRD 040 acceptance 1: the plan picks
+//! the provider and the place the runtime resolves from (an empty declared
+//! environment variable counts as unset), writes nothing, and the runtime
+//! still skips a local sign-in that turns stale under the store's lock.
 
 use super::super::{OAuthCredentialRefresher, ProviderCredentialInvocation};
 use super::{CredentialSlot, LocalAuthSkip, ProviderCredentialPlan};
@@ -306,13 +307,59 @@ fn cases() -> Vec<Case> {
             auth: auth_with(&[("anthropic", ProviderAuth::api_key("auth-key"))]),
             runtime: |runtime| runtime.with_environment("ANTHROPIC_API_KEY", ""),
             provider: Some("anthropic"),
+            slot: Some(CredentialSlot::LocalApiKey { empty: false }),
+            skip: None,
+            fingerprint_differs: false,
+            resolution: resolved("anthropic", CredentialSource::LocalAuthStore, "auth-key"),
+        },
+        Case {
+            name: "config apiKey behind an empty environment variable",
+            requested: "auto",
+            model: DEFAULT_MODEL,
+            providers: config_with(&[("anthropic", Some("literal-key"))]),
+            auth: AuthStore::default(),
+            runtime: |runtime| runtime.with_environment("ANTHROPIC_API_KEY", ""),
+            provider: Some("anthropic"),
+            slot: Some(CredentialSlot::ProviderLiteral),
+            skip: Some(LocalAuthSkip::NoEntry),
+            fingerprint_differs: false,
+            resolution: resolved(
+                "anthropic",
+                CredentialSource::ProviderLiteral,
+                "literal-key",
+            ),
+        },
+        Case {
+            name: "a whitespace environment variable before a saved key",
+            requested: "auto",
+            model: DEFAULT_MODEL,
+            providers: ProvidersConfig::new(),
+            auth: auth_with(&[("anthropic", ProviderAuth::api_key("auth-key"))]),
+            runtime: |runtime| runtime.with_environment("ANTHROPIC_API_KEY", "  "),
+            provider: Some("anthropic"),
             slot: Some(CredentialSlot::Environment {
                 name: "ANTHROPIC_API_KEY".to_owned(),
                 empty: true,
             }),
             skip: None,
             fingerprint_differs: false,
-            resolution: resolved("anthropic", CredentialSource::Environment, ""),
+            resolution: resolved("anthropic", CredentialSource::Environment, "  "),
+        },
+        Case {
+            name: "a set environment variable before a saved key",
+            requested: "auto",
+            model: DEFAULT_MODEL,
+            providers: ProvidersConfig::new(),
+            auth: auth_with(&[("anthropic", ProviderAuth::api_key("auth-key"))]),
+            runtime: |runtime| runtime.with_environment("ANTHROPIC_API_KEY", "env-key"),
+            provider: Some("anthropic"),
+            slot: Some(CredentialSlot::Environment {
+                name: "ANTHROPIC_API_KEY".to_owned(),
+                empty: false,
+            }),
+            skip: None,
+            fingerprint_differs: false,
+            resolution: resolved("anthropic", CredentialSource::Environment, "env-key"),
         },
         Case {
             name: "a set environment variable before a saved key with another fingerprint",

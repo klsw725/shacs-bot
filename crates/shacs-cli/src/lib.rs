@@ -10,6 +10,8 @@ mod automation_outcome;
 mod automation_producer;
 mod automation_worker;
 mod consent_prompt;
+#[cfg(unix)]
+mod data_folder_access;
 mod discord_connect_cli;
 mod discord_outbound;
 mod hidden_input;
@@ -22,6 +24,9 @@ mod provider_status_cli;
 mod review_provider;
 mod run_permission_mode;
 mod runtime_cleanup;
+#[cfg(test)]
+#[path = "saved_credential_tests.rs"]
+mod saved_credential_tests;
 mod setup_material;
 pub mod spec030_cli;
 mod spec030_startup_facts;
@@ -132,7 +137,8 @@ use shacs_projection::{
 };
 use shacs_providers::{
     chat_with_retry, prepare_provider_request, AgentDefaults, LlmResponse, ProviderClient,
-    ProviderError, ProviderEvent, ProviderRegistry, ProviderRetryMode, ResolvedProviderClient,
+    ProviderError, ProviderEvent, ProviderRegistry, ProviderRetryMode, ProviderSpec,
+    ResolvedProviderClient,
 };
 use shacs_redaction::redact_string;
 use shacs_session::durable_child::{
@@ -1946,6 +1952,7 @@ pub struct SessionDeleteReport {
 pub enum CliError {
     Api(ApiError),
     Config(ConfigError),
+    DataFolder(String),
     Io(std::io::Error),
     InvalidArguments(String),
     Provider(ProviderError),
@@ -1960,6 +1967,7 @@ impl fmt::Display for CliError {
         match self {
             Self::Api(error) => write!(formatter, "{error}"),
             Self::Config(error) => write!(formatter, "{error}"),
+            Self::DataFolder(message) => formatter.write_str(message),
             Self::Io(error) => write!(formatter, "CLI I/O failed: {error}"),
             Self::InvalidArguments(error) => write!(formatter, "invalid CLI arguments: {error}"),
             Self::Provider(error) => write!(formatter, "{error}"),
@@ -2834,6 +2842,10 @@ pub fn run_from_env() -> Result<String, CliError> {
 }
 
 pub fn run_command(command: CliCommand) -> Result<String, CliError> {
+    #[cfg(unix)]
+    if let Some(config_path) = data_folder_access::write_target(&command) {
+        data_folder_access::check(&config_path)?;
+    }
     match command {
         CliCommand::Help => Ok(help_text()),
         CliCommand::ManagementHelp(topic) => Ok(management_help_text(topic)),
@@ -3736,8 +3748,17 @@ impl RuntimeContainmentEvidence {
     fn detect(bundle: &ConfigBundle) -> Self {
         let exec_sandbox_backend = non_empty(Some(bundle.config.tools.exec.sandbox.as_str()))
             .then(|| redact_string(bundle.config.tools.exec.sandbox.trim()));
-        let mut evidence = Self {
+        Self {
             exec_sandbox_backend,
+            ..Self::detect_process()
+        }
+    }
+
+    /// The evidence this process shows on its own; config adds only the exec
+    /// sandbox backend.
+    fn detect_process() -> Self {
+        let mut evidence = Self {
+            exec_sandbox_backend: None,
             official_package_marker: official_runtime_package_marker_observed(),
             container_markers: runtime_container_markers(),
             unsafe_markers: runtime_unsafe_markers(),
@@ -9936,6 +9957,15 @@ pub fn import_codex_token(
         "openai_codex".to_owned(),
         ProviderAuth::oauth_access(token, options.account_id.clone()),
     );
+    auth.set_fingerprint(
+        "openai_codex",
+        runtime_declaration_fingerprint(
+            &bundle.config,
+            &context,
+            "openai_codex",
+            &registered_provider_spec("openai_codex")?,
+        ),
+    );
     save_auth_store_to_path(&auth, &auth_path)?;
     save_config_to_path(&bundle.config, &config_path)?;
 
@@ -10100,6 +10130,15 @@ pub fn import_copilot_token(
         GITHUB_COPILOT_PROVIDER_ID.to_owned(),
         ProviderAuth::oauth_access(token, None),
     );
+    auth.set_fingerprint(
+        GITHUB_COPILOT_PROVIDER_ID,
+        runtime_declaration_fingerprint(
+            &bundle.config,
+            &context,
+            GITHUB_COPILOT_PROVIDER_ID,
+            &registered_provider_spec(GITHUB_COPILOT_PROVIDER_ID)?,
+        ),
+    );
     save_auth_store_to_path(&auth, &auth_path)?;
     save_config_to_path(&bundle.config, &config_path)?;
 
@@ -10164,6 +10203,10 @@ pub fn import_provider_api_key(
     let mut auth = load_auth_store(&auth_path)?;
     auth.providers
         .insert(spec.name.to_owned(), ProviderAuth::api_key(token));
+    auth.set_fingerprint(
+        spec.name,
+        runtime_declaration_fingerprint(&bundle.config, &context, spec.name, spec),
+    );
     save_auth_store_to_path(&auth, &auth_path)?;
     save_config_to_path(&bundle.config, &config_path)?;
 
@@ -10172,6 +10215,56 @@ pub fn import_provider_api_key(
         auth_path,
         provider: spec.name.to_owned(),
     })
+}
+
+fn registered_provider_spec(provider_id: &str) -> Result<ProviderSpec, CliError> {
+    let registry = ProviderRegistry::new();
+    registry.find_by_name(provider_id).copied().ok_or_else(|| {
+        CliError::Provider(ProviderError::ProviderNotFound {
+            provider_id: provider_id.to_owned(),
+            suggestions: Vec::new(),
+        })
+    })
+}
+
+/// The fingerprint of `provider_id`'s credential declaration as the runtime
+/// will read `config` (Spec 052 PRD 040): only the declaration fields
+/// (`apiKeyRef`, `credentialSource`), with `${NAME}` resolved as the runtime
+/// resolves config, through the runtime's own declaration function. When
+/// those fields cannot be resolved they are used as written; the runtime
+/// cannot load such a config either.
+fn runtime_declaration_fingerprint(
+    config: &shacs_config::Config,
+    context: &shacs_config::ConfigContext,
+    provider_id: &str,
+    spec: &ProviderSpec,
+) -> shacs_config::CredentialFingerprint {
+    let entry = config.providers.get(provider_id);
+    let declaration_fields = ProviderConfig {
+        api_key_ref: entry.and_then(|entry| entry.api_key_ref.clone()),
+        credential_source: entry.and_then(|entry| entry.credential_source.clone()),
+        ..ProviderConfig::default()
+    };
+    let mut resolved = shacs_config::Config::default();
+    resolved
+        .providers
+        .insert(provider_id.to_owned(), declaration_fields.clone());
+    let fields = shacs_config::resolve_config_with_env_file(
+        &mut resolved,
+        &context.config_path,
+        &ProcessEnv,
+    )
+    .ok()
+    .and_then(|_| resolved.providers.remove(provider_id))
+    .unwrap_or(declaration_fields);
+    ProviderCredentialRuntime::new(
+        context.auth_path(),
+        &context.workspace,
+        shacs_core::runtime::trusted_runtime::Spec030FactStore::new(
+            shacs_core::runtime::trusted_runtime::WorkspaceTrustObservation::Untrusted,
+        ),
+    )
+    .declaration_fingerprint(provider_id, &fields, spec)
 }
 
 fn read_token_source(source: &TokenSource) -> Result<String, CliError> {
@@ -10224,6 +10317,15 @@ fn save_codex_login_token(
             expires: token.expires,
             account_id: token.account_id.clone(),
         },
+    );
+    auth.set_fingerprint(
+        CODEX_PROVIDER_ID,
+        runtime_declaration_fingerprint(
+            &bundle.config,
+            &context,
+            CODEX_PROVIDER_ID,
+            &registered_provider_spec(CODEX_PROVIDER_ID)?,
+        ),
     );
     save_auth_store_to_path(&auth, &auth_path)?;
     save_config_to_path(&bundle.config, &config_path)?;
@@ -23004,6 +23106,10 @@ mod tests {
         assert!(dockerfile.contains("FROM python:3.14-slim-bookworm AS runtime"));
         assert!(dockerfile.contains("USER shacs"));
         assert!(dockerfile.contains("SHACS_RUNTIME_PACKAGE=shacs-bot-official-container"));
+        assert!(
+            dockerfile.contains("chmod 1777 /home/shacs"),
+            "HOME stays writable for any host UID (Spec 052)"
+        );
         Ok(())
     }
 

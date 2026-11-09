@@ -27,7 +27,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 --shell /bin/bash shacs \
     && mkdir -p /home/shacs/.shacs-bot \
-    && chown -R shacs:shacs /home/shacs
+    && chown -R shacs:shacs /home/shacs \
+    && chmod 1777 /home/shacs
 
 COPY --from=node /usr/local/bin/ /usr/local/bin/
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
