@@ -194,9 +194,10 @@ cli onboard || fail 'the first setup (onboard) failed; see the message above'
 interactive=''
 [ -t 0 ] && interactive=1
 login_ok=''
-connect_ok=''
+discord_changed=''
 login_todo=''
 discord_todo=''
+discord_on_todo=''
 
 # 6. The model provider.
 check_provider() {
@@ -235,59 +236,186 @@ case "$provider_out" in
 esac
 
 # 6. Discord.
-connect_discord() {
-  ask_hidden 'Discord bot token (input hidden): ' || return 1
-  token=$secret
-  secret=''
+
+# Reads Discord IDs separated by spaces or commas into `answer`, asking again
+# while it holds anything else. False at end of input.
+ask_ids() {
   while :; do
-    if ! ask 'Your Discord user ID (the bot answers only this user; empty allows anyone): '; then
-      token=''
-      return 1
-    fi
+    ask "$1" || return 1
     case "$answer" in
-      *[![:space:]]*)
-        user_id=$answer
-        break
-        ;;
+      *[!0-9,\ ]*) say 'Use only the digits of each ID, separated by spaces.' ;;
+      *) return 0 ;;
     esac
-    user_id=''
+  done
+}
+
+# Sets `options` to " <flag> <id>" for each ID in `answer`.
+id_options() {
+  options=''
+  old_ifs=$IFS
+  case $- in
+    *f*) glob_was_off=1 ;;
+    *) glob_was_off='' ;;
+  esac
+  IFS=' ,'
+  set -f
+  for id in $answer; do
+    options="$options $1 $id"
+  done
+  [ -n "$glob_was_off" ] || set +f
+  IFS=$old_ifs
+}
+
+# Asks who the bot answers, which channels it reads and when it answers in
+# server channels, each after saying what it does, and leaves the matching
+# `channels connect discord` options in `discord_options`. False at end of
+# input.
+ask_discord_settings() {
+  say ''
+  say 'The bot answers only the people, channels and messages you choose here.'
+  say ''
+  say 'Who can talk to the bot: the bot answers only the Discord users listed here.'
+  say '  To copy a user ID, turn on Developer Mode (User Settings > Advanced), then right-click the user and choose Copy User ID.'
+  while :; do
+    ask_ids 'Discord user IDs, separated by spaces (empty allows anyone): ' || return 1
+    id_options --allow-from
+    user_options=$options
+    [ -n "$user_options" ] && break
     say 'Without a user ID, anyone who can see the bot can use it, and the gateway runs with command and file tools on.'
-    if ! ask 'Continue without a user ID? [y/N]: '; then
-      token=''
-      return 1
-    fi
+    ask 'Continue without a user ID? [y/N]: ' || return 1
     if is_yes "$answer"; then
+      user_options=' --allow-anyone'
       break
     fi
   done
-  if [ -n "$user_id" ]; then
-    printf '%s\n' "$token" | cli channels connect discord --token-stdin --allow-from "$user_id"
-  else
-    printf '%s\n' "$token" | cli channels connect discord --token-stdin
+  say ''
+  say 'Which channels the bot reads: empty means every channel the bot can see, plus direct messages.'
+  say '  With channel IDs (right-click a channel > Copy Channel ID) it reads only those channels and their threads, and a direct message only if you list its channel ID.'
+  ask_ids 'Discord channel IDs, separated by spaces (empty for all): ' || return 1
+  id_options --allow-channel
+  channel_options=$options
+  [ -n "$channel_options" ] || channel_options=' --all-channels'
+  while :; do
+    say ''
+    say 'When the bot answers in server channels (this choice does not apply to direct messages):'
+    say '  1) Only when someone mentions it (@the bot)'
+    say '  2) Every message in the channels it reads'
+    ask 'Choose 1 or 2 [1]: ' || return 1
+    case "$answer" in
+      '' | 1) group_policy=mention ;;
+      2) group_policy=open ;;
+      *) continue ;;
+    esac
+    if [ "$group_policy" = open ] && [ "$user_options" = ' --allow-anyone' ]; then
+      say 'With no user IDs and every message, anyone in those channels can make the bot run commands and change files without mentioning it.'
+      ask 'Answer every message anyway? [y/N]: ' || return 1
+      is_yes "$answer" || continue
+    fi
+    break
+  done
+  discord_options="$user_options$channel_options --group-policy $group_policy"
+}
+
+# Shows the output of a Discord command that just ran with status $1, and
+# sets `discord_changed` when it succeeded and changed something.
+finish_discord_change() {
+  [ -z "$discord_result" ] || printf '%s\n' "$discord_result"
+  if [ "$1" -ne 0 ]; then
+    say 'The Discord change did not finish.'
+    return 1
   fi
-  connect_status=$?
+  printf '%s\n' "$discord_result" | grep -qx unchanged || discord_changed=1
+  return 0
+}
+
+# `discord_options` holds only fixed option names and digit-only IDs, so it
+# is expanded unquoted on purpose: one word per option.
+connect_discord() {
+  if ! ask_hidden 'Discord bot token (input hidden): '; then
+    say 'The Discord connection did not finish.'
+    return 1
+  fi
+  token=$secret
+  secret=''
+  if ! ask_discord_settings; then
+    token=''
+    say 'The Discord connection did not finish.'
+    return 1
+  fi
+  discord_result=$(printf '%s\n' "$token" | cli channels connect discord --token-stdin $discord_options)
+  discord_status=$?
   token=''
-  return "$connect_status"
+  finish_discord_change "$discord_status"
+}
+
+change_discord_settings() {
+  ask_discord_settings || return 1
+  discord_result=$(cli channels connect discord $discord_options)
+  finish_discord_change $?
+}
+
+turn_discord_on() {
+  ask 'Change these settings too? [y/N]: ' || return 1
+  if is_yes "$answer"; then
+    ask_discord_settings || return 1
+  fi
+  discord_result=$(cli channels connect discord --enable $discord_options)
+  finish_discord_change $?
 }
 
 discord_out=$(cli channels connect discord --status) || {
   printf '%s\n' "$discord_out"
   fail 'channels connect discord --status failed'
 }
+discord_settings=$(printf '%s\n' "$discord_out" | grep -E '^(users|channels|server channels): ')
+discord_options=''
 case "$discord_out" in
-  'discord: connected'*) ;;
-  *)
-    printf '%s\n' "$discord_out"
-    discord_todo=1
+  'discord: connected'*)
     if [ -n "$interactive" ]; then
       say ''
-      ask 'Connect a Discord bot now? [y/N]: ' || answer=''
-      if is_yes "$answer"; then
-        if connect_discord; then
-          connect_ok=1
+      say 'Discord is connected:'
+      printf '%s\n' "$discord_settings"
+      while :; do
+        say '  1) Keep these settings'
+        say '  2) Change them'
+        say '  3) Turn Discord off (the token stays saved)'
+        ask 'Choose 1, 2 or 3 [1]: ' || break
+        case "$answer" in
+          '' | 1) break ;;
+          2)
+            change_discord_settings
+            break
+            ;;
+          3)
+            discord_result=$(cli channels connect discord --disable)
+            finish_discord_change $?
+            break
+            ;;
+        esac
+      done
+    fi
+    ;;
+  *)
+    if printf '%s\n' "$discord_out" | grep -q '^token: '; then
+      discord_on_todo=1
+      if [ -n "$interactive" ]; then
+        say ''
+        say 'Discord is set up but turned off:'
+        printf '%s\n' "$discord_settings"
+        if ask 'Turn Discord on? [y/N]: ' && is_yes "$answer" && turn_discord_on; then
+          discord_on_todo=''
+        fi
+      else
+        printf '%s\n' "$discord_out"
+      fi
+    else
+      printf '%s\n' "$discord_out"
+      discord_todo=1
+      if [ -n "$interactive" ]; then
+        say ''
+        ask 'Connect a Discord bot now? [y/N]: ' || answer=''
+        if is_yes "$answer" && connect_discord; then
           discord_todo=''
-        else
-          say 'The Discord connection did not finish.'
         fi
       fi
     fi
@@ -302,7 +430,7 @@ if printf '%s\n' "$running" | grep -qx shacs-gateway; then
 fi
 say 'Starting the gateway...'
 docker compose up -d shacs-gateway || fail 'docker compose up -d shacs-gateway failed'
-if [ -n "$was_running" ] && { [ -n "$login_ok" ] || [ -n "$connect_ok" ]; }; then
+if [ -n "$was_running" ] && { [ -n "$login_ok" ] || [ -n "$discord_changed" ]; }; then
   docker compose restart shacs-gateway || fail 'docker compose restart shacs-gateway failed'
 fi
 
@@ -312,13 +440,16 @@ say 'The gateway is running.'
 say '  Logs:            docker compose logs -f shacs-gateway'
 say '  Provider status: docker compose run --rm shacs-cli provider status'
 say '  Runtime status:  docker compose run --rm shacs-cli runtime inspect'
-if [ -n "$login_todo" ] || [ -n "$discord_todo" ]; then
+if [ -n "$login_todo" ] || [ -n "$discord_todo" ] || [ -n "$discord_on_todo" ]; then
   say 'Still to do (then restart the gateway: docker compose restart shacs-gateway):'
   if [ -n "$login_todo" ]; then
     say '  Sign in:         docker compose run --rm shacs-cli provider codex login --headless'
   fi
   if [ -n "$discord_todo" ]; then
     say '  Connect Discord: docker compose run --rm shacs-cli channels connect discord --token-stdin --allow-from YOUR_DISCORD_USER_ID'
+  fi
+  if [ -n "$discord_on_todo" ]; then
+    say '  Turn Discord on: docker compose run --rm shacs-cli channels connect discord --enable'
   fi
   say '  API key providers and other channels: see docs/USAGE.md (Docker Compose)'
 fi

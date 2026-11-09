@@ -1,8 +1,8 @@
 # 052. Docker 처음 실행 준비 구현 명세
 
-Status: Complete (Scoped)
+Status: Planned revision (implemented baseline)
 
-Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실행, official-container 증거), 029 runtime 시작과 시작 출력, 003 provider 고르기(`ProviderRegistry`), 010 provider 인증 명령(`provider codex login`, `provider <id> import-key`)과 비밀 다루기, 030 credential 해석(자리 순서, 인증 저장소 읽기, fingerprint, 갱신), 031 config 읽기·쓰기와 credential 선언 저장, config migration marker, 048 `.env.json` 형식·`${이름}` 해석 순서·이름 규칙·충돌 규칙·바뀜 확인 쓰기·비밀 옮기기 marker
+Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실행, official-container 증거), 012 Discord worker가 config를 읽는 법(`discord_runtime_config`)과 final-only 전송, 029 runtime 시작과 시작 출력, 003 provider 고르기(`ProviderRegistry`), 010 provider 인증 명령(`provider codex login`, `provider <id> import-key`)과 비밀 다루기, 030 credential 해석(자리 순서, 인증 저장소 읽기, fingerprint, 갱신), 031 config 읽기·쓰기와 credential 선언 저장, config migration marker, 048 `.env.json` 형식·`${이름}` 해석 순서·이름 규칙·충돌 규칙·바뀜 확인 쓰기·비밀 옮기기 marker
 
 ## 목적과 완료 경계
 
@@ -33,6 +33,7 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 - `provider status`가 runtime이 쓸 provider와, 그 인증이 runtime이 실제로 쓸 자리에 있는지 알린다. Codex 로그인도 인증으로 본다.
 - Docker가 넘기는 빈 provider 환경 변수는 인증 저장소와 config(`.env.json` 포함)에 둔 key를 가리지 않는다. 저장할 때와 달라진 선언 때문에 건너뛰던 인증도 다시 로그인하거나 key를 다시 가져오면 다시 쓰인다.
 - Discord 토큰은 CLI 명령 하나로 `.env.json`에 들어가고 `config.json`에는 `${이름}`만 남는다. Docker 밖에서도 같은 명령을 쓴다.
+- Discord를 연결할 때 스크립트가 봇과 말할 수 있는 사람, 봇이 읽는 채널, 서버 채널에서 답하는 때를 하나씩, 각 설정이 무엇을 하는지 설명하며 묻는다. 이미 연결돼 있으면 지금 설정을 보여 주고, 토큰을 다시 넣지 않고 바꾸거나 Discord를 끄고 다시 켤 수 있게 한다.
 - provider 인증이 없는 gateway는 지금처럼 꺼지지 않고, 할 일을 시작 출력에 알린다.
 
 이 스펙은 다른 스펙의 구현을 기다리지 않는다. 049가 공식 image에 브라우저를 더해도 이 스펙의 계약은 바뀌지 않는다.
@@ -108,7 +109,40 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
    - 이 규칙은 소유 범위 1의 자리 찾기 함수 하나에 둔다. 그래서 runtime, `provider status`, gateway 안내가 같이 바뀐다.
    - 새 인증을 인증 저장소에 저장하는 provider 인증 명령(`provider codex login`, `provider codex import-token`, `provider copilot import-token`, `provider <id> import-key`)은 그 provider의 선언 fingerprint를 저장할 때의 지금 선언(runtime이 쓰는 같은 선언 함수로 정한 것)의 것으로 적는다. 남아 있던 다른 fingerprint도 이 값으로 바뀐다. 그래서 다시 로그인하거나 가져오면 새 인증이 쓰이고, 그 뒤 선언이 바뀌면 지금처럼 stale로 건너뛴다. 다른 provider의 fingerprint와 항목은 그대로다.
    - `provider status`는 fingerprint가 달라 건너뛴 인증에 대해 선언을 되돌리거나 다시 로그인·가져오라고 알린다.
-   - 문서: README·USAGE·`.env.example`의 빈 환경 변수 경고를 고친 동작으로 바꾼다. 비어 있지 않은 provider 환경 변수는 여전히 저장한 key보다 먼저 쓰인다는 것과, 가져온 key도 이제 선언 fingerprint를 가진다는 것을 적는다.
+    - 문서: README·USAGE·`.env.example`의 빈 환경 변수 경고를 고친 동작으로 바꾼다. 비어 있지 않은 provider 환경 변수는 여전히 저장한 key보다 먼저 쓰인다는 것과, 가져온 key도 이제 선언 fingerprint를 가진다는 것을 적는다.
+10. **Discord 설정 질문(사용자 결정 2026-11-09, 새 스펙 대신 052에 더한다):**
+    - 대상 칸은 `enabled`, `allowFrom`, `allowChannels`, `groupPolicy`다. 뜻은 012 runtime이 읽는 그대로다(`discord_runtime_config`와 inbound 거르기).
+      - `enabled`: `true`면 토큰이 있을 때 gateway가 시작하며 Discord worker를 띄운다. `false`면 저장한 토큰과 설정은 그대로 두고 worker를 띄우지 않는다.
+      - `allowFrom`: 봇이 답하는 Discord 사용자 ID 목록. 비거나 `*`가 있으면 누구나다.
+      - `allowChannels`: 봇이 읽는 채널 ID 목록. 비거나 `*`가 있으면 봇이 볼 수 있는 모든 채널이다. 목록이 있으면 그 채널과 부모가 그 채널인 스레드만 읽는다. DM도 채널 하나라서 목록에 그 DM 채널 ID가 없으면 DM은 받지 않는다.
+      - `groupPolicy`: 서버 채널에서 `mention`(기본값)이면 봇을 멘션한 메시지에만, `open`이면 모든 메시지에 답한다. DM에는 적용되지 않는다. 이 거르기는 Gateway 연결에만 있다. 예전 꼴의 채널 목록(`allowChannels`·`allow_channels` 칸 없이 `channelIds` 등에 채널이 있음)이면 runtime은 그 채널을 REST로 돌아보며 읽고(`RestPolling`), 그때는 `groupPolicy`를 적용하지 않고 모든 메시지에 답한다.
+      - 묻지 않는 칸: `streaming`과 `replyInThread`. 012 계약대로 Discord는 다 쓴 답을 한 번에 보내고(쓰는 동안 입력 중 표시만 보인다) runtime은 `streaming` 값을 쓰지 않으며, `replyInThread`는 읽지 않는다. 지금 효과가 없다고 문서에 적는다.
+    - **`channels connect discord`의 옵션(소유 범위 4에 더함):**
+      - 사람: `--allow-from <id>`(여러 번, 지금과 같음)는 `allowFrom`을 준 목록(준 순서, 앞뒤 공백 뺌, 같은 값은 한 번)으로 바꾼다. `--allow-anyone`은 `allowFrom`을 `[]`로 바꾼다. 둘은 같이 쓰면 인자 오류다.
+      - 채널: `--allow-channel <id>`(여러 번)는 `allowChannels`를 준 목록으로 바꾼다(같은 규칙). `--all-channels`는 `allowChannels`를 `[]`로 바꾼다. 둘은 같이 쓰면 인자 오류다.
+      - 답하는 때: `--group-policy mention|open`은 `groupPolicy`를 그 값으로 바꾼다. 다른 값은 인자 오류다. 이 호출을 적용한 뒤의 config를 runtime이 REST로 돌아보며 읽으면(위 `groupPolicy`의 예외) 그 값이 쓰이지 않으므로, 아무것도 바꾸지 않고 멈추고 채널을 `--allow-channel`로 다시 정하거나 예전 칸을 손으로 `allowChannels`로 옮기라고 알린다.
+      - 켜고 끄기: `--enable`은 `enabled`를 `true`로, `--disable`은 `false`로 바꾼다. 둘을 같이 쓰거나 `--disable`을 `--token-stdin`과 같이 쓰면 인자 오류다. `--token-stdin`으로 연결하면 지금처럼 `enabled`가 `true`가 된다.
+      - ID 값은 앞뒤 공백을 빼고 비지 않아야 한다(지금 `--allow-from`과 같다). CLI는 그 밖의 글자를 거르지 않는다(`*`는 runtime에서 누구나·모든 채널이다).
+      - 주지 않은 설정의 칸과 다른 칸은 그대로다. 바꿀 것이 없으면 아무 파일도 쓰지 않는다.
+      - **토큰 없이 설정만 바꾸기:** `--token-stdin` 없이 위 옵션(`--allow-from`, `--allow-anyone`, `--allow-channel`, `--all-channels`, `--group-policy`, `--enable`, `--disable`)을 하나 이상 주면, 토큰이 이미 있을 때만 config의 그 칸을 바꾼다. 토큰이 있다는 것은 `--status`의 판정에서 `enabled`만 빼고 나머지(토큰 칸이 runtime처럼 풀리고 runtime이 토큰을 읽음)를 채운다는 뜻이다. 그래서 끈 뒤에도 토큰 없이 다시 켤 수 있다. 이 쓰임은 새 토큰을 묻거나 stdin에서 읽지 않고(저장된 토큰 칸은 토큰이 있는지 정하려고 메모리에서만 풀고 출력하지 않는다) `.env.json`을 쓰지 않으며, migration marker가 있으면 멈추고(소유 범위 4), config는 처음 읽은 byte와 같을 때만 쓴다. 토큰이 없으면 아무것도 바꾸지 않고 멈추고 `--token-stdin`으로 연결하라고 알린다. `--token-stdin`도 이 옵션도 `--status`도 없으면 인자 오류이고, `--replace`는 `--token-stdin`과만 쓴다. 출력은 연결과 같은 꼴(바꾼 칸의 `updated: config …` 또는 `unchanged`, 결과 사람 목록이 누구나면 경고)이고 첫 줄만 `discord: settings updated`다.
+      - **먼저 읽히는 다른 칸:** 채널을 바꾸는데 `channelIds`나 `allowedChannelIds`가 있거나(runtime은 `allowChannels`보다 이 칸을 먼저 읽는다), `defaultChannelId`·`default_channel_id`·`channelId`·`channel_id` 중 하나가 비지 않은 글이면(runtime은 그 채널을 목록에 더한다) 아무것도 바꾸지 않고 멈추고 그 칸을 손으로 지우라고 알린다. `allowChannels`보다 뒤에 읽는 `channel_ids`·`allowed_channel_ids`·`allow_channels`는 `allowChannels`가 있으면 읽히지 않으므로 멈추지 않는다. 사람과 답하는 때는 runtime이 쓰는 이름(`allowFrom`, `groupPolicy`)을 먼저 읽으므로 이런 경우가 없다.
+    - **`--status`의 설정 줄(정확한 꼴):** 토큰이 있으면(연결됨, 또는 `enabled`가 `true`가 아니라서만 연결되지 않음) 첫 줄과 `reason:` 줄(연결되지 않았을 때) 뒤에 아래 줄을 이 순서로 보인다. 값은 runtime의 읽기(`discord_runtime_config`)에서 온다. 사용자·채널 ID는 비밀 값이 아니다.
+      - `token: channels.discord.<칸>`
+      - `users: anyone` 또는 `users: <id>, <id>`(목록이 비거나 `*`가 있으면 `anyone`)
+      - `channels: all` 또는 `channels: <id>, <id>`(runtime이 모든 채널을 읽으면 `all`: 목록이 비었거나 Gateway에서 목록에 `*`가 있을 때. REST로 돌아보면 `*`도 채널 ID 하나로 돌아보므로 적힌 목록 그대로)
+      - `server channels: when mentioned` 또는 `server channels: every message`. runtime이 REST로 돌아보며 읽으면 `groupPolicy`와 상관없이 `server channels: every message (channelIds polling does not apply groupPolicy)`.
+      첫 줄(`discord: connected`·`discord: not connected`)과 `reason:` 줄의 뜻은 지금과 같다. 토큰이 없으면 지금과 같은 두 줄이다.
+    - **설정 스크립트(terminal일 때만, 아니면 지금처럼 묻지 않고 할 일만 알린다):** 각 질문 앞에 그 설정이 하는 일을 영어로 설명한다. ID 질문은 공백이나 쉼표로 나눈 숫자 ID를 받고, 숫자가 아닌 값이 있으면 그 사실을 알리고 다시 묻는다.
+      - **토큰이 없을 때:** 지금처럼 연결할지 묻고, 토큰 다음에 세 질문을 한다.
+        1. 봇과 말할 수 있는 사람: 봇은 이 목록의 사람에게만 답한다. ID를 복사하는 법(Discord 개발자 모드)을 알린다. 비우면 누구나이고, 지금처럼 경고한 뒤 다시 확인한다(확인하지 않으면 다시 묻는다).
+        2. 봇이 읽는 채널: 비우면 봇이 볼 수 있는 모든 채널과 DM이다. 채널 ID를 주면 그 채널과 그 안의 스레드만 읽고, 목록에 없는 DM은 받지 않는다(DM 채널 ID를 목록에 넣으면 그 DM은 읽는다).
+        3. 서버 채널에서 답하는 때: `1) Only when mentioned`(기본) 또는 `2) Every message`. 이 설정은 DM에는 적용되지 않는다(DM도 사람·채널 거르기는 받는다).
+        - 1을 비워 누구나이고 3에서 모든 메시지를 고르면, 그 채널의 누구나 멘션 없이 봇이 명령 실행·파일 쓰기 도구를 쓰게 할 수 있다고 알리고 다시 확인한다. 확인하지 않으면 3을 다시 묻는다. 확인하기 전에는 연결 명령을 부르지 않는다.
+        - 그다음 토큰을 stdin으로 넘겨 `channels connect discord --token-stdin`에 세 설정의 옵션(`--allow-from`…`|--allow-anyone`, `--allow-channel`…`|--all-channels`, `--group-policy`)을 붙여 부른다.
+      - **토큰이 있고 연결됨:** `--status`의 세 설정 줄을 보이고 `1) Keep these settings`(기본), `2) Change them`, `3) Turn Discord off`를 묻는다. 1은 아무 명령도 부르지 않는다. 2는 위 세 질문(토큰 없이, 같은 확인) 뒤 토큰 없는 설정 바꾸기로, 3은 `--disable`로 넘긴다.
+      - **토큰이 있고 꺼져 있음:** 세 설정 줄을 보이고 켤지 묻는다(기본은 켜지 않음). 켜면 설정도 바꿀지 묻고(바꾸면 세 질문), `--enable`과 설정 옵션으로 넘긴다.
+      - 연결·설정 바꾸기·켜기·끄기 명령이 성공하고 그 출력에 `unchanged`가 없으며 gateway가 돌고 있었으면 다시 띄운다(gateway는 시작할 때 config를 읽는다). 이 명령이 실패하면 그 출력을 보이고 다음으로 간다.
+    - **문서:** USAGE의 Discord 연결 절(새 옵션, 설정만 바꾸기, 켜고 끄기, `--status`의 설정 줄, 멈추는 다른 칸), 설정 스크립트 절, Discord channel 칸 설명(각 칸의 뜻, `streaming`·`replyInThread`는 효과 없음). README 채널·Docker 문단은 한 문장.
 
 ## 기존 owner와의 경계
 
@@ -122,6 +156,7 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 | 031 | config 읽기·쓰기, credential 선언 저장, config migration marker | config schema, migration |
 | 048 | `.env.json` 형식, `${이름}` 해석 순서, 이름 규칙, 충돌 규칙, 바뀜 확인 쓰기(`write_config_value_if_unchanged`), 비밀 옮기기 marker | 아래 "앞선 스펙에서 바꾸는 것" 말고 그 규칙 |
 | 049 | 없음 | 브라우저 image 구성. 049는 브라우저 임시 폴더를 이미 HOME이 아닌 `/tmp`에 둔다. 052는 049를 기다리지 않는다 |
+| 012 | Discord worker가 config를 읽는 법(`discord_runtime_config`: 보낸 사람, 채널, `groupPolicy`)과 final-only 전송 | Discord worker 동작과 그 칸의 뜻(052는 칸을 쓰기만 한다) |
 
 ## 앞선 스펙에서 바꾸는 것
 
@@ -198,14 +233,26 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
    - 쓸 수 없는 임시 data 폴더에서 소유 범위 7의 명령이 폴더 경로, 주인과 실행 UID:GID, 고치는 방법을 담은 글로 실패하고, 원시 `Permission denied (os error 13)`만 남기지 않는다. data 폴더가 없고 그 부모에 쓸 수 없을 때도 같다.
    - official-container 증거가 있을 때와 없을 때 고치는 방법이 다르다. 주인이 `root`인 경우의 글은 주인 번호를 넣어 만든 시험으로 확인한다.
    - 쓸 수 있는 폴더에서는 지금과 같이 돈다.
-9. 문서가 소유 범위 8과 맞다(소유 범위 9의 문서 포함).
+9. 문서가 소유 범위 8과 맞다(소유 범위 9·10의 문서 포함).
 10. fmt, workspace clippy `-D warnings`, 변경한 package 테스트가 통과한다. 전체 workspace 테스트는 사용자 승인을 받아 실행한다.
 11. 빈 환경 변수와 다시 저장한 인증(Cargo):
    - 수용 조건 1의 같은 경우 표에서, 인증 저장소의 Anthropic key와 빈 `ANTHROPIC_API_KEY`는 `ready`이고 runtime이 저장한 key를 쓴다. config `apiKey`(`.env.json`으로 푼 값)와 빈 환경 변수도 `ready`이고 runtime이 그 값을 쓴다. 비어 있지 않은 환경 변수는 지금처럼 저장한 key보다 먼저 쓰이고, 공백만인 값은 지금처럼 그 자리이며 `provider status`가 비었다고 알린다. 나머지 경우의 결과는 수용 조건 1과 같다.
    - binary에서 빈 `ANTHROPIC_API_KEY`와 `import-key`로 저장한 key가 있으면 `provider status`가 `ready`이고, 같은 상태로 띄운 gateway 시작 출력에 `provider: missing` 줄이 없다.
    - 네트워크 없는 로컬 가짜 Anthropic 서버로 보낸 runtime 요청에, 빈 `ANTHROPIC_API_KEY`가 있어도 저장한 key가 `x-api-key`로 실린다("확인한 것"의 재현).
    - `provider codex login`의 저장(시험 token), `provider codex import-token`, `provider copilot import-token`, `provider <id> import-key`가 그 provider의 fingerprint를 그때 선언의 것으로 적고, 다른 provider의 fingerprint와 항목은 그대로다. fingerprint가 다른 인증만 있던 provider를 다시 가져오면 `provider status`가 `ready`이고 runtime이 새 인증을 쓴다. 그 뒤 선언을 바꾸면 그 인증은 다시 stale로 건너뛴다.
-   - fingerprint가 달라 건너뛴 인증의 `provider status` 안내에 선언 되돌리기와 다시 로그인·가져오기가 함께 있다.
+       - fingerprint가 달라 건너뛴 인증의 `provider status` 안내에 선언 되돌리기와 다시 로그인·가져오기가 함께 있다.
+12. Discord 설정 질문(Cargo):
+    - `channels connect discord`의 옵션: 각 옵션이 config의 그 칸만 바꾸고(`--allow-anyone`·`--all-channels`로 되돌리기, `--enable`·`--disable` 포함), 주지 않은 설정과 다른 칸은 그대로다. 바꾼 뒤 runtime의 Discord 설정 읽기(`discord_runtime_config`)와 worker 조건이 그 값을 낸다. 같은 입력으로 다시 실행하면 파일이 바뀌지 않고 `unchanged`다. 같이 쓸 수 없는 옵션과 옵션 없는 호출, 잘못된 `--group-policy` 값은 인자 오류이고 파일이 그대로다.
+    - 토큰 없이 설정만 바꾸기: 연결된 상태와 끈 상태 모두에서 새 토큰을 묻거나 stdin에서 읽지 않고 `.env.json`이 byte 단위로 같으며 config의 그 칸만 바뀐다. 끈 상태에서 `--enable`로 다시 켜진다. 토큰이 없는 상태에서는 멈추고 두 파일이 byte 단위로 같다. migration marker가 있으면 멈추고 두 파일이 같다. 명령이 읽은 뒤 config가 바뀌면(시험 hook) 쓰지 않고 다시 실행하라고 알린다.
+    - 먼저 읽히는 다른 칸 표: `channelIds`, `allowedChannelIds`가 있거나 `defaultChannelId`·`default_channel_id`·`channelId`·`channel_id`가 비지 않으면 채널을 바꿀 때 멈추고 두 파일이 byte 단위로 같다. `channel_ids`·`allowed_channel_ids`·`allow_channels`만 있으면 멈추지 않고 runtime이 쓴 `allowChannels`를 읽는다. 채널을 바꾸지 않는 호출은 이 칸들 때문에 멈추지 않는다.
+    - 예전 꼴의 채널 목록(`allowChannels`·`allow_channels` 칸 없이 `channelIds`나 `channel_ids` 등에 채널이 있어 runtime이 REST로 돌아봄): `--group-policy`만 주면 멈추고 두 파일이 byte 단위로 같다. `--allow-from`·`--enable` 같은 다른 옵션은 바꾼다. `channel_ids`만 있을 때 `--allow-channel`과 `--group-policy`를 같이 주면 `allowChannels`가 생겨 Gateway로 읽게 되므로 바꾼다.
+    - `--status`: 연결된 상태, 끈 상태(토큰 있음), 토큰 없는 상태, REST로 돌아보는 상태 각각에서 줄이 범위 10의 꼴과 같다(`users`·`channels`의 `anyone`·`all`과 목록, `server channels`의 세 꼴). 아무것도 쓰지 않는다.
+    - 스크립트(가짜 `docker`, pty):
+      - 토큰이 없을 때: 토큰 다음에 세 질문이 각각 설명과 함께 나오고, 답이 `channels connect discord --token-stdin`의 옵션으로 간다(여러 ID, 비운 채널은 `--all-channels`, 비운 사람은 확인 뒤 `--allow-anyone`). 숫자가 아닌 ID는 다시 묻는다. 누구나·모든 메시지 조합을 확인하지 않으면 답하는 때를 다시 묻고, 그 사이 연결 명령을 부르지 않는다.
+      - 연결된 상태: 세 설정 줄이 보인다. `Keep`은 명령을 부르지 않고 restart도 없다. `Change`는 토큰을 묻지 않고 설정 옵션만 넘긴다. `Turn Discord off`는 `--disable`을 넘긴다.
+      - 끈 상태: 켤지 묻고, 켜면 `--enable`(설정을 바꾸면 그 옵션도)을 넘긴다. 켜지 않으면 명령을 부르지 않는다.
+      - gateway가 돌고 있었고 명령이 성공했으며 출력에 `unchanged`가 없을 때만 restart한다. 출력이 `unchanged`이거나 명령이 실패했으면 restart하지 않는다.
+      - terminal이 아니면 묻지 않고 지금과 같은 명령 순서다.
 
 위 조건은 052의 단독 종료 기준이다. 수용 조건 6은 사용자가 돌리지 않기로 결정할 수 있다. 그러면 그 PRD의 종료 확인에 결정과 이유, 확인하지 못한 것을 적고 scoped로 닫는다(048 수용 조건 10과 같다).
 
@@ -227,6 +274,9 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 - rootless Docker나 Podman은 사용자 번호가 다르게 이어진다. 그곳에서는 스크립트가 적는 번호가 맞지 않으므로 스크립트 없이 손 설정을 따르고, Podman `--userns=keep-id` 같은 방법을 문서로 안내한다.
 - Docker Desktop(macOS, Windows)은 mount 폴더의 주인을 번역하므로 번호를 맞추지 않아도 대개 된다. 맞춰도 해가 없다. Windows는 WSL 안에서 스크립트를 돌린다.
 - 게시된 image가 없어 스크립트가 직접 빌드한다. 처음에는 몇 분 걸리고 메모리를 쓴다.
+- Discord의 `streaming`과 `replyInThread`는 지금 효과가 없다(소유 범위 10). 답을 쓰는 동안 조금씩 보여 주기나 스레드를 새로 열어 답하기는 이 스펙의 범위가 아니다.
+- runtime이 먼저 읽는 다른 이름의 Discord 칸(`channelIds` 등)이 있으면 스크립트와 `channels connect discord`는 그 설정을 바꾸지 않고 멈춘다. 사용자가 그 칸을 손으로 지워야 한다.
+- 스크립트는 사람을 비우고 모든 메시지에 답하는 조합도 다시 확인한 뒤 받아들인다. 그 서버의 누구나 봇을 부를 수 있게 된다.
 
 ## 실행 PRD와 독립 종료
 
@@ -239,10 +289,13 @@ PRD 문서는 구현을 시작할 때 쓴다. 각 PRD는 앞 번호의 닫힌 �
 | 020 처음 설정 스크립트와 컨테이너 HOME | 소유 범위 5, 6과 Docker 설명 문서 | 000, 010 | 수용 조건 5, 6, 7, 10 |
 | 030 권한 오류 | 소유 범위 7과 그 문서 | 020(고치는 방법에 스크립트를 적는다) | 수용 조건 8, 10 |
 | 040 빈 provider 환경 변수와 다시 저장한 인증 | 소유 범위 9와 그 문서 | 000(자리 찾기 함수와 `provider status`) | 수용 조건 11, 10 |
+| 050 Discord 설정 질문 | 소유 범위 10과 그 문서 | 010(`channels connect discord`와 `--status`), 020(설정 스크립트의 Discord 단계) | 수용 조건 12, 10 |
 
 수용 조건 9와 10은 각 PRD가 자기 변경에 대해 확인한다.
 
 ## 종료 증거 (2026-11-09)
+
+같은 날 사용자 결정으로 소유 범위 10과 PRD 050을 더해 이 스펙을 다시 열었다(`Planned revision (implemented baseline)`: PRD 000–040의 구현과 검증은 그대로이고, 소유 범위 10은 PRD 050의 구현과 독립 검토 PASS까지 했으며 전체 workspace 시험과 종료 확인 전이다). 아래는 PRD 000–040의 종료 증거이고, PRD 050이 닫히면 이 절에 더한다.
 
 PRD [000](prds/000-provider-status-and-gateway-hint.md)·[010](prds/010-onboard-and-discord-connect.md)은 전체 workspace 시험(3,727 passed / 0 failed / 8 ignored)과 함께 `277a32f`로, PRD [020](prds/020-setup-script-and-container-home.md)·[030](prds/030-data-folder-permission-errors.md)·[040](prds/040-empty-provider-environment-and-saved-credentials.md)은 전체 workspace 시험(3,752 passed / 0 failed / 8 ignored)과 함께 `738061c`로 닫혔다. 모두 `Complete (Scoped)`이고, 계획과 구현을 각각 독립 검토(Oracle)가 PASS할 때까지 고쳤다. 이는 현재 self-hosted 지원 범위의 scoped 완료이며 전체 출시 seal이 아니다. 실행 기록은 로컬 `.omo/evidence/spec052/`(추적하지 않음)에 있다.
 

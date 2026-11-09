@@ -1546,21 +1546,33 @@ shacs-bot channels status --workspace /tmp/ws
 
 ### Discord 연결
 
-`channels connect discord`는 Discord bot 토큰을 `.env.json`의 `SHACS_CHANNELS_DISCORD_TOKEN`에 넣고, config의 `channels.discord`에는 토큰 대신 `token: "${SHACS_CHANNELS_DISCORD_TOKEN}"`와 `enabled: true`를 적습니다(`--allow-from`을 주면 `allowFrom`도). 그 밖의 칸은 그대로 둡니다(Spec 052). 토큰은 표준 입력으로만 받습니다. terminal에서 실행하면 입력이 화면에 보이지 않고, 입력을 마치거나 Ctrl+C로 끊어도 terminal의 입력 표시가 돌아옵니다.
+`channels connect discord`는 Discord bot 토큰을 `.env.json`의 `SHACS_CHANNELS_DISCORD_TOKEN`에 넣고, config의 `channels.discord`에는 토큰 대신 `token: "${SHACS_CHANNELS_DISCORD_TOKEN}"`와 `enabled: true`를 적습니다(아래 설정 옵션을 주면 그 칸도). 그 밖의 칸은 그대로 둡니다(Spec 052). 토큰은 표준 입력으로만 받습니다. terminal에서 실행하면 입력이 화면에 보이지 않고, 입력을 마치거나 Ctrl+C로 끊어도 terminal의 입력 표시가 돌아옵니다. 이미 연결돼 있으면 토큰 없이 설정만 바꾸거나 Discord를 끄고 켤 수 있습니다.
 
 ```sh
 shacs-bot channels connect discord --token-stdin --allow-from 123456789012345678
 printf '%s' "$DISCORD_TOKEN" | shacs-bot channels connect discord --token-stdin --allow-from 123456789012345678
+shacs-bot channels connect discord --allow-channel 223344556677889900 --group-policy mention
+shacs-bot channels connect discord --disable
+shacs-bot channels connect discord --enable
 shacs-bot channels connect discord --status
 ```
 
-- `--allow-from <id>`는 봇에게 말할 수 있는 Discord 사용자 ID이고 여러 번 줄 수 있습니다. 주면 `allowFrom`을 그 목록으로 바꾸고, 주지 않으면 지금 목록을 그대로 둡니다. 결과 목록이 비면 봇이 볼 수 있는 누구나 봇을 쓸 수 있다고 경고합니다.
-- 아래이면 아무것도 바꾸지 않고 멈춥니다(`--replace`를 줘도 같습니다): 끊긴 config migration의 진행 표시가 있음(`runtime config-migrate --recover`), `channels.discord.token`에 토큰 글자가 있음(먼저 `runtime config-migrate --apply`로 옮기세요), 다른 `${이름}`이나 손으로 고쳐야 할 값이 있음, `botToken`·`bot_token`에 값이 있음(runtime은 이 칸을 먼저 읽습니다), 명령을 실행한 환경에 `SHACS_CHANNELS_DISCORD_TOKEN`이 다른 값으로 있음.
-- `.env.json`에 그 이름이 다른 값으로 있으면 멈추고, `--replace`를 주면 그 값만 바꿉니다. 같은 토큰으로 다시 실행하면 아무것도 쓰지 않습니다(`unchanged`).
-- `.env.json`을 먼저, config를 나중에 쓰며, 둘 다 명령이 처음 읽은 내용과 같을 때만 바꿉니다. 그 사이 다른 것이 고쳤으면 실패하고 다시 실행하라고 알립니다. config를 쓰기 전에 끊기면 config는 그대로 읽히고, 같은 토큰으로 다시 실행하면 이어서 연결됩니다.
-- 출력과 오류에는 바꾼 칸과 이름만 나오고 토큰은 나오지 않습니다. gateway는 시작할 때 channel 설정을 읽으므로, 연결한 뒤 gateway를 다시 시작하세요.
-- `--status`는 아무것도 쓰지 않고 `discord: connected` 또는 `discord: not connected`와 그 까닭을 보입니다. `connected`는 `channels.discord.enabled`가 `true`이고 `botToken`·`bot_token`·`token`을 runtime처럼 풀었을 때 토큰이 있다는 뜻입니다. config의 다른 칸은 풀지 않습니다.
-- Docker에서는 `docker compose run --rm shacs-cli channels connect discord --token-stdin --allow-from <id>`로 실행해 숨긴 입력에 토큰을 넣거나, pipe로 넣을 때는 `-T`를 붙입니다(`printf '%s' "$DISCORD_TOKEN" | docker compose run --rm -T shacs-cli channels connect discord --token-stdin`). gateway와 같은 Compose 환경에서 확인해야 맞습니다.
+- 설정 옵션(주지 않은 설정의 칸은 그대로입니다):
+  - 봇과 말할 수 있는 사람(`allowFrom`): `--allow-from <id>`(Discord 사용자 ID, 여러 번)는 그 목록으로 바꾸고, `--allow-anyone`은 비워서 봇이 볼 수 있는 누구나 쓰게 합니다.
+  - 봇이 읽는 채널(`allowChannels`): `--allow-channel <id>`(채널 ID, 여러 번)는 그 채널과 그 안의 스레드만 읽게 하고, `--all-channels`는 비워서 봇이 볼 수 있는 모든 채널과 DM을 읽게 합니다. 채널을 적으면 목록에 없는 DM은 받지 않습니다(DM 채널 ID를 넣으면 그 DM은 읽습니다).
+  - 서버 채널에서 답하는 때(`groupPolicy`): `--group-policy mention`은 봇을 멘션한 메시지에만, `open`은 모든 메시지에 답합니다. DM에는 적용되지 않습니다.
+  - 켜고 끄기(`enabled`): `--disable`은 토큰과 설정을 그대로 두고 Discord를 끄고, `--enable`은 다시 켭니다.
+  - `--allow-from`과 `--allow-anyone`, `--allow-channel`과 `--all-channels`, `--enable`과 `--disable`은 같이 쓸 수 없고, `--disable`은 `--token-stdin`과 같이 쓸 수 없습니다.
+- `--token-stdin` 없이 설정 옵션만 주면 저장한 토큰은 그대로 두고 config의 그 칸만 바꿉니다(첫 줄 `discord: settings updated`). 새 토큰을 묻지 않고 `.env.json`도 쓰지 않습니다. 토큰이 저장돼 있지 않으면 바꾸지 않고 `--token-stdin`으로 먼저 연결하라고 알립니다. 꺼 둔 상태에서도 토큰이 있으면 `--enable`로 다시 켤 수 있습니다.
+- runtime이 그 설정을 다른 칸에서 먼저 읽으면 바꾸지 않고 멈춥니다. 채널을 바꾸는데 `channelIds`·`allowedChannelIds`가 있거나 `defaultChannelId`·`default_channel_id`·`channelId`·`channel_id`에 값이 있으면 그 칸을 손으로 지우세요. 예전 꼴의 채널 목록(`allowChannels`·`allow_channels` 없이 `channelIds` 등이나 `defaultChannelId` 등에 채널)이면 runtime이 그 채널을 REST로 돌아보며 읽고 그때는 `groupPolicy`를 적용하지 않으므로, `--group-policy`만 주면 멈춥니다(`--allow-channel`로 채널을 다시 정하면 됩니다).
+- 결과 보낸 사람 목록이 비거나 `*`가 있으면 봇이 볼 수 있는 누구나 봇을 쓸 수 있다고 경고합니다.
+- 끊긴 config migration의 진행 표시가 있으면(`runtime config-migrate --recover`) 토큰으로 연결하든 설정만 바꾸든 아무것도 바꾸지 않고 멈춥니다.
+- `--token-stdin`으로 연결할 때는 아래이면 아무것도 바꾸지 않고 멈춥니다(`--replace`를 줘도 같습니다): `channels.discord.token`에 토큰 글자가 있음(먼저 `runtime config-migrate --apply`로 옮기세요), 다른 `${이름}`이나 손으로 고쳐야 할 값이 있음, `botToken`·`bot_token`에 값이 있음(runtime은 이 칸을 먼저 읽습니다), 명령을 실행한 환경에 `SHACS_CHANNELS_DISCORD_TOKEN`이 다른 값으로 있음. 토큰 없이 설정만 바꿀 때는 이 칸들을 고치지 않으므로 이것으로 멈추지 않고, runtime처럼 풀어 토큰이 있는지만 봅니다(`botToken`·`bot_token`의 토큰도 됩니다).
+- 연결할 때 `.env.json`에 그 이름이 다른 값으로 있으면 멈추고, `--replace`를 주면 그 값만 바꿉니다. 같은 토큰으로 다시 실행하면 아무것도 쓰지 않습니다(`unchanged`).
+- 연결할 때는 `.env.json`을 먼저, config를 나중에 쓰며, 둘 다 명령이 처음 읽은 내용과 같을 때만 바꿉니다. 설정만 바꿀 때는 config만 같은 규칙으로 씁니다. 그 사이 다른 것이 고쳤으면 실패하고 다시 실행하라고 알립니다. config를 쓰기 전에 끊기면 config는 그대로 읽히고, 같은 토큰으로 다시 실행하면 이어서 연결됩니다.
+- 출력과 오류에는 바꾼 칸과 이름만 나오고 토큰은 나오지 않습니다. gateway는 시작할 때 channel 설정을 읽으므로, 연결하거나 설정을 바꾸거나 켜고 끈 뒤 gateway를 다시 시작하세요.
+- `--status`는 아무것도 쓰지 않고 `discord: connected` 또는 `discord: not connected`와 그 까닭을 보입니다. `connected`는 `channels.discord.enabled`가 `true`이고 `botToken`·`bot_token`·`token`을 runtime처럼 풀었을 때 토큰이 있다는 뜻입니다. config의 다른 칸은 풀지 않습니다. 토큰이 있으면(연결됐거나 꺼 두었을 때) runtime이 읽는 설정을 `users: anyone|<id>, …`, `channels: all|<id>, …`, `server channels: when mentioned|every message` 줄로 함께 보입니다. REST로 돌아보는 설정이면 `channels:`는 `*`를 포함해 적힌 목록 그대로이고, `server channels:`는 `groupPolicy`를 적용하지 않는다고 적습니다.
+- Docker에서는 `docker compose run --rm shacs-cli channels connect discord --token-stdin --allow-from <id>`로 실행해 숨긴 입력에 토큰을 넣거나, pipe로 넣을 때는 `-T`를 붙입니다(`printf '%s' "$DISCORD_TOKEN" | docker compose run --rm -T shacs-cli channels connect discord --token-stdin`). 설정만 바꿀 때는 `docker compose run --rm shacs-cli channels connect discord --group-policy open`처럼 실행한 뒤 `docker compose restart shacs-gateway`로 gateway를 다시 띄웁니다. gateway와 같은 Compose 환경에서 확인해야 맞습니다.
 
 선택된 channel runtime을 시작합니다:
 
@@ -1576,7 +1588,7 @@ shacs-bot run --websocket-host 127.0.0.1 --websocket-port 8765 --workspace /tmp/
 최소 외부 channel config key:
 
 - `channels.telegram`: `enabled`, `botToken`/`bot_token`/`token`, optional `pollTimeoutSeconds`, `pollLimit`.
-- `channels.discord`: `enabled`, `botToken`/`bot_token`/`token`, optional `allowFrom`, `allowChannels`, `groupPolicy`(`mention`/`open`), `streaming`(기본 true). `allowChannels`가 비어 있거나 `["*"]`이면 봇이 볼 수 있는 모든 채널을 허용합니다. Gateway worker는 현재 일반 메시지/DM 응답, permission approval prompt/reply, conservative Gateway resume metadata를 다룹니다. Inbound는 durable enqueue 뒤에만 resume cursor를 전진하며, restart replay는 중복 가능성을 남기는 at-least-once 성격이지 exactly-once delivery가 아닙니다.
+- `channels.discord`: `enabled`, `botToken`/`bot_token`/`token`, optional `allowFrom`, `allowChannels`, `groupPolicy`(`mention`/`open`). `allowFrom`이 비거나 `*`가 있으면 누구나, `allowChannels`가 비어 있거나 `["*"]`이면 봇이 볼 수 있는 모든 채널(DM 포함)을 허용합니다. `groupPolicy`는 서버 채널에만 적용되고 Gateway로 읽을 때만 동작합니다. `allowChannels`·`allow_channels` 없이 `channelIds` 등에 채널이 있으면 그 채널을 REST로 돌아보며 읽고(`*`도 채널 ID 하나로 봅니다) `groupPolicy`를 적용하지 않습니다. `streaming`과 `replyInThread`는 지금 효과가 없습니다(Discord에는 다 쓴 답을 한 번에 보내고 쓰는 동안 입력 중 표시만 보이며, 스레드를 새로 열어 답하지 않습니다). 각 칸은 `channels connect discord`의 설정 옵션이나 설정 스크립트로 바꿀 수 있습니다([Discord 연결](#discord-연결)). Gateway worker는 현재 일반 메시지/DM 응답, permission approval prompt/reply, conservative Gateway resume metadata를 다룹니다. Inbound는 durable enqueue 뒤에만 resume cursor를 전진하며, restart replay는 중복 가능성을 남기는 at-least-once 성격이지 exactly-once delivery가 아닙니다.
 - `channels.slack`: `enabled`, `appToken`/`app_token`, `botToken`/`bot_token`/`token`, optional `channelIds`/`allowedChannelIds`/`allowChannels` 또는 `defaultChannelId`.
 - `channels.email`: `enabled`, `consentGranted: true`, inbound 허용 목록 `allowFrom`/`allowedSenders`가 필요합니다. `channels.email.smtp`: `host`/`smtpHost`, `port`, `from`/`fromAddress`, optional `username`/`smtpUsername`, `password`/`smtpPassword`, `security`, `timeoutSeconds`; `channels.email.imap`: `host`/`imapHost`, `port`, `username`/`imapUsername`, `password`/`imapPassword`, optional `mailbox`, `markSeen`(기본 true), `pollIntervalSeconds`, `timeoutSeconds`, `security`. 현재 IMAP polling은 TLS(`security: "tls"`)만 시작하며, inbound Email은 `Authentication-Results` header의 `spf=pass`/`dkim=pass`를 기본 확인합니다(`verifySpf`/`verifyDkim`로 비활성화 가능).
 - `channels.whatsapp`: `enabled`, `bridgeUrl`(WebSocket URL; 기존 `http://`/`https://` 값은 같은 host/path의 `ws://`/`wss://`로 호환 변환), optional `bridgeToken`, `groupPolicy`, `allowlist.allowedSenders`.
@@ -1651,8 +1663,8 @@ cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin s
 3. 저장소 루트의 `.env`(Compose가 자동으로 읽고 git은 무시합니다)에 `SHACS_UID`·`SHACS_GID`를 실행한 사용자의 번호로 적습니다. 그래서 container가 host 사용자와 같은 번호로 돌고, `~/.shacs-bot`의 파일도 그 사용자 것이 됩니다. `.env`의 다른 줄과 권한은 그대로 두고, 새로 만들면 0600입니다. shell이 다른 `SHACS_UID`·`SHACS_GID`를 내보내고 있으면(Compose는 그 값을 `.env`보다 먼저 씁니다) 지우라고 알립니다.
 4. image를 만들고(`docker compose build`, 처음에는 몇 분 걸립니다) 처음 설정(`onboard`)을 합니다. 끊긴 config migration이 있으면 `onboard`가 멈추고 스크립트도 멈춥니다(`runtime config-migrate --recover`).
 5. `provider status`가 `ready`가 아니면 ChatGPT 계정 로그인을 할지 묻습니다. 고르면 `provider codex login --headless`가 주소와 코드를 보이고, 브라우저에서 그 주소를 열어 코드를 넣으면 끝납니다.
-6. Discord가 연결돼 있지 않으면 연결할지 묻습니다. bot 토큰은 화면에 보이지 않게 받고, 봇이 답할 자기 Discord 사용자 ID(숫자)를 묻습니다. ID를 비우면 봇이 볼 수 있는 누구나 봇을 쓸 수 있고 gateway는 명령 실행·파일 쓰기 도구를 켠 채 돌므로 한 번 더 확인합니다. 토큰은 container 명령의 표준 입력으로만 넘기고 화면, `.env`, 명령줄에 남기지 않습니다.
-7. gateway를 띄웁니다(`docker compose up -d shacs-gateway`). 이미 돌고 있었고 이번에 로그인이나 연결을 했으면 다시 띄웁니다(gateway는 시작할 때 설정을 읽습니다).
+6. Discord가 연결돼 있지 않으면 연결할지 묻습니다. bot 토큰은 화면에 보이지 않게 받고, 이어서 세 설정을 각각 무엇을 하는지 설명한 뒤 묻습니다: 봇과 말할 수 있는 사람(Discord 사용자 ID, 여러 개 가능), 봇이 읽는 채널(비우면 모든 채널과 DM), 서버 채널에서 답하는 때(멘션할 때만, 또는 모든 메시지). 사람을 비우면 봇이 볼 수 있는 누구나 봇을 쓸 수 있고 gateway는 명령 실행·파일 쓰기 도구를 켠 채 돌므로 한 번 더 확인하고, 거기에 모든 메시지까지 고르면 다시 확인합니다. ID에 숫자가 아닌 글자가 있으면 다시 묻습니다. 이미 연결돼 있으면 지금 설정을 보여 주고 그대로 둘지, 바꿀지(토큰은 다시 묻지 않습니다), Discord를 끌지 묻고, 꺼 두었으면 다시 켤지 묻습니다. 토큰은 container 명령의 표준 입력으로만 넘기고 화면, `.env`, 명령줄에 남기지 않습니다.
+7. gateway를 띄웁니다(`docker compose up -d shacs-gateway`). 이미 돌고 있었고 이번에 로그인했거나 Discord를 연결·설정 변경·켜기·끄기로 실제로 바꿨으면 다시 띄웁니다(gateway는 시작할 때 설정을 읽습니다). 바뀐 것이 없으면(`unchanged`) 다시 띄우지 않습니다.
 8. 로그 보기(`docker compose logs -f shacs-gateway`)와 상태 확인 명령, 하지 않은 일의 명령을 알립니다.
 
 terminal이 아닌 곳(CI 등)에서 실행하면 아무것도 묻지 않고 1–4, 두 확인, 시작만 한 뒤 남은 일을 명령과 함께 알립니다. API key로 쓰는 provider와 다른 channel은 아래 손 설정을 따릅니다.

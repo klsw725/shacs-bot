@@ -25,7 +25,8 @@ const MISSING_PROVIDER: &str =
     "provider: missing none\nreason: no provider\nnext: shacs-bot provider codex login";
 const READY_PROVIDER: &str = "provider: ready openai_codex\ncredential: sign-in";
 const NOT_CONNECTED: &str = "discord: not connected\nreason: channels.discord.enabled is not true";
-const CONNECTED: &str = "discord: connected\ntoken: channels.discord.token";
+const CONNECTED: &str = "discord: connected\ntoken: channels.discord.token\nusers: 123\nchannels: all\nserver channels: when mentioned";
+const TURNED_OFF: &str = "discord: not connected\nreason: channels.discord.enabled is not true\ntoken: channels.discord.token\nusers: 123\nchannels: all\nserver channels: when mentioned";
 
 const FAKE_DOCKER: &str = r#"#!/bin/sh
 log="$FAKE_DOCKER_DIR"
@@ -52,6 +53,18 @@ case "$*" in
   "compose run --rm -T shacs-cli channels connect discord --token-stdin"*)
     cat > "$log/stdin"
     env > "$log/env"
+    if [ -n "${FAKE_DISCORD_OUTPUT:-}" ]; then
+      printf '%s\n' "$FAKE_DISCORD_OUTPUT"
+    else
+      printf 'discord: connected\nupdated: config channels.discord.enabled\n'
+    fi
+    exit "${FAKE_CONNECT_EXIT:-0}" ;;
+  "compose run --rm -T shacs-cli channels connect discord --"*)
+    if [ -n "${FAKE_DISCORD_OUTPUT:-}" ]; then
+      printf '%s\n' "$FAKE_DISCORD_OUTPUT"
+    else
+      printf 'discord: settings updated\nupdated: config channels.discord.groupPolicy\n'
+    fi
     exit "${FAKE_CONNECT_EXIT:-0}" ;;
   "compose ps --status running --services")
     if [ -n "${FAKE_RUNNING:-}" ]; then echo shacs-gateway; fi
@@ -636,24 +649,42 @@ const CONNECT: &str = "Connect a Discord bot now? [y/N]: ";
 const TOKEN_PROMPT: &str = "Discord bot token (input hidden): ";
 const USER_ID: &str = "empty allows anyone): ";
 const ANYONE: &str = "Continue without a user ID? [y/N]: ";
+const CHANNELS: &str = "(empty for all): ";
+const REPLY: &str = "Choose 1 or 2 [1]: ";
+const ANYWAY: &str = "Answer every message anyway? [y/N]: ";
+const MENU: &str = "Choose 1, 2 or 3 [1]: ";
+const TURN_ON: &str = "Turn Discord on? [y/N]: ";
+const CHANGE_TOO: &str = "Change these settings too? [y/N]: ";
+const NOT_DIGITS: &str = "Use only the digits of each ID, separated by spaces.";
 /// Ctrl-D at the start of a line: the terminal's end of input.
 const END_OF_INPUT: &str = "\u{4}";
 const SIGN_IN_TODO: &str = "Sign in:";
 const DISCORD_TODO: &str = "Connect Discord:";
+const DISCORD_ON_TODO: &str = "Turn Discord on:";
+const DISCORD_COMMAND: &str = "compose run --rm -T shacs-cli channels connect discord";
+
+fn discord_changes(calls: &[String]) -> Vec<&String> {
+    calls
+        .iter()
+        .filter(|call| call.starts_with(DISCORD_COMMAND) && !call.ends_with(" --status"))
+        .collect()
+}
 
 #[test]
-fn a_ready_provider_and_a_connected_bot_ask_nothing() -> TestResult {
+fn a_ready_provider_asks_nothing_and_a_connected_bot_offers_its_settings() -> TestResult {
     // Given
     let setup = Setup::new()?;
 
     // When
-    let session = Interactive::start(
+    let mut session = Interactive::start(
         &setup,
         &[
             ("FAKE_PROVIDER", READY_PROVIDER),
             ("FAKE_DISCORD", CONNECTED),
+            ("FAKE_RUNNING", "1"),
         ],
     )?;
+    session.answer(MENU, "")?;
     let (status, output, _) = session.finish()?;
 
     // Then
@@ -662,7 +693,395 @@ fn a_ready_provider_and_a_connected_bot_ask_nothing() -> TestResult {
         !output.contains(LOGIN) && !output.contains(CONNECT),
         "{output}"
     );
+    assert!(
+        output.contains(
+            "Discord is connected:\nusers: 123\nchannels: all\nserver channels: when mentioned"
+        ),
+        "{output}"
+    );
+    let calls = setup.calls()?;
+    assert!(discord_changes(&calls).is_empty(), "{calls:?}");
+    assert!(!calls
+        .iter()
+        .any(|call| call == "compose restart shacs-gateway"));
     assert!(!output.contains("Still to do"), "{output}");
+    Ok(())
+}
+
+struct DiscordCase {
+    name: &'static str,
+    environment: &'static [(&'static str, &'static str)],
+    answers: &'static [(&'static str, &'static str)],
+    change: Option<&'static str>,
+    restart: bool,
+    shown: &'static [&'static str],
+    not_shown: &'static [&'static str],
+}
+
+fn run_discord_cases(cases: &[DiscordCase]) -> TestResult {
+    for case in cases {
+        // Given
+        let name = case.name;
+        let setup = Setup::new()?;
+        let mut session = Interactive::start(&setup, case.environment)?;
+
+        // When
+        for (question, reply) in case.answers {
+            session.answer(question, reply)?;
+        }
+        let (status, output, session) = session.finish()?;
+
+        // Then
+        assert!(status.success(), "{name}: {output}");
+        let calls = setup.calls()?;
+        let changes = discord_changes(&calls);
+        match case.change {
+            Some(expected) => assert_eq!(changes, [expected], "{name}"),
+            None => assert!(changes.is_empty(), "{name}: {changes:?}"),
+        }
+        let restarted = calls
+            .iter()
+            .any(|call| call == "compose restart shacs-gateway");
+        assert_eq!(restarted, case.restart, "{name}: {calls:?}");
+        for text in case.shown {
+            assert!(output.contains(text), "{name}: `{text}` in {output}");
+        }
+        for text in case.not_shown {
+            assert!(!output.contains(text), "{name}: `{text}` in {output}");
+        }
+        assert!(!output.contains(TOKEN), "{name}");
+        assert!(!session.shown()?.contains(TOKEN), "{name}");
+        assert!(session.echo()?, "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn the_discord_questions_explain_each_setting_and_pass_its_options() -> TestResult {
+    run_discord_cases(&[
+        DiscordCase {
+            name: "several ids, channels and every message",
+            environment: &[],
+            answers: &[
+                (LOGIN, "2"),
+                (CONNECT, "y"),
+                (TOKEN_PROMPT, TOKEN),
+                (USER_ID, "111, 222"),
+                (CHANNELS, "333 444"),
+                (REPLY, "2"),
+            ],
+            change: Some(
+                "compose run --rm -T shacs-cli channels connect discord --token-stdin --allow-from 111 --allow-from 222 --allow-channel 333 --allow-channel 444 --group-policy open",
+            ),
+            restart: false,
+            shown: &[
+                "The bot answers only the people, channels and messages you choose here.",
+                "Who can talk to the bot: the bot answers only the Discord users listed here.",
+                "turn on Developer Mode (User Settings > Advanced)",
+                "Which channels the bot reads: empty means every channel the bot can see, plus direct messages.",
+                "and a direct message only if you list its channel ID.",
+                "When the bot answers in server channels (this choice does not apply to direct messages):",
+                "  1) Only when someone mentions it (@the bot)",
+                "  2) Every message in the channels it reads",
+            ],
+            not_shown: &[ANYWAY],
+        },
+        DiscordCase {
+            name: "ids that are not digits are asked again",
+            environment: &[],
+            answers: &[
+                (LOGIN, "2"),
+                (CONNECT, "y"),
+                (TOKEN_PROMPT, TOKEN),
+                (USER_ID, "12ab"),
+                (USER_ID, "123"),
+                (CHANNELS, "<#9>"),
+                (CHANNELS, ""),
+                (REPLY, "3"),
+                (REPLY, ""),
+            ],
+            change: Some(
+                "compose run --rm -T shacs-cli channels connect discord --token-stdin --allow-from 123 --all-channels --group-policy mention",
+            ),
+            restart: false,
+            shown: &[NOT_DIGITS],
+            not_shown: &[],
+        },
+        DiscordCase {
+            name: "anyone and every message, declined, then mentions",
+            environment: &[("FAKE_RUNNING", "1")],
+            answers: &[
+                (LOGIN, "2"),
+                (CONNECT, "y"),
+                (TOKEN_PROMPT, TOKEN),
+                (USER_ID, ""),
+                (ANYONE, "y"),
+                (CHANNELS, ""),
+                (REPLY, "2"),
+                (ANYWAY, "n"),
+                (REPLY, "1"),
+            ],
+            change: Some(
+                "compose run --rm -T shacs-cli channels connect discord --token-stdin --allow-anyone --all-channels --group-policy mention",
+            ),
+            restart: true,
+            shown: &["anyone in those channels can make the bot run commands"],
+            not_shown: &[],
+        },
+        DiscordCase {
+            name: "anyone and every message, confirmed",
+            environment: &[],
+            answers: &[
+                (LOGIN, "2"),
+                (CONNECT, "y"),
+                (TOKEN_PROMPT, TOKEN),
+                (USER_ID, ""),
+                (ANYONE, "y"),
+                (CHANNELS, ""),
+                (REPLY, "2"),
+                (ANYWAY, "y"),
+            ],
+            change: Some(
+                "compose run --rm -T shacs-cli channels connect discord --token-stdin --allow-anyone --all-channels --group-policy open",
+            ),
+            restart: false,
+            shown: &[],
+            not_shown: &[],
+        },
+        DiscordCase {
+            name: "end of input when asked to connect",
+            environment: &[("FAKE_RUNNING", "1")],
+            answers: &[(LOGIN, "2"), (CONNECT, END_OF_INPUT)],
+            change: None,
+            restart: false,
+            shown: &[DISCORD_TODO],
+            not_shown: &[TOKEN_PROMPT],
+        },
+        DiscordCase {
+            name: "end of input at the channels",
+            environment: &[("FAKE_RUNNING", "1")],
+            answers: &[
+                (LOGIN, "2"),
+                (CONNECT, "y"),
+                (TOKEN_PROMPT, TOKEN),
+                (USER_ID, "123"),
+                (CHANNELS, END_OF_INPUT),
+            ],
+            change: None,
+            restart: false,
+            shown: &[DISCORD_TODO],
+            not_shown: &[],
+        },
+        DiscordCase {
+            name: "end of input when asked when to answer",
+            environment: &[("FAKE_RUNNING", "1")],
+            answers: &[
+                (LOGIN, "2"),
+                (CONNECT, "y"),
+                (TOKEN_PROMPT, TOKEN),
+                (USER_ID, "123"),
+                (CHANNELS, ""),
+                (REPLY, END_OF_INPUT),
+            ],
+            change: None,
+            restart: false,
+            shown: &[DISCORD_TODO],
+            not_shown: &[],
+        },
+        DiscordCase {
+            name: "end of input when asked to answer every message",
+            environment: &[("FAKE_RUNNING", "1")],
+            answers: &[
+                (LOGIN, "2"),
+                (CONNECT, "y"),
+                (TOKEN_PROMPT, TOKEN),
+                (USER_ID, ""),
+                (ANYONE, "y"),
+                (CHANNELS, ""),
+                (REPLY, "2"),
+                (ANYWAY, END_OF_INPUT),
+            ],
+            change: None,
+            restart: false,
+            shown: &[DISCORD_TODO],
+            not_shown: &[],
+        },
+    ])
+}
+
+#[test]
+fn a_connected_bot_keeps_changes_or_turns_off_its_settings() -> TestResult {
+    run_discord_cases(&[
+        DiscordCase {
+            name: "change them",
+            environment: &[
+                ("FAKE_PROVIDER", READY_PROVIDER),
+                ("FAKE_DISCORD", CONNECTED),
+                ("FAKE_RUNNING", "1"),
+            ],
+            answers: &[(MENU, "2"), (USER_ID, "456"), (CHANNELS, "7"), (REPLY, "")],
+            change: Some(
+                "compose run --rm -T shacs-cli channels connect discord --allow-from 456 --allow-channel 7 --group-policy mention",
+            ),
+            restart: true,
+            shown: &[],
+            not_shown: &[TOKEN_PROMPT],
+        },
+        DiscordCase {
+            name: "turn it off",
+            environment: &[
+                ("FAKE_PROVIDER", READY_PROVIDER),
+                ("FAKE_DISCORD", CONNECTED),
+                ("FAKE_RUNNING", "1"),
+            ],
+            answers: &[(MENU, "3")],
+            change: Some("compose run --rm -T shacs-cli channels connect discord --disable"),
+            restart: true,
+            shown: &[],
+            not_shown: &[],
+        },
+        DiscordCase {
+            name: "a change that changes nothing",
+            environment: &[
+                ("FAKE_PROVIDER", READY_PROVIDER),
+                ("FAKE_DISCORD", CONNECTED),
+                ("FAKE_RUNNING", "1"),
+                ("FAKE_DISCORD_OUTPUT", "discord: settings updated\nunchanged"),
+            ],
+            answers: &[(MENU, "2"), (USER_ID, "123"), (CHANNELS, ""), (REPLY, "")],
+            change: Some(
+                "compose run --rm -T shacs-cli channels connect discord --allow-from 123 --all-channels --group-policy mention",
+            ),
+            restart: false,
+            shown: &[],
+            not_shown: &[],
+        },
+        DiscordCase {
+            name: "a failed change",
+            environment: &[
+                ("FAKE_PROVIDER", READY_PROVIDER),
+                ("FAKE_DISCORD", CONNECTED),
+                ("FAKE_RUNNING", "1"),
+                ("FAKE_CONNECT_EXIT", "1"),
+            ],
+            answers: &[(MENU, "3")],
+            change: Some("compose run --rm -T shacs-cli channels connect discord --disable"),
+            restart: false,
+            shown: &["The Discord change did not finish."],
+            not_shown: &[],
+        },
+        DiscordCase {
+            name: "end of input at the menu",
+            environment: &[
+                ("FAKE_PROVIDER", READY_PROVIDER),
+                ("FAKE_DISCORD", CONNECTED),
+                ("FAKE_RUNNING", "1"),
+            ],
+            answers: &[(MENU, END_OF_INPUT)],
+            change: None,
+            restart: false,
+            shown: &[],
+            not_shown: &[],
+        },
+        DiscordCase {
+            name: "end of input while changing",
+            environment: &[
+                ("FAKE_PROVIDER", READY_PROVIDER),
+                ("FAKE_DISCORD", CONNECTED),
+                ("FAKE_RUNNING", "1"),
+            ],
+            answers: &[(MENU, "2"), (USER_ID, END_OF_INPUT)],
+            change: None,
+            restart: false,
+            shown: &[],
+            not_shown: &[],
+        },
+    ])
+}
+
+#[test]
+fn a_turned_off_bot_is_turned_on_when_asked() -> TestResult {
+    let off: &[(&str, &str)] = &[
+        ("FAKE_PROVIDER", READY_PROVIDER),
+        ("FAKE_DISCORD", TURNED_OFF),
+        ("FAKE_RUNNING", "1"),
+    ];
+    run_discord_cases(&[
+        DiscordCase {
+            name: "left off",
+            environment: off,
+            answers: &[(TURN_ON, "n")],
+            change: None,
+            restart: false,
+            shown: &["Discord is set up but turned off:\nusers: 123", DISCORD_ON_TODO],
+            not_shown: &[CHANGE_TOO],
+        },
+        DiscordCase {
+            name: "turned on as it was",
+            environment: off,
+            answers: &[(TURN_ON, "y"), (CHANGE_TOO, "n")],
+            change: Some("compose run --rm -T shacs-cli channels connect discord --enable"),
+            restart: true,
+            shown: &[],
+            not_shown: &[DISCORD_ON_TODO],
+        },
+        DiscordCase {
+            name: "turned on with new settings",
+            environment: off,
+            answers: &[
+                (TURN_ON, "y"),
+                (CHANGE_TOO, "y"),
+                (USER_ID, "5"),
+                (CHANNELS, "6"),
+                (REPLY, "2"),
+            ],
+            change: Some(
+                "compose run --rm -T shacs-cli channels connect discord --enable --allow-from 5 --allow-channel 6 --group-policy open",
+            ),
+            restart: true,
+            shown: &[],
+            not_shown: &[DISCORD_ON_TODO],
+        },
+        DiscordCase {
+            name: "end of input when asked to turn on",
+            environment: off,
+            answers: &[(TURN_ON, END_OF_INPUT)],
+            change: None,
+            restart: false,
+            shown: &[DISCORD_ON_TODO],
+            not_shown: &[CHANGE_TOO],
+        },
+        DiscordCase {
+            name: "end of input when asked to change too",
+            environment: off,
+            answers: &[(TURN_ON, "y"), (CHANGE_TOO, END_OF_INPUT)],
+            change: None,
+            restart: false,
+            shown: &[DISCORD_ON_TODO],
+            not_shown: &[],
+        },
+    ])
+}
+
+#[test]
+fn discord_states_without_a_terminal_ask_nothing() -> TestResult {
+    for (discord, todo) in [(CONNECTED, None), (TURNED_OFF, Some(DISCORD_ON_TODO))] {
+        // Given
+        let setup = Setup::new()?;
+
+        // When
+        let output = setup.run(&[("FAKE_PROVIDER", READY_PROVIDER), ("FAKE_DISCORD", discord)])?;
+
+        // Then
+        let text = text(&output);
+        assert!(output.status.success(), "{text}");
+        assert!(!text.contains(MENU) && !text.contains(TURN_ON), "{text}");
+        assert_eq!(setup.calls()?, first_run_calls());
+        match todo {
+            Some(todo) => assert!(text.contains(todo), "{text}"),
+            None => assert!(!text.contains("Still to do"), "{text}"),
+        }
+    }
     Ok(())
 }
 
@@ -729,10 +1148,12 @@ fn the_questions_sign_in_connect_and_restart_as_answered() -> TestResult {
                 (USER_ID, ""),
                 (ANYONE, "n"),
                 (USER_ID, "123456"),
+                (CHANNELS, ""),
+                (REPLY, ""),
             ],
             login: false,
             connect: Some(
-                "compose run --rm -T shacs-cli channels connect discord --token-stdin --allow-from 123456",
+                "compose run --rm -T shacs-cli channels connect discord --token-stdin --allow-from 123456 --all-channels --group-policy mention",
             ),
             restart: true,
             sign_in_todo: true,
@@ -747,9 +1168,13 @@ fn the_questions_sign_in_connect_and_restart_as_answered() -> TestResult {
                 (TOKEN_PROMPT, TOKEN),
                 (USER_ID, ""),
                 (ANYONE, "y"),
+                (CHANNELS, ""),
+                (REPLY, ""),
             ],
             login: false,
-            connect: Some("compose run --rm -T shacs-cli channels connect discord --token-stdin"),
+            connect: Some(
+                "compose run --rm -T shacs-cli channels connect discord --token-stdin --allow-anyone --all-channels --group-policy mention",
+            ),
             restart: false,
             sign_in_todo: true,
             discord_todo: false,
@@ -762,10 +1187,12 @@ fn the_questions_sign_in_connect_and_restart_as_answered() -> TestResult {
                 (CONNECT, "y"),
                 (TOKEN_PROMPT, TOKEN),
                 (USER_ID, "123456"),
+                (CHANNELS, ""),
+                (REPLY, ""),
             ],
             login: false,
             connect: Some(
-                "compose run --rm -T shacs-cli channels connect discord --token-stdin --allow-from 123456",
+                "compose run --rm -T shacs-cli channels connect discord --token-stdin --allow-from 123456 --all-channels --group-policy mention",
             ),
             restart: false,
             sign_in_todo: true,

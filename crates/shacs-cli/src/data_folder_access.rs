@@ -47,7 +47,7 @@ pub(super) fn write_target(command: &CliCommand) -> Option<PathBuf> {
         CliCommand::Provider(ProviderCommand::CopilotImportToken(options)) => &options.config_path,
         CliCommand::Provider(ProviderCommand::ImportApiKey(options)) => &options.config_path,
         CliCommand::Channels(ChannelsCommand::Connect(options))
-            if matches!(options.action, DiscordConnectAction::Connect { .. }) =>
+            if !matches!(options.action, DiscordConnectAction::Status) =>
         {
             &options.config_path
         }

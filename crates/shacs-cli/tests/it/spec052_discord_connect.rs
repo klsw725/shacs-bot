@@ -2,7 +2,9 @@
 //! stops during an interrupted config migration, `channels connect discord`
 //! puts the token only in `.env.json`, stops without changes where it must,
 //! hides terminal input and puts echo back, and `--status` follows the
-//! runtime's Discord worker condition.
+//! runtime's Discord worker condition. PRD 050 acceptance 7–9: setting
+//! options with and without the token, turning Discord off and on, and the
+//! `--status` setting lines.
 
 use serde_json::{json, Value};
 use shacs_cli::{load_runtime_config_with_env, RuntimeConfigOptions};
@@ -497,6 +499,193 @@ fn status_follows_the_runtime_discord_condition() -> TestResult {
     let broken = Home::with_config(json!({}))?;
     fs::write(broken.env_file(), "[1]")?;
     assert_eq!(broken.status(&[])?.status.code(), Some(1));
+    Ok(())
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn status_settings(home: &Home) -> Result<Vec<String>, Box<dyn Error>> {
+    let output = home.status(&[])?;
+    assert!(output.status.success(), "{}", text(&output));
+    Ok(stdout(&output)
+        .lines()
+        .filter(|line| {
+            ["users: ", "channels: ", "server channels: "]
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+        })
+        .map(str::to_owned)
+        .collect())
+}
+
+#[test]
+fn connecting_with_settings_writes_them_and_status_shows_them() -> TestResult {
+    // Given
+    let home = Home::with_config(json!({}))?;
+    let args = [
+        "--token-stdin",
+        "--allow-from",
+        "111",
+        "--allow-channel",
+        "333",
+        "--group-policy",
+        "open",
+    ];
+
+    // When
+    let first = home.connect(&args, &format!("{TOKEN}\n"), &[])?;
+    let files_after_first = home.files()?;
+    let again = home.connect(&args, &format!("{TOKEN}\n"), &[])?;
+
+    // Then
+    assert!(first.status.success(), "{}", text(&first));
+    let discord = home.read(&home.config())?["channels"]["discord"].clone();
+    assert_eq!(discord["allowFrom"], json!(["111"]));
+    assert_eq!(discord["allowChannels"], json!(["333"]));
+    assert_eq!(discord["groupPolicy"], json!("open"));
+    assert_eq!(
+        status_settings(&home)?,
+        [
+            "users: 111",
+            "channels: 333",
+            "server channels: every message"
+        ]
+    );
+    assert!(again.status.success(), "{}", text(&again));
+    assert!(stdout(&again).lines().any(|line| line == "unchanged"));
+    assert_eq!(home.files()?, files_after_first);
+    assert_no_token(&first);
+    assert_no_token(&again);
+    Ok(())
+}
+
+#[test]
+fn settings_change_without_the_token_and_turn_discord_off_and_on() -> TestResult {
+    // Given
+    let home = Home::with_config(json!({}))?;
+    let connected = home.connect(
+        &["--token-stdin", "--allow-from", "111"],
+        &format!("{TOKEN}\n"),
+        &[],
+    )?;
+    assert!(connected.status.success(), "{}", text(&connected));
+    let env_before = fs::read(home.env_file())?;
+
+    // When
+    let changed = home.connect(
+        &["--allow-anyone", "--all-channels", "--group-policy", "open"],
+        "",
+        &[],
+    )?;
+    let settings_after_change = status_settings(&home)?;
+    let off = home.connect(&["--disable"], "", &[])?;
+    let off_status = stdout(&home.status(&[])?);
+    let on = home.connect(&["--enable"], "", &[])?;
+    let on_status = stdout(&home.status(&[])?);
+
+    // Then
+    assert!(changed.status.success(), "{}", text(&changed));
+    let changed_lines: Vec<String> = stdout(&changed).lines().map(str::to_owned).collect();
+    assert_eq!(
+        changed_lines,
+        [
+            "discord: settings updated",
+            "updated: config channels.discord.allowFrom, channels.discord.allowChannels, channels.discord.groupPolicy",
+            "warning: the Discord sender list is empty or has *; anyone the bot can see can use it",
+        ]
+    );
+    assert_eq!(
+        settings_after_change,
+        [
+            "users: anyone",
+            "channels: all",
+            "server channels: every message"
+        ]
+    );
+    assert!(off.status.success(), "{}", text(&off));
+    assert!(
+        off_status.starts_with("discord: not connected\nreason: channels.discord.enabled is not true\ntoken: channels.discord.token\nusers: anyone"),
+        "{off_status}"
+    );
+    assert!(on.status.success(), "{}", text(&on));
+    assert!(on_status.starts_with("discord: connected\n"), "{on_status}");
+    assert_eq!(fs::read(home.env_file())?, env_before);
+    for output in [&changed, &off, &on] {
+        assert_no_token(output);
+    }
+    Ok(())
+}
+
+#[test]
+fn settings_without_a_saved_token_or_during_a_migration_change_nothing() -> TestResult {
+    // Given
+    let empty = Home::new()?;
+    let no_token =
+        Home::with_config(json!({"channels": {"discord": {"enabled": true, "token": ""}}}))?;
+    let mut interrupted = Vec::new();
+    for marker in [config_migration_marker_path, secrets_migration_marker_path] {
+        let home = Home::with_config(
+            json!({"channels": {"discord": {"enabled": true, "token": placeholder()}}}),
+        )?;
+        home.write(&home.env_file(), &json!({NAME: TOKEN}))?;
+        let marker = marker(&home.config());
+        fs::write(&marker, "{}")?;
+        interrupted.push((home, marker));
+    }
+    let homes = [&empty, &no_token, &interrupted[0].0, &interrupted[1].0];
+    let before: Vec<FileBytes> = homes
+        .iter()
+        .map(|home| home.files())
+        .collect::<Result<_, _>>()?;
+
+    // When
+    let outputs: Vec<Output> = homes
+        .iter()
+        .map(|home| home.connect(&["--group-policy", "open"], "", &[]))
+        .collect::<Result<_, _>>()?;
+
+    // Then
+    for ((home, output), before) in homes.iter().zip(&outputs).zip(&before) {
+        assert_eq!(output.status.code(), Some(1), "{}", text(output));
+        assert_eq!(&home.files()?, before);
+    }
+    assert!(text(&outputs[0]).contains("discord is not connected yet"));
+    assert!(text(&outputs[1]).contains("discord is not connected yet"));
+    for ((_, marker), output) in interrupted.iter().zip(&outputs[2..]) {
+        let message = text(output);
+        assert!(
+            message.contains("config migration is interrupted")
+                && message.contains(&marker.display().to_string()),
+            "{message}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn conflicting_setting_options_change_nothing() -> TestResult {
+    // Given
+    let home = Home::with_config(
+        json!({"channels": {"discord": {"enabled": true, "token": placeholder()}}}),
+    )?;
+    home.write(&home.env_file(), &json!({NAME: TOKEN}))?;
+    let before = home.files()?;
+
+    for args in [
+        &["--allow-from", "1", "--allow-anyone"][..],
+        &["--enable", "--disable"],
+        &["--group-policy", "sometimes"],
+    ] {
+        // When
+        let output = home.connect(args, "", &[])?;
+
+        // Then
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {}", text(&output));
+        assert!(text(&output).contains("invalid CLI arguments"), "{args:?}");
+        assert_eq!(home.files()?, before, "{args:?}");
+    }
     Ok(())
 }
 

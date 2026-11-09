@@ -579,6 +579,7 @@ fn only_commands_that_write_the_data_folder_are_checked() -> TestResult {
         &["provider", "copilot", "import-token", "--token-stdin"],
         &["provider", "anthropic", "import-key", "--token-stdin"],
         &["channels", "connect", "discord", "--token-stdin"],
+        &["channels", "connect", "discord", "--allow-anyone"],
         &["plugins", "enable", "demo"],
         &["plugins", "disable", "demo"],
         &["permissions", "revoke", "abc"],

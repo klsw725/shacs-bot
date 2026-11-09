@@ -1,12 +1,15 @@
 //! `shacs-bot channels connect discord`: puts the Discord bot token in
-//! `.env.json` and leaves only `${NAME}` in config, and `--status`, which
-//! reads whether the Discord fields meet the runtime's worker condition
-//! (Spec 052 PRD 010 scopes 3 and 5).
+//! `.env.json` and leaves only `${NAME}` in config, changes who the bot
+//! answers, which channels it reads, when it answers in server channels and
+//! whether it is on, and `--status`, which reads whether the Discord fields
+//! meet the runtime's worker condition and what the runtime reads from them
+//! (Spec 052 PRD 010 scopes 3 and 5, PRD 050).
 
 use super::{
     allowed_sender_config, channel_enabled_from_plugins, default_config_path,
-    discord_runtime_config, guard_config_migration_admission, hidden_input, take_path, take_value,
-    ArgParser, ChannelsCommand, CliCommand, CliError, DISCORD_CHANNEL,
+    discord_channel_config, discord_runtime_config, guard_config_migration_admission, hidden_input,
+    take_path, take_value, ArgParser, ChannelsCommand, CliCommand, CliError, DiscordChannelFilter,
+    DiscordGroupPolicy, DiscordRuntimeConfig, DiscordTransportMode, DISCORD_CHANNEL,
 };
 use serde_json::{Map, Value};
 use shacs_config::{
@@ -21,6 +24,10 @@ use std::{fs, io};
 /// The fields the runtime takes the Discord token from, in its order.
 const TOKEN_FIELDS: [&str; 3] = ["botToken", "bot_token", "token"];
 
+const NOT_CONNECTED: &str = "discord is not connected yet; connect it with --token-stdin";
+const ANYONE_WARNING: &str =
+    "warning: the Discord sender list is empty or has *; anyone the bot can see can use it";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscordConnectOptions {
     pub config_path: Option<PathBuf>,
@@ -29,11 +36,41 @@ pub struct DiscordConnectOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscordConnectAction {
+    /// Connects with a token read from standard input.
     Connect {
-        allow_from: Vec<String>,
+        settings: DiscordSettings,
         existing: ExistingValue,
     },
+    /// Changes only the settings given and keeps the saved token.
+    Settings(DiscordSettings),
     Status,
+}
+
+/// The settings a call changes; `None` leaves that field as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscordSettings {
+    pub users: Option<Users>,
+    pub channels: Option<Channels>,
+    pub group_policy: Option<GroupPolicy>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Users {
+    Only(Vec<String>),
+    Anyone,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Channels {
+    Only(Vec<String>),
+    All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupPolicy {
+    Mention,
+    Open,
 }
 
 /// What to do with a different `.env.json` value for the token's name.
@@ -63,50 +100,103 @@ pub(super) fn parse(
     }
     let mut config_path = global_config;
     let mut token_stdin = false;
-    let mut allow_from = Vec::new();
     let mut existing = ExistingValue::Keep;
     let mut status = false;
+    let mut users = Vec::new();
+    let mut anyone = false;
+    let mut channels = Vec::new();
+    let mut all_channels = false;
+    let mut group_policy = None;
+    let (mut enable, mut disable) = (false, false);
     while let Some(arg) = parser.next() {
         match arg.as_str() {
             "--config" | "-c" => config_path = Some(take_path(&mut parser, &arg)?),
             "--token-stdin" => token_stdin = true,
-            "--allow-from" => {
-                let id = take_value(&mut parser, &arg)?.trim().to_owned();
-                if id.is_empty() {
-                    return Err(CliError::InvalidArguments(
-                        "--allow-from requires a non-empty user id".to_owned(),
+            "--allow-from" => push_id(
+                &mut users,
+                &take_value(&mut parser, &arg)?,
+                "--allow-from requires a non-empty user id",
+            )?,
+            "--allow-anyone" => anyone = true,
+            "--allow-channel" => push_id(
+                &mut channels,
+                &take_value(&mut parser, &arg)?,
+                "--allow-channel requires a non-empty channel id",
+            )?,
+            "--all-channels" => all_channels = true,
+            "--group-policy" => {
+                let policy = parse_group_policy(&take_value(&mut parser, &arg)?)?;
+                if group_policy.is_some_and(|given| given != policy) {
+                    return Err(invalid(
+                        "--group-policy is given twice with different values",
                     ));
                 }
-                allow_from.push(id);
+                group_policy = Some(policy);
             }
+            "--enable" => enable = true,
+            "--disable" => disable = true,
             "--replace" => existing = ExistingValue::Replace,
             "--status" => status = true,
             "--help" | "-h" => return Ok(CliCommand::Help),
             other => {
-                return Err(CliError::InvalidArguments(format!(
+                return Err(invalid(&format!(
                     "unknown channels connect discord argument `{other}`"
                 )))
             }
         }
     }
+    for (conflict, message) in [
+        (
+            !users.is_empty() && anyone,
+            "use either --allow-from or --allow-anyone",
+        ),
+        (
+            !channels.is_empty() && all_channels,
+            "use either --allow-channel or --all-channels",
+        ),
+        (enable && disable, "use either --enable or --disable"),
+        (
+            disable && token_stdin,
+            "--disable cannot be used with --token-stdin",
+        ),
+        (
+            existing == ExistingValue::Replace && !token_stdin,
+            "--replace needs --token-stdin",
+        ),
+    ] {
+        if conflict {
+            return Err(invalid(message));
+        }
+    }
+    let settings = DiscordSettings {
+        users: if anyone {
+            Some(Users::Anyone)
+        } else {
+            (!users.is_empty()).then_some(Users::Only(users))
+        },
+        channels: if all_channels {
+            Some(Channels::All)
+        } else {
+            (!channels.is_empty()).then_some(Channels::Only(channels))
+        },
+        group_policy,
+        enabled: (enable || disable).then_some(enable),
+    };
     let action = if status {
-        if token_stdin || existing == ExistingValue::Replace || !allow_from.is_empty() {
-            return Err(CliError::InvalidArguments(
-                "channels connect discord --status takes no --token-stdin, --allow-from or --replace"
-                    .to_owned(),
+        if token_stdin || settings != DiscordSettings::default() {
+            return Err(invalid(
+                "channels connect discord --status takes no other option",
             ));
         }
         DiscordConnectAction::Status
+    } else if token_stdin {
+        DiscordConnectAction::Connect { settings, existing }
+    } else if settings != DiscordSettings::default() {
+        DiscordConnectAction::Settings(settings)
     } else {
-        if !token_stdin {
-            return Err(CliError::InvalidArguments(
-                "channels connect discord requires --token-stdin (or --status)".to_owned(),
-            ));
-        }
-        DiscordConnectAction::Connect {
-            allow_from,
-            existing,
-        }
+        return Err(invalid(
+            "channels connect discord requires --token-stdin, a setting option or --status",
+        ));
     };
     Ok(CliCommand::Channels(ChannelsCommand::Connect(
         DiscordConnectOptions {
@@ -116,28 +206,53 @@ pub(super) fn parse(
     )))
 }
 
+fn invalid(message: &str) -> CliError {
+    CliError::InvalidArguments(message.to_owned())
+}
+
+fn push_id(ids: &mut Vec<String>, value: &str, empty: &str) -> Result<(), CliError> {
+    let id = value.trim();
+    if id.is_empty() {
+        return Err(invalid(empty));
+    }
+    if !ids.iter().any(|known| known == id) {
+        ids.push(id.to_owned());
+    }
+    Ok(())
+}
+
+fn parse_group_policy(value: &str) -> Result<GroupPolicy, CliError> {
+    match value.trim() {
+        "mention" => Ok(GroupPolicy::Mention),
+        "open" => Ok(GroupPolicy::Open),
+        other => Err(invalid(&format!(
+            "--group-policy must be `mention` or `open`, not `{other}`"
+        ))),
+    }
+}
+
 pub(super) fn run(options: DiscordConnectOptions) -> Result<String, CliError> {
     let config_path = options.config_path.unwrap_or_else(default_config_path);
     match options.action {
         DiscordConnectAction::Status => status(&config_path, &ProcessEnv),
-        DiscordConnectAction::Connect {
-            allow_from,
-            existing,
-        } => connect(
+        DiscordConnectAction::Connect { settings, existing } => connect(
             &config_path,
             &Connection {
-                allow_from: &allow_from,
+                settings: &settings,
                 existing,
             },
             &|| hidden_input::read_secret("Discord bot token: "),
             &ProcessEnv,
             &mut |_| {},
         ),
+        DiscordConnectAction::Settings(settings) => {
+            change_settings(&config_path, &settings, &ProcessEnv, &mut |_| {})
+        }
     }
 }
 
 struct Connection<'a> {
-    allow_from: &'a [String],
+    settings: &'a DiscordSettings,
     existing: ExistingValue,
 }
 
@@ -201,6 +316,8 @@ fn connect(
     };
     let discord = discord_object(&config)?;
     check_token_fields(discord, &name)?;
+    let (new_config, changed_fields) = discord_config(&config, Some(&name), connection.settings)?;
+    check_settings(discord, discord_object(&new_config)?, connection.settings)?;
 
     let token = read_token()?.trim().to_owned();
     if token.is_empty() {
@@ -242,12 +359,6 @@ fn connect(
             .collect(),
     );
 
-    let (new_config, changed_fields) = connected_config(&config, &name, connection.allow_from)?;
-    let senders_empty = discord_object(&new_config)?
-        .map(allowed_sender_config)
-        .unwrap_or_default()
-        .is_empty();
-
     let wrote_env = write_files(
         &Files {
             config_path,
@@ -270,13 +381,105 @@ fn connect(
     if !wrote_env && changed_fields.is_empty() {
         lines.push("unchanged".to_owned());
     }
-    if senders_empty {
-        lines.push(
-            "warning: channels.discord has no allowFrom list; anyone the bot can see can use it"
-                .to_owned(),
-        );
+    if anyone_allowed(discord_object(&new_config)?) {
+        lines.push(ANYONE_WARNING.to_owned());
     }
     Ok(lines.join("\n"))
+}
+
+/// Changes only the settings given, keeping the saved token: the token is
+/// neither asked for nor read, and `.env.json` is only read.
+fn change_settings(
+    config_path: &Path,
+    settings: &DiscordSettings,
+    environment: &dyn EnvSource,
+    observe: &mut dyn FnMut(WriteStep),
+) -> Result<String, CliError> {
+    guard_config_migration_admission(config_path)?;
+    let Some(config_bytes) = read_if_present(config_path)? else {
+        return Err(stopped(NOT_CONNECTED));
+    };
+    let config = serde_json::from_slice::<Value>(&config_bytes).map_err(ConfigError::Json)?;
+    let discord = discord_object(&config)?;
+    if !discord_reading(config_path, environment)?.has_token() {
+        return Err(stopped(NOT_CONNECTED));
+    }
+    let (new_config, changed_fields) = discord_config(&config, None, settings)?;
+    check_settings(discord, discord_object(&new_config)?, settings)?;
+
+    let mut lines = vec!["discord: settings updated".to_owned()];
+    if changed_fields.is_empty() {
+        lines.push("unchanged".to_owned());
+    } else {
+        observe(WriteStep::BeforeConfig);
+        write_config_value_if_unchanged(config_path, Some(&config_bytes), &new_config).map_err(
+            |error| {
+                changed_or(
+                    error,
+                    "config.json changed while this command ran; nothing was written",
+                )
+            },
+        )?;
+        lines.push(format!("updated: config {}", changed_fields.join(", ")));
+    }
+    if anyone_allowed(discord_object(&new_config)?) {
+        lines.push(ANYONE_WARNING.to_owned());
+    }
+    Ok(lines.join("\n"))
+}
+
+/// Stops a change the runtime would not read: a channel list behind a field
+/// the runtime reads first or adds to the list, or a `groupPolicy` for
+/// channels it polls over REST, where it does not apply.
+fn check_settings(
+    before: Option<&Map<String, Value>>,
+    after: Option<&Map<String, Value>>,
+    settings: &DiscordSettings,
+) -> Result<(), CliError> {
+    if let (Some(_), Some(before)) = (&settings.channels, before) {
+        for field in ["channelIds", "allowedChannelIds"] {
+            if before.contains_key(field) {
+                return Err(stopped(&format!(
+                    "channels.discord.{field} is read before allowChannels; remove it by hand to set the channels here"
+                )));
+            }
+        }
+        for field in [
+            "defaultChannelId",
+            "default_channel_id",
+            "channelId",
+            "channel_id",
+        ] {
+            let has_value = before
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty());
+            if has_value {
+                return Err(stopped(&format!(
+                    "channels.discord.{field} adds a channel to the list; remove it by hand to set the channels here"
+                )));
+            }
+        }
+    }
+    if let (Some(_), Some(after)) = (&settings.group_policy, after) {
+        let (channel_ids, gateway_style) = discord_channel_config(after);
+        if !gateway_style && !channel_ids.is_empty() {
+            return Err(stopped(
+                "channels.discord lists channels without allowChannels, so the runtime polls them and does not apply groupPolicy; set the channels with --allow-channel or move them to allowChannels by hand",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn anyone_allowed(discord: Option<&Map<String, Value>>) -> bool {
+    discord
+        .map(allowed_sender_config)
+        .is_none_or(|senders| anyone(&senders))
+}
+
+fn anyone(senders: &[String]) -> bool {
+    senders.is_empty() || senders.iter().any(|sender| sender == "*")
 }
 
 fn stopped(reason: &str) -> CliError {
@@ -353,12 +556,12 @@ fn check_token_fields(discord: Option<&Map<String, Value>>, name: &str) -> Resul
     Ok(())
 }
 
-/// `config` with `channels.discord` connected through `${name}`, and the
-/// fields that changed.
-fn connected_config(
+/// `config` with the settings applied to `channels.discord`, connected
+/// through `${token_name}` when one is given, and the fields that changed.
+fn discord_config(
     config: &Value,
-    name: &str,
-    allow_from: &[String],
+    token_name: Option<&str>,
+    settings: &DiscordSettings,
 ) -> Result<(Value, Vec<String>), CliError> {
     let mut updated = config.clone();
     let root = updated
@@ -374,13 +577,38 @@ fn connected_config(
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
         .ok_or_else(|| not_object("channels.discord"))?;
-    let mut wanted = vec![
-        ("enabled", Value::Bool(true)),
-        ("token", Value::String(placeholder(name))),
-    ];
-    if !allow_from.is_empty() {
-        let ids: Vec<Value> = allow_from.iter().cloned().map(Value::String).collect();
-        wanted.push(("allowFrom", Value::Array(ids)));
+    let mut wanted = Vec::new();
+    match token_name {
+        Some(name) => {
+            wanted.push(("enabled", Value::Bool(true)));
+            wanted.push(("token", Value::String(placeholder(name))));
+        }
+        None => {
+            if let Some(enabled) = settings.enabled {
+                wanted.push(("enabled", Value::Bool(enabled)));
+            }
+        }
+    }
+    if let Some(users) = &settings.users {
+        let ids = match users {
+            Users::Only(ids) => ids.as_slice(),
+            Users::Anyone => &[],
+        };
+        wanted.push(("allowFrom", id_list(ids)));
+    }
+    if let Some(channels) = &settings.channels {
+        let ids = match channels {
+            Channels::Only(ids) => ids.as_slice(),
+            Channels::All => &[],
+        };
+        wanted.push(("allowChannels", id_list(ids)));
+    }
+    if let Some(policy) = settings.group_policy {
+        let value = match policy {
+            GroupPolicy::Mention => "mention",
+            GroupPolicy::Open => "open",
+        };
+        wanted.push(("groupPolicy", Value::String(value.to_owned())));
     }
     let mut changed = Vec::new();
     for (field, value) in wanted {
@@ -390,6 +618,10 @@ fn connected_config(
         }
     }
     Ok((updated, changed))
+}
+
+fn id_list(ids: &[String]) -> Value {
+    Value::Array(ids.iter().cloned().map(Value::String).collect())
 }
 
 struct Files<'a> {
@@ -462,9 +694,29 @@ fn run_again(reason: &str) -> CliError {
     CliError::Runtime(format!("{reason}. Run it again."))
 }
 
+/// What the runtime reads from `channels.discord`, with only the token
+/// fields resolved.
+struct DiscordReading {
+    /// A token field whose `${NAME}` resolves nowhere.
+    unresolved: Option<String>,
+    enabled: bool,
+    runtime: Option<DiscordRuntimeConfig>,
+    token_field: &'static str,
+}
+
+impl DiscordReading {
+    /// Everything the worker needs except `enabled`.
+    fn has_token(&self) -> bool {
+        self.unresolved.is_none() && self.runtime.is_some()
+    }
+}
+
 /// Reads config like the runtime but resolves only the Discord token fields;
 /// writes nothing and does not look at migration markers.
-fn status(config_path: &Path, environment: &dyn EnvSource) -> Result<String, CliError> {
+fn discord_reading(
+    config_path: &Path,
+    environment: &dyn EnvSource,
+) -> Result<DiscordReading, CliError> {
     let bundle = load_config_with_env(
         LoadOptions {
             config_path: Some(config_path.to_path_buf()),
@@ -490,35 +742,77 @@ fn status(config_path: &Path, environment: &dyn EnvSource) -> Result<String, Cli
             }
         }
     }
-    let reason = if let Some(problem) = unresolved {
+    let token_field = resolved
+        .get(DISCORD_CHANNEL)
+        .and_then(Value::as_object)
+        .and_then(|discord| {
+            TOKEN_FIELDS.into_iter().find(|field| {
+                discord
+                    .get(*field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+        })
+        .unwrap_or("token");
+    Ok(DiscordReading {
+        unresolved,
+        enabled: channel_enabled_from_plugins(plugins, DISCORD_CHANNEL, false),
+        runtime: discord_runtime_config(&resolved),
+        token_field,
+    })
+}
+
+fn status(config_path: &Path, environment: &dyn EnvSource) -> Result<String, CliError> {
+    let reading = discord_reading(config_path, environment)?;
+    let reason = if let Some(problem) = &reading.unresolved {
         Some(format!(
             "{problem}, so the runtime cannot read config until it is set"
         ))
-    } else if !channel_enabled_from_plugins(plugins, DISCORD_CHANNEL, false) {
+    } else if !reading.enabled {
         Some("channels.discord.enabled is not true".to_owned())
-    } else if discord_runtime_config(&resolved).is_none() {
+    } else if reading.runtime.is_none() {
         Some("channels.discord has no token in botToken, bot_token or token".to_owned())
     } else {
         None
     };
-    Ok(match reason {
+    let mut lines = vec![match reason {
         Some(reason) => format!("discord: not connected\nreason: {reason}"),
-        None => {
-            let field = resolved
-                .get(DISCORD_CHANNEL)
-                .and_then(Value::as_object)
-                .and_then(|discord| {
-                    TOKEN_FIELDS.into_iter().find(|field| {
-                        discord
-                            .get(*field)
-                            .and_then(Value::as_str)
-                            .is_some_and(|value| !value.trim().is_empty())
-                    })
-                })
-                .unwrap_or("token");
-            format!("discord: connected\ntoken: channels.discord.{field}")
+        None => "discord: connected".to_owned(),
+    }];
+    if let (None, Some(runtime)) = (&reading.unresolved, &reading.runtime) {
+        lines.push(format!("token: channels.discord.{}", reading.token_field));
+        lines.extend(settings_lines(runtime));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn settings_lines(runtime: &DiscordRuntimeConfig) -> [String; 3] {
+    let senders = &runtime.allowed_senders;
+    let users = if anyone(senders) {
+        "anyone".to_owned()
+    } else {
+        senders.join(", ")
+    };
+    // REST polling asks for each listed channel as it is, so `*` there is
+    // one channel ID rather than every channel.
+    let polling = runtime.transport == DiscordTransportMode::RestPolling;
+    let channels = match &runtime.channel_filter {
+        DiscordChannelFilter::AllVisible => "all".to_owned(),
+        DiscordChannelFilter::Only(ids) if !polling && ids.iter().any(|id| id == "*") => {
+            "all".to_owned()
         }
-    })
+        DiscordChannelFilter::Only(ids) => ids.join(", "),
+    };
+    let replies = match (polling, runtime.group_policy) {
+        (true, _) => "every message (channelIds polling does not apply groupPolicy)",
+        (false, DiscordGroupPolicy::Mention) => "when mentioned",
+        (false, DiscordGroupPolicy::Open) => "every message",
+    };
+    [
+        format!("users: {users}"),
+        format!("channels: {channels}"),
+        format!("server channels: {replies}"),
+    ]
 }
 
 #[cfg(test)]

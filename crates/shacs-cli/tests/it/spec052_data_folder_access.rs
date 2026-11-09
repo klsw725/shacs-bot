@@ -21,7 +21,7 @@ const NON_ROOT: u32 = 1001;
 /// The checked commands run here. `provider codex login` and `memory model
 /// install` are only in the unit list table: without the check they would
 /// reach the network.
-const CHECKED: [&[&str]; 29] = [
+const CHECKED: [&[&str]; 30] = [
     &["onboard"],
     &["onboard", "--wizard"],
     &["run"],
@@ -44,6 +44,7 @@ const CHECKED: [&[&str]; 29] = [
     &["provider", "copilot", "import-token", "--token-stdin"],
     &["provider", "anthropic", "import-key", "--token-stdin"],
     &["channels", "connect", "discord", "--token-stdin"],
+    &["channels", "connect", "discord", "--allow-anyone"],
     &["plugins", "enable", "demo"],
     &["plugins", "disable", "demo"],
     &["permissions", "revoke", "abc"],
