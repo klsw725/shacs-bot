@@ -9,6 +9,9 @@ mod auto_mode_setup;
 mod automation_outcome;
 mod automation_producer;
 mod automation_worker;
+#[cfg(test)]
+#[path = "codex_login_model_tests.rs"]
+mod codex_login_model_tests;
 mod consent_prompt;
 #[cfg(unix)]
 mod data_folder_access;
@@ -24,6 +27,9 @@ mod provider_status_cli;
 mod review_provider;
 mod run_permission_mode;
 mod runtime_cleanup;
+#[cfg(test)]
+#[path = "runtime_ownership_takeover_tests.rs"]
+mod runtime_ownership_takeover_tests;
 #[cfg(test)]
 #[path = "saved_credential_tests.rs"]
 mod saved_credential_tests;
@@ -233,7 +239,12 @@ const CODEX_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 const CODEX_DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 const CODEX_DEVICE_URL: &str = "https://auth.openai.com/codex/device";
 const CODEX_PROVIDER_ID: &str = "openai_codex";
-const CODEX_DEFAULT_MODEL: &str = "gpt-5.4";
+const CODEX_API_BASE: &str = "https://chatgpt.com/backend-api";
+/// Used only when the account's model list cannot be read; it was the first
+/// model of that list on 2026-11-09.
+const CODEX_DEFAULT_MODEL: &str = "gpt-6.1-sol";
+/// The `client_version` the Codex model list was read with on 2026-11-09.
+const CODEX_MODELS_CLIENT_VERSION: &str = "1.0.0";
 const GITHUB_COPILOT_PROVIDER_ID: &str = "github_copilot";
 const GITHUB_COPILOT_DEFAULT_MODEL: &str = "github_copilot/gpt-4o";
 const CODEX_BROWSER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -979,8 +990,43 @@ pub struct CodexLoginOutcome {
     pub auth_path: PathBuf,
     pub provider: String,
     pub selected_model: String,
+    pub model_check: String,
     pub account_id: Option<String>,
     pub expires: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexAccountModel {
+    slug: String,
+    listed: bool,
+    priority: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CodexModelCheck {
+    FromAccountList,
+    KeptInAccountList,
+    KeptUnchecked(String),
+    DefaultUnchecked(String),
+}
+
+impl CodexModelCheck {
+    fn describe(&self) -> String {
+        match self {
+            Self::FromAccountList => {
+                "picked the highest-priority model your ChatGPT account lists".to_owned()
+            }
+            Self::KeptInAccountList => {
+                "kept the configured model; your ChatGPT account offers it".to_owned()
+            }
+            Self::KeptUnchecked(reason) => format!(
+                "could not read your ChatGPT account's model list ({reason}); kept the configured model"
+            ),
+            Self::DefaultUnchecked(reason) => format!(
+                "could not read your ChatGPT account's model list ({reason}); used the default model"
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1005,6 +1051,12 @@ trait CodexAuthTransport {
     ) -> Result<CodexAuthHttpResponse, CliError>;
 
     fn post_json(&self, url: &str, body: Value) -> Result<CodexAuthHttpResponse, CliError>;
+
+    fn get_json(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> Result<CodexAuthHttpResponse, CliError>;
 }
 
 struct UreqCodexAuthTransport {
@@ -1054,6 +1106,19 @@ impl CodexAuthTransport for UreqCodexAuthTransport {
             .header("User-Agent", "shacs-bot (rust)")
             .send(body)
             .map_err(codex_auth_transport_error)?;
+        codex_auth_response(response)
+    }
+
+    fn get_json(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> Result<CodexAuthHttpResponse, CliError> {
+        let mut request = self.agent.get(url).header("User-Agent", "shacs-bot (rust)");
+        for (name, value) in headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        let response = request.call().map_err(codex_auth_transport_error)?;
         codex_auth_response(response)
     }
 }
@@ -5932,6 +5997,13 @@ fn runtime_owner_id(pid: u32, acquired_at_ms: u64) -> String {
 }
 
 fn read_runtime_ownership_marker(path: &Path) -> Result<Option<RuntimeOwnershipMarker>, CliError> {
+    read_runtime_ownership_marker_with_proc_root(path, Path::new("/proc"))
+}
+
+fn read_runtime_ownership_marker_with_proc_root(
+    path: &Path,
+    proc_root: &Path,
+) -> Result<Option<RuntimeOwnershipMarker>, CliError> {
     let Some(value) = read_runtime_marker_json(path, "runtime ownership marker")? else {
         return Ok(None);
     };
@@ -5961,12 +6033,12 @@ fn read_runtime_ownership_marker(path: &Path) -> Result<Option<RuntimeOwnershipM
             lock_protocol: None,
             process_evidence: RuntimeOwnerProcessEvidence {
                 pid,
-                pid_alive: pid_is_alive(pid),
+                pid_alive: pid_is_alive_with(pid, proc_root, Path::new("kill")),
                 process_started_after_marker: false,
             },
         };
         marker.process_evidence.process_started_after_marker =
-            owner_process_started_after_marker(&marker, Path::new("/proc"));
+            owner_process_started_after_marker(&marker, proc_root);
         return Ok(Some(marker));
     }
     let schema_version = required_marker_u64(&value, "schema_version")? as u32;
@@ -6061,9 +6133,9 @@ fn read_runtime_ownership_marker(path: &Path) -> Result<Option<RuntimeOwnershipM
                 process_started_after_marker: process_evidence_started_after_marker,
             },
         },
-        Path::new("/proc"),
+        proc_root,
     );
-    let pid_alive = pid_is_alive(pid);
+    let pid_alive = pid_is_alive_with(pid, proc_root, Path::new("kill"));
     Ok(Some(RuntimeOwnershipMarker {
         schema_version,
         owner_id,
@@ -6090,8 +6162,17 @@ fn inspect_runtime_ownership(
     data_dir: &Path,
     now_ms: u64,
 ) -> Result<RuntimeOwnershipStatus, CliError> {
+    inspect_runtime_ownership_with_proc_root(data_dir, now_ms, Path::new("/proc"))
+}
+
+fn inspect_runtime_ownership_with_proc_root(
+    data_dir: &Path,
+    now_ms: u64,
+    proc_root: &Path,
+) -> Result<RuntimeOwnershipStatus, CliError> {
     let marker_path = runtime_ownership_marker_path(data_dir);
-    let Some(marker) = read_runtime_ownership_marker(&marker_path)? else {
+    let Some(marker) = read_runtime_ownership_marker_with_proc_root(&marker_path, proc_root)?
+    else {
         return Ok(RuntimeOwnershipStatus {
             state: RuntimeOwnershipState::None,
             marker: None,
@@ -6143,10 +6224,21 @@ fn runtime_ownership_marker_matches(
         && marker.owner_id == runtime_owner_id(pid, started_at_ms)
 }
 
-fn lock_aware_ownership_can_be_replaced(ownership: &RuntimeOwnershipStatus, now_ms: u64) -> bool {
+/// Called with the process lock held. A marker whose pid is this very
+/// process, started after the marker was written, belongs to an earlier
+/// process that had the same pid (PID 1 of a re-created container): its
+/// owner cannot still hold the lock this process holds.
+fn lock_aware_ownership_can_be_replaced(
+    ownership: &RuntimeOwnershipStatus,
+    now_ms: u64,
+    own_pid: u32,
+) -> bool {
     ownership.marker.as_ref().is_some_and(|marker| {
+        let evidence = &marker.process_evidence;
         marker.lock_protocol.as_deref() == Some(RUNTIME_OWNERSHIP_LOCK_PROTOCOL)
-            && (!marker.process_evidence.pid_alive || now_ms > marker.expires_at_ms)
+            && (!evidence.pid_alive
+                || now_ms > marker.expires_at_ms
+                || (marker.pid == own_pid && evidence.process_started_after_marker))
     })
 }
 
@@ -6198,9 +6290,25 @@ fn acquire_runtime_ownership_marker(
     marker: &Value,
     request_path: &Path,
 ) -> Result<(), CliError> {
+    acquire_runtime_ownership_marker_with_proc_root(
+        data_dir,
+        path,
+        marker,
+        request_path,
+        Path::new("/proc"),
+    )
+}
+
+fn acquire_runtime_ownership_marker_with_proc_root(
+    data_dir: &Path,
+    path: &Path,
+    marker: &Value,
+    request_path: &Path,
+    proc_root: &Path,
+) -> Result<(), CliError> {
     let _mutation_lock = RuntimeOwnershipMutationLock::acquire(path)?;
     let now_ms = now_millis();
-    let ownership = inspect_runtime_ownership(data_dir, now_ms)?;
+    let ownership = inspect_runtime_ownership_with_proc_root(data_dir, now_ms, proc_root)?;
     match ownership.state {
         RuntimeOwnershipState::None => {
             if request_path.exists() {
@@ -6210,7 +6318,7 @@ fn acquire_runtime_ownership_marker(
             write_runtime_marker_if_absent_or_concurrent(path, marker)?;
         }
         RuntimeOwnershipState::Stale
-            if lock_aware_ownership_can_be_replaced(&ownership, now_ms) =>
+            if lock_aware_ownership_can_be_replaced(&ownership, now_ms, std::process::id()) =>
         {
             append_runtime_owner_lifecycle(
                 data_dir,
@@ -9996,7 +10104,116 @@ fn codex_login_with_transport(
     } else {
         codex_browser_login(&options, transport)?
     };
-    save_codex_login_token(options.config_path, token)
+    let access = token.access.clone();
+    let account_id = token.account_id.clone();
+    save_codex_login_token(options.config_path, token, |api_base| {
+        codex_account_models(transport, api_base, &access, account_id.as_deref())
+    })
+}
+
+/// The models the account offers, from the Codex backend's model list.
+/// Names that do not look like a model name, or that echo the token or the
+/// account ID sent, are dropped so they never reach config or output.
+fn codex_account_models(
+    transport: &impl CodexAuthTransport,
+    api_base: &str,
+    access: &str,
+    account_id: Option<&str>,
+) -> Result<Vec<CodexAccountModel>, String> {
+    let url = format!(
+        "{}/codex/models?client_version={CODEX_MODELS_CLIENT_VERSION}",
+        api_base.trim_end_matches('/')
+    );
+    let account_id = account_id.filter(|id| !id.is_empty());
+    let mut headers = vec![
+        ("Authorization".to_owned(), format!("Bearer {access}")),
+        ("originator".to_owned(), "shacs-bot".to_owned()),
+        ("Accept".to_owned(), "application/json".to_owned()),
+    ];
+    if let Some(account_id) = account_id {
+        headers.push(("ChatGPT-Account-Id".to_owned(), account_id.to_owned()));
+    }
+    let response = transport
+        .get_json(&url, &headers)
+        .map_err(|error| error.to_string())?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!("HTTP {}", response.status));
+    }
+    let models = response
+        .body
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "the response has no model list".to_owned())?;
+    Ok(models
+        .iter()
+        .filter_map(|model| {
+            let slug = model.get("slug")?.as_str()?.trim();
+            let echoes = (!access.is_empty() && slug.contains(access))
+                || account_id.is_some_and(|id| slug.contains(id));
+            if echoes || !plain_codex_model_name(slug) {
+                return None;
+            }
+            Some(CodexAccountModel {
+                slug: slug.to_owned(),
+                listed: model.get("visibility").and_then(Value::as_str) == Some("list"),
+                priority: model
+                    .get("priority")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i64::MAX),
+            })
+        })
+        .collect())
+}
+
+fn plain_codex_model_name(name: &str) -> bool {
+    (1..=100).contains(&name.len())
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | ':' | '/')
+        })
+}
+
+fn codex_model_slug(model: &str) -> &str {
+    ["openai-codex/", "openai_codex/", "openai/"]
+        .iter()
+        .find_map(|prefix| model.strip_prefix(prefix))
+        .unwrap_or(model)
+}
+
+/// Keeps the configured Codex model when the account offers it; otherwise
+/// takes the listed model with the smallest priority (the first on a tie).
+/// Without a usable list it keeps the configured Codex model or falls back
+/// to `CODEX_DEFAULT_MODEL`.
+fn choose_codex_model(
+    configured: Option<&str>,
+    models: Result<Vec<CodexAccountModel>, String>,
+) -> (String, CodexModelCheck) {
+    let reason = match models {
+        Ok(models) => {
+            if let Some(model) = configured.filter(|model| {
+                models
+                    .iter()
+                    .any(|offered| offered.slug == codex_model_slug(model.trim()))
+            }) {
+                return (model.to_owned(), CodexModelCheck::KeptInAccountList);
+            }
+            match models
+                .iter()
+                .filter(|model| model.listed)
+                .min_by_key(|model| model.priority)
+            {
+                Some(model) => return (model.slug.clone(), CodexModelCheck::FromAccountList),
+                None => "the account offers no listed model".to_owned(),
+            }
+        }
+        Err(reason) => reason,
+    };
+    match configured {
+        Some(model) => (model.to_owned(), CodexModelCheck::KeptUnchecked(reason)),
+        None => (
+            CODEX_DEFAULT_MODEL.to_owned(),
+            CodexModelCheck::DefaultUnchecked(reason),
+        ),
+    }
 }
 
 fn codex_browser_login(
@@ -10069,7 +10286,7 @@ fn codex_provider_config() -> ProviderConfig {
     ProviderConfig {
         api_key: None,
         api_key_ref: None,
-        api_base: Some("https://chatgpt.com/backend-api".to_owned()),
+        api_base: Some(CODEX_API_BASE.to_owned()),
         extra_headers: None,
         extra_body: None,
         credential_source: None,
@@ -10281,9 +10498,11 @@ fn read_token_source(source: &TokenSource) -> Result<String, CliError> {
     }
 }
 
+/// `account_models` reads the account's model list from the given API base.
 fn save_codex_login_token(
     config_path: Option<PathBuf>,
     token: CodexTokenResponse,
+    account_models: impl FnOnce(&str) -> Result<Vec<CodexAccountModel>, String>,
 ) -> Result<CodexLoginOutcome, CliError> {
     let config_path = config_path.unwrap_or_else(default_config_path);
     let mut bundle = load_config_with_env(
@@ -10295,13 +10514,25 @@ fn save_codex_login_token(
         },
         &ProcessEnv,
     )?;
-    bundle
+    let codex_config = bundle
         .config
         .providers
         .entry(CODEX_PROVIDER_ID.to_owned())
         .or_insert_with(codex_provider_config);
+    let api_base = codex_config
+        .api_base
+        .as_deref()
+        .map(str::trim)
+        .filter(|base| base.starts_with("http"))
+        .unwrap_or(CODEX_API_BASE)
+        .to_owned();
+    let defaults = &bundle.config.agents.defaults;
+    let configured = (defaults.provider == CODEX_PROVIDER_ID && !defaults.model.trim().is_empty())
+        .then(|| defaults.model.clone());
+    let (selected_model, model_check) =
+        choose_codex_model(configured.as_deref(), account_models(&api_base));
     bundle.config.agents.defaults.provider = CODEX_PROVIDER_ID.to_owned();
-    bundle.config.agents.defaults.model = CODEX_DEFAULT_MODEL.to_owned();
+    bundle.config.agents.defaults.model = selected_model.clone();
     let context = config_context(
         Some(config_path.clone()),
         Some(bundle.config.workspace_path()),
@@ -10333,7 +10564,8 @@ fn save_codex_login_token(
         config_path,
         auth_path,
         provider: CODEX_PROVIDER_ID.to_owned(),
-        selected_model: CODEX_DEFAULT_MODEL.to_owned(),
+        selected_model,
+        model_check: model_check.describe(),
         account_id: token.account_id,
         expires: token.expires,
     })
@@ -10386,10 +10618,22 @@ fn token_response_from_json(body: &Value) -> Result<CodexTokenResponse, CliError
         .and_then(Value::as_u64)
         .or(Some(3600))
         .map(|seconds| now_millis().saturating_add(seconds.saturating_mul(1000)));
-    let id_token = body.get("id_token").and_then(Value::as_str);
-    let account_id = id_token
-        .and_then(extract_codex_account_id)
-        .or_else(|| extract_codex_account_id(&access));
+    let id_claims = body
+        .get("id_token")
+        .and_then(Value::as_str)
+        .and_then(codex_token_claims);
+    let access_claims = codex_token_claims(&access);
+    let claims = [id_claims.as_ref(), access_claims.as_ref()];
+    let account_id = claims
+        .iter()
+        .flatten()
+        .find_map(|claims| nested_codex_account_id(claims))
+        .or_else(|| {
+            claims
+                .iter()
+                .flatten()
+                .find_map(|claims| legacy_codex_account_id(claims))
+        });
     Ok(CodexTokenResponse {
         access,
         refresh,
@@ -10715,10 +10959,23 @@ fn base64_url_decode(input: &str) -> Option<Vec<u8>> {
     Some(output)
 }
 
-fn extract_codex_account_id(token: &str) -> Option<String> {
+fn codex_token_claims(token: &str) -> Option<Value> {
     let payload = token.split('.').nth(1)?;
     let decoded = base64_url_decode(payload)?;
-    let claims = serde_json::from_slice::<Value>(&decoded).ok()?;
+    serde_json::from_slice::<Value>(&decoded).ok()
+}
+
+fn nested_codex_account_id(claims: &Value) -> Option<String> {
+    claims
+        .get("https://api.openai.com/auth")?
+        .get("chatgpt_account_id")?
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+fn legacy_codex_account_id(claims: &Value) -> Option<String> {
     claims
         .get("chatgpt_account_id")
         .and_then(Value::as_str)
@@ -22504,6 +22761,7 @@ fn format_codex_login_outcome(outcome: CodexLoginOutcome) -> String {
         format!("Auth: {}", display_path(&outcome.auth_path)),
         format!("Provider: {}", outcome.provider),
         format!("Selected model: {}", outcome.selected_model),
+        format!("Model check: {}", outcome.model_check),
         format!(
             "Account id: {}",
             configured_label(
@@ -31477,8 +31735,35 @@ mod tests {
             now,
         );
 
-        assert!(!lock_aware_ownership_can_be_replaced(&fresh, now));
-        assert!(lock_aware_ownership_can_be_replaced(&expired, now));
+        let own_pid = std::process::id();
+        assert!(!lock_aware_ownership_can_be_replaced(&fresh, now, own_pid));
+        assert!(lock_aware_ownership_can_be_replaced(&expired, now, own_pid));
+
+        // Given: a fresh marker with this process's own pid, with and without
+        // evidence that this process started after it.
+        let own_fresh = |started_after_marker| {
+            classify_runtime_ownership_marker(
+                runtime_marker_for_test(
+                    own_pid,
+                    now.saturating_sub(60_000),
+                    now,
+                    "run",
+                    true,
+                    started_after_marker,
+                ),
+                now,
+            )
+        };
+
+        // When
+        let replaceable_after =
+            lock_aware_ownership_can_be_replaced(&own_fresh(true), now, own_pid);
+        let replaceable_without =
+            lock_aware_ownership_can_be_replaced(&own_fresh(false), now, own_pid);
+
+        // Then: only the evidence that an earlier process left it allows it.
+        assert!(replaceable_after);
+        assert!(!replaceable_without);
     }
 
     #[test]
@@ -36902,6 +37187,34 @@ mod tests {
         assert!(response
             .expires
             .is_some_and(|expires| expires > now_millis()));
+
+        // Given: the nested account ID OpenAI tokens carry, beside an older
+        // field in the other token.
+        let nested = |id: &str| json!({"https://api.openai.com/auth": {"chatgpt_account_id": id}});
+        let cases = [
+            (
+                json!({"organizations": [{"id": "org_in_access"}]}),
+                Some(nested("acct_in_id")),
+                "acct_in_id",
+            ),
+            (
+                nested("acct_in_access"),
+                Some(json!({"organizations": [{"id": "org_in_id"}]})),
+                "acct_in_access",
+            ),
+        ];
+        for (access_claims, id_claims, expected) in cases {
+            let mut body = json!({"access_token": fake_jwt(access_claims)});
+            if let Some(id_claims) = id_claims {
+                body["id_token"] = json!(fake_jwt(id_claims));
+            }
+
+            // When
+            let response = token_response_from_json(&body)?;
+
+            // Then: the nested ID wins over the older field.
+            assert_eq!(response.account_id.as_deref(), Some(expected));
+        }
         Ok(())
     }
 
@@ -36918,6 +37231,7 @@ mod tests {
                 expires: Some(1234),
                 account_id: Some("acct_login".to_owned()),
             },
+            |_| Err("offline".to_owned()),
         )?;
 
         assert_eq!(outcome.selected_model, CODEX_DEFAULT_MODEL);
@@ -37680,6 +37994,7 @@ mod tests {
     struct MockCodexAuthTransport {
         forms: Mutex<MockFormCalls>,
         jsons: Mutex<Vec<(String, Value)>>,
+        gets: Mutex<MockFormCalls>,
         responses: Mutex<VecDeque<CodexAuthHttpResponse>>,
     }
 
@@ -37688,6 +38003,7 @@ mod tests {
             Self {
                 forms: Mutex::new(Vec::new()),
                 jsons: Mutex::new(Vec::new()),
+                gets: Mutex::new(Vec::new()),
                 responses: Mutex::new(VecDeque::from(responses)),
             }
         }
@@ -37719,6 +38035,18 @@ mod tests {
                 .lock()
                 .map_err(|_| CliError::InvalidArguments("jsons lock poisoned".to_owned()))?
                 .push((url.to_owned(), body));
+            self.next_response()
+        }
+
+        fn get_json(
+            &self,
+            url: &str,
+            headers: &[(String, String)],
+        ) -> Result<CodexAuthHttpResponse, CliError> {
+            self.gets
+                .lock()
+                .map_err(|_| CliError::InvalidArguments("gets lock poisoned".to_owned()))?
+                .push((url.to_owned(), headers.to_vec()));
             self.next_response()
         }
     }

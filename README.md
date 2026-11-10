@@ -214,6 +214,8 @@ Docker Compose로 초기 설정과 장기 실행 서비스를 다룹니다. 이 
 
 스크립트는 `~/.shacs-bot`을 실행한 사용자로 만들고, 저장소 `.env`(Compose가 읽고 git은 무시합니다)에 `SHACS_UID`·`SHACS_GID`를 그 사용자의 번호로 적어 container가 같은 번호로 돌게 합니다. 그다음 image를 만들고(처음에는 몇 분 걸립니다) 처음 설정(`onboard`)을 한 뒤, ChatGPT 계정 로그인과 Discord bot 연결(토큰은 화면에 보이지 않게 받고, 봇과 말할 수 있는 사람·봇이 읽는 채널·서버 채널에서 답하는 때를 각각 무엇을 하는지 설명하며 묻습니다. 이미 연결돼 있으면 지금 설정을 보여 주고 바꾸거나 끄고 켤 수 있습니다)을 묻고 gateway를 띄웁니다. 다시 실행해도 되고, 이미 된 것은 확인만 합니다. terminal이 아닌 곳에서 실행하면 묻지 않고 남은 일을 명령과 함께 알립니다. root로 실행하면 멈추고(container가 관리자로 돌게 되므로), `sudo`를 부르지 않습니다. Compose를 스크립트보다 먼저 돌려 Docker가 `~/.shacs-bot`을 `root` 소유로 만들었으면 스크립트가 알려 주는 `sudo chown -R "$(id -u):$(id -g)" ~/.shacs-bot`으로 고친 뒤 다시 실행하세요. 스크립트 없이 쓰다 data 폴더에 쓸 수 없으면 `onboard`·`run` 같은 쓰는 명령이 시작할 때 `Permission denied` 대신 폴더 경로, 주인과 실행 번호, 고치는 방법을 알리고 멈춥니다. rootless Docker·Podman·Docker Desktop·WSL 안내는 [Docker Compose](docs/USAGE.md#docker-compose)를 참고하세요.
 
+ChatGPT 계정 로그인은 그 계정이 쓸 수 있는 Codex model을 고르고 `Model check:` 줄로 알립니다. gateway는 시작할 때 설정을 읽으므로, `~/.shacs-bot/config.json`이나 `.env.json`을 손으로 고친 뒤에는 `docker compose restart shacs-gateway`로 다시 띄워야 반영됩니다.
+
 스크립트 없이 손으로 할 때는 `SHACS_UID`·`SHACS_GID`를 정해야 합니다(정하지 않으면 container는 1000:1000으로 돌고, host 사용자 번호가 다르면 `~/.shacs-bot`에 쓰지 못합니다):
 
 ```sh

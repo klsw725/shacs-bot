@@ -14,6 +14,7 @@ const DEFAULT_CODEX_API_BASE: &str = "https://chatgpt.com/backend-api";
 const DEFAULT_ORIGINATOR: &str = "shacs-bot";
 pub const CODEX_ERROR_RESPONSE_MAX_BYTES: usize = 32 * 1024 * 1024;
 pub const CODEX_ERROR_RESPONSE_READ_LIMIT: u64 = 32 * 1024 * 1024 + 1;
+const CODEX_ERROR_CODE_BODY_MAX_BYTES: usize = 64 * 1024;
 
 mod media;
 mod request;
@@ -171,6 +172,12 @@ where
         timeout: Option<Duration>,
     ) -> Result<LlmResponse, ProviderError> {
         let parts = build_codex_responses_request(&request, &self.config);
+        let model = parts
+            .body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
         let mut stream = OpenAiResponsesStreamState::default();
         let response = self.transport.post_json_stream_frames_bounded(
             parts,
@@ -180,7 +187,7 @@ where
         if (200..300).contains(&response.status) {
             stream.finish(on_event)
         } else {
-            response::parse_codex_stream_http_response(response, on_event)
+            response::parse_codex_stream_http_response(response, &model, on_event)
         }
     }
 }

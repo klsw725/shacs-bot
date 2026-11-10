@@ -2,7 +2,7 @@
 
 Status: Planned revision (implemented baseline)
 
-Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실행, official-container 증거), 012 Discord worker가 config를 읽는 법(`discord_runtime_config`)과 final-only 전송, 029 runtime 시작과 시작 출력, 003 provider 고르기(`ProviderRegistry`), 010 provider 인증 명령(`provider codex login`, `provider <id> import-key`)과 비밀 다루기, 030 credential 해석(자리 순서, 인증 저장소 읽기, fingerprint, 갱신), 031 config 읽기·쓰기와 credential 선언 저장, config migration marker, 048 `.env.json` 형식·`${이름}` 해석 순서·이름 규칙·충돌 규칙·바뀜 확인 쓰기·비밀 옮기기 marker
+Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실행, official-container 증거), 012 Discord worker가 config를 읽는 법(`discord_runtime_config`)과 final-only 전송, 019·034 Codex 실패 응답의 보안 계약, 029 runtime 시작과 시작 출력·owner lease, 003 provider 고르기(`ProviderRegistry`)와 Codex 응답 해석, 010 provider 인증 명령(`provider codex login`, `provider <id> import-key`)과 비밀 다루기, 030 credential 해석(자리 순서, 인증 저장소 읽기, fingerprint, 갱신), 031 config 읽기·쓰기와 credential 선언 저장, config migration marker, 048 `.env.json` 형식·`${이름}` 해석 순서·이름 규칙·충돌 규칙·바뀜 확인 쓰기·비밀 옮기기 marker
 
 ## 목적과 완료 경계
 
@@ -22,6 +22,13 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 - runtime은 config나 인증 저장소에 항목이 있는 provider만 후보로 삼는다. 환경 변수만 있는 provider는 고르지 않는다.
 - `onboard`와 provider 로그인처럼 config를 쓰는 명령은 031·048 migration marker를 보지 않는다. marker를 보는 것은 `runtime config-migrate --apply`와 runtime 시작이다.
 
+스크립트로 처음 설정한 뒤 같은 서버에서 확인한 것(2026-11-09, 소유 범위 11이 고친다):
+
+- `provider codex login`은 모델을 언제나 `gpt-5.4`(`CODEX_DEFAULT_MODEL`)로 적는다. ChatGPT 계정 Codex는 이 모델을 HTTP 400(`error.code`가 `model_not_found`, 글은 "The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account.")으로 거절해 봇의 답이 모두 실패했다. 그 계정의 Codex 모델 목록(`GET /backend-api/codex/models`)에 `gpt-5.4`는 없었고, 목록에 있는 `gpt-6-sol`로 바꾸자 같은 요청이 200이었다. 다시 로그인해도 `gpt-5.4`를 다시 적는다.
+- Codex client는 실패한 응답의 본문을 버리고 `HTTP 400: provider error`만 답해 사용자는 까닭을 알 수 없었다. 본문을 버리는 것은 019 PRD 000과 034의 보안 계약(공급자가 쓴 글을 답에 넣지 않는다)이다.
+- 로그인은 계정 ID를 실제 token 꼴(`https://api.openai.com/auth` 객체 안의 `chatgpt_account_id`)에서 읽지 않아 `auth.json`에 `accountId`가 없었고, runtime은 `ChatGPT-Account-Id` header를 보내지 않았다. 이 계정에서는 header가 없어도 요청이 됐다.
+- gateway 컨테이너가 강제로 꺼지면(종료 요청 3초 뒤 SIGKILL, exit 137) ownership marker가 남는다. 다시 만든 컨테이너의 runtime도 PID 1이라, marker의 PID가 살아 있고 heartbeat(30초)가 아직 유효하다고 보아 `invalid CLI arguments: runtime mutation blocked by stale runtime ownership owner-1-… pid=1; request stop or inspect first`로 시작을 거절했다. Docker가 8번 다시 띄운 끝에 heartbeat가 지나 약 30초 뒤 시작했다.
+
 이 스펙은 처음 실행을 저장소의 스크립트 하나(`scripts/docker-setup.sh`)로 끝내게 한다. 스크립트가 data 폴더와 사용자 번호를 맞추고, image를 만들고, 처음 설정을 하고, ChatGPT 계정 로그인과 Discord 연결을 묻고, gateway를 띄운다.
 
 공식 image는 지금처럼 처음부터 일반 사용자로 돈다(사용자 결정 2026-11-09). 컨테이너가 관리자로 켜져 사용자 번호를 바꾸고 data 폴더 주인을 고친 뒤 일반 사용자로 내려가는 방식(Hermes Agent `docker/stage2-hook.sh`)은 쓰지 않는다. 이 컨테이너에서는 어시스턴트가 명령 실행·파일 쓰기 도구를 쓴다. 켜질 때마다 관리자 권한으로 data 폴더를 고치면, 어시스턴트가 그 폴더에 심은 symlink가 그 작업을 다른 파일로 돌릴 수 있다. 또 provider 로그인과 channel 토큰은 어느 방식이든 사용자가 넣어야 한다. 이 스펙은 OpenClaw `scripts/docker/setup.sh`처럼 처음 설정 스크립트를 둔다. 다만 data 폴더 주인을 컨테이너 사용자(1000)로 바꾸지 않고, 컨테이너가 host 사용자 번호로 돌게 한다. 그래서 image의 HOME을 어느 번호로 돌아도 쓸 수 있게 한다.
@@ -35,6 +42,8 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 - Discord 토큰은 CLI 명령 하나로 `.env.json`에 들어가고 `config.json`에는 `${이름}`만 남는다. Docker 밖에서도 같은 명령을 쓴다.
 - Discord를 연결할 때 스크립트가 봇과 말할 수 있는 사람, 봇이 읽는 채널, 서버 채널에서 답하는 때를 하나씩, 각 설정이 무엇을 하는지 설명하며 묻는다. 이미 연결돼 있으면 지금 설정을 보여 주고, 토큰을 다시 넣지 않고 바꾸거나 Discord를 끄고 다시 켤 수 있게 한다.
 - provider 인증이 없는 gateway는 지금처럼 꺼지지 않고, 할 일을 시작 출력에 알린다.
+- ChatGPT 계정으로 로그인하면 그 계정이 쓸 수 있는 모델을 고르고, 이미 고른 Codex 모델이 그 계정 목록에 있으면 그대로 둔다. Codex가 모델을 거절하면 봇이 그 까닭과 할 일을 답한다.
+- gateway 컨테이너가 강제로 꺼진 뒤 다시 떠도 heartbeat가 지나기를 기다리지 않고 바로 시작한다.
 
 이 스펙은 다른 스펙의 구현을 기다리지 않는다. 049가 공식 image에 브라우저를 더해도 이 스펙의 계약은 바뀌지 않는다.
 
@@ -143,13 +152,34 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
       - **토큰이 있고 꺼져 있음:** 세 설정 줄을 보이고 켤지 묻는다(기본은 켜지 않음). 켜면 설정도 바꿀지 묻고(바꾸면 세 질문), `--enable`과 설정 옵션으로 넘긴다.
       - 연결·설정 바꾸기·켜기·끄기 명령이 성공하고 그 출력에 `unchanged`가 없으며 gateway가 돌고 있었으면 다시 띄운다(gateway는 시작할 때 config를 읽는다). 이 명령이 실패하면 그 출력을 보이고 다음으로 간다.
     - **문서:** USAGE의 Discord 연결 절(새 옵션, 설정만 바꾸기, 켜고 끄기, `--status`의 설정 줄, 멈추는 다른 칸), 설정 스크립트 절, Discord channel 칸 설명(각 칸의 뜻, `streaming`·`replyInThread`는 효과 없음). README 채널·Docker 문단은 한 문장.
+11. **ChatGPT 계정 Codex의 모델·오류와 강제 종료 뒤 시작(사용자 결정 2026-11-09):**
+    - **로그인이 고르는 모델:** `provider codex login`은 token을 받은 뒤, 저장하기 전에 그 계정의 Codex 모델 목록을 한 번 읽는다. 요청은 `GET <apiBase>/codex/models?client_version=<정한 값>`이고 header는 받은 token(`Authorization: Bearer`)과, 있으면 계정 ID(`ChatGPT-Account-Id`)다. `<apiBase>`는 config의 `providers.openai_codex.apiBase`이고, 비었거나 `http`로 시작하지 않으면 `https://chatgpt.com/backend-api`다.
+      - config가 이미 Codex를 고르고(`agents.defaults.provider`가 `openai_codex`) 그 모델 이름(앞의 `openai-codex/`·`openai_codex/`·`openai/`를 뗀 이름)이 목록에 있으면(보임·숨김 상관없이) 모델을 그대로 둔다.
+      - 아니면 목록에서 `visibility`가 `list`인 모델 중 `priority`가 가장 작은 것(같으면 목록 순서)을 고른다.
+      - 목록의 모델 이름(`slug`)은 영문자·숫자·`.`·`-`·`_`·`:`·`/`로만 된 100자 이하이고 보낸 token이나 계정 ID를 담지 않은 것만 쓴다. 응답이 받은 값을 되돌려도 config와 출력에 남지 않게 한다.
+      - 목록을 읽지 못했거나(연결 실패, 2xx가 아닌 응답, `models` 배열이 없음) 보이는 모델이 없으면, config가 이미 Codex를 고른 경우 그 모델을 두고, 아니면 코드의 기본값을 적는다. 코드의 기본값은 이때만 쓰며, 2026-11-09에 확인한 계정 목록의 맨 앞 모델(`gpt-6.1-sol`)로 바꾼다.
+      - provider는 지금처럼 Codex로 고른다. 출력은 지금 줄에 `Model check:` 한 줄을 더해 고른 까닭(계정 목록에서 고름, 계정 목록에 있어 그대로 둠, 목록을 읽지 못해 그대로 두거나 기본값을 씀과 그 까닭)을 알린다. token과 계정 ID 값은 출력하지 않는다.
+      - `provider codex import-token`은 지금처럼 네트워크를 쓰지 않고 목록을 읽지 않는다. `--select`는 바뀐 코드의 기본값을 적는다.
+    - **Codex가 거절한 까닭:** Codex 응답이 2xx가 아니고, 본문이 64 KiB 이하의 JSON이며, `error.code`가 정해 둔 목록에 있으면, 답(`LlmResponse.content`)은 그 코드에 맞춘 052의 고정 문장이다.
+      - 목록은 지금 `model_not_found` 하나다. 문장은 `HTTP <상태>: the model '<모델>' is not available for this ChatGPT account (model_not_found). Set agents.defaults.model to a model the account offers, or run shacs-bot provider codex login again to pick one.`이다.
+      - `<모델>`은 이 요청에 쓴 모델 이름(앞을 뗀 이름)이다. 영문자·숫자·`.`·`-`·`_`·`:`·`/`로만 된 100자 이하가 아니면 문장 앞부분 `the model '<모델>'`을 `the configured model`로 쓴다.
+      - Codex가 쓴 글(`message`, `detail` 등)은 답·오류·로그 어디에도 넣지 않는다(019 PRD 000·034의 보안 계약 그대로).
+      - 그 밖의 실패는 지금 그대로다: `HTTP <상태>: provider error`, 429는 지금의 사용량 문장, 너무 큰 본문은 transport 오류. 이미지·media 경로의 실패 처리도 그대로다.
+    - **계정 ID:** 로그인과 갱신은 계정 ID를 id token과 access token의 `https://api.openai.com/auth` 객체 안 `chatgpt_account_id`(실제 token의 꼴)에서 먼저 찾는다(id token, 그다음 access token). 둘 다 없을 때만 지금 보는 칸(맨 위 `chatgpt_account_id`, 점이 든 한 칸 이름 `https://api.openai.com/auth.chatgpt_account_id`, `organizations`의 첫 `id`)을 지금 순서(id token, 그다음 access token)로 본다. 그래서 id token의 옛 꼴 칸이 access token의 실제 계정 ID를 가리지 않는다. 저장한 계정 ID는 지금처럼 runtime이 `ChatGPT-Account-Id` header로 보낸다. 이미 저장된 로그인은 다음 갱신이나 다시 로그인할 때 계정 ID를 얻는다.
+    - **강제 종료 뒤 시작:** runtime(`run`·`serve`·`runtime start`)이 process lock을 잡은 뒤 본 ownership marker가 아래를 모두 채우면, heartbeat가 아직 유효해도 지금의 풀린 owner 인계를 한다. 곧 prior owner lifecycle(`startup_replaced_released_owner`)을 남기고 새 generation으로 marker를 바꾼다.
+      - stale이고 lock protocol(`exclusive_file_v1`)을 가진다.
+      - marker의 PID가 시작하는 runtime 자신의 PID다.
+      - 그 PID의 process(곧 자신)가 marker보다 뒤에 시작했다는 증거(`process_started_after_marker`)가 있다.
+      - 컨테이너를 다시 만들어 runtime이 다시 PID 1이 되는 경우가 이렇다. 같은 기계에서 이 data 폴더를 쓰는 runtime은 모두 그 lock을 잡으므로, lock을 잡았다면 그 marker를 쓴 owner는 살아서 이 data 폴더를 쓰고 있지 않다.
+      - 다른 PID의 살아 있는 marker(heartbeat가 유효하면 지금처럼 막는다), lock protocol이 없는 marker, `runtime recover`·`runtime stop`·`runtime restart`의 판정은 그대로다.
+    - **문서:** USAGE "Codex provider 인증"(로그인이 모델을 고르는 법과 `Model check:` 줄, `gpt-5.4` 문장, 계정 ID, `model_not_found` 답), runtime 시작의 ownership 문단(자기 PID인 marker의 인계), Docker Compose 절(설정 스크립트의 로그인 단계 한 문장, config·`.env.json`을 고친 뒤 gateway를 다시 시작하는 법). README Docker 문단은 한 문장.
 
 ## 기존 owner와의 경계
 
 | 기존 owner | 052가 소비하는 것 | 052가 소유하지 않는 것 |
 |---|---|---|
 | 015·023 | 공식 image, Compose, 처음부터 일반 사용자로 실행, official-container 증거 | image 구성(052는 HOME 권한만 바꾼다), Compose 안전 속성(그대로 지킨다), containment 판정 |
-| 029 | runtime 시작과 시작 출력 | runtime lifecycle, owner lease |
+| 029 | runtime 시작과 시작 출력, owner lease의 stale 판정과 풀린 owner 인계 | runtime lifecycle, owner lease(아래 "앞선 스펙에서 바꾸는 것" 말고) |
 | 003 | provider 고르기(`ProviderRegistry`, `agents.defaults`) | 고르는 규칙 |
 | 010 | provider 인증 명령, 비밀 다루기 | 인증 명령의 동작(아래 "앞선 스펙에서 바꾸는 것" 말고) |
 | 030 | credential 해석(자리 순서, 인증 저장소 읽기, fingerprint, 갱신, 상태) | 해석 규칙과 인증 저장소 형식(아래 "앞선 스펙에서 바꾸는 것" 말고) |
@@ -157,6 +187,7 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 | 048 | `.env.json` 형식, `${이름}` 해석 순서, 이름 규칙, 충돌 규칙, 바뀜 확인 쓰기(`write_config_value_if_unchanged`), 비밀 옮기기 marker | 아래 "앞선 스펙에서 바꾸는 것" 말고 그 규칙 |
 | 049 | 없음 | 브라우저 image 구성. 049는 브라우저 임시 폴더를 이미 HOME이 아닌 `/tmp`에 둔다. 052는 049를 기다리지 않는다 |
 | 012 | Discord worker가 config를 읽는 법(`discord_runtime_config`: 보낸 사람, 채널, `groupPolicy`)과 final-only 전송 | Discord worker 동작과 그 칸의 뜻(052는 칸을 쓰기만 한다) |
+| 003·019·034 | Codex 응답 해석(003)과, 실패한 응답에서 공급자가 쓴 글을 답에 넣지 않는 보안 계약(019·034) | 그 해석과 계약, 이미지·media 경로의 실패 처리(아래 "앞선 스펙에서 바꾸는 것" 말고) |
 
 ## 앞선 스펙에서 바꾸는 것
 
@@ -167,6 +198,10 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 | 048 | SPEC 소유 범위 3의 마지막 항목과 PRD 010 범위 11: `onboard`와 `onboard --wizard`는 비밀 값을 받지 않는다. 사용자는 비밀 값을 `.env.json`에 직접 적고 config에 `${이름}`을 쓰거나, config에 적은 뒤 `runtime config-migrate`로 옮긴다. PRD 010 Non Scope: "비밀 값을 받아 `.env.json`에 쓰는 새 명령" | 세 번째 길을 더한다. `channels connect discord`가 Discord 토큰을 받아 048 이름 규칙·충돌 규칙과 바뀜 확인 쓰기(0600 임시 파일, 원자적 교체)로 `.env.json`에 쓰고 config에는 `${이름}`을 남긴다(소유 범위 4). 048 Non Scope의 새 명령은 이 명령 하나이고 Discord 토큰만 받는다. `onboard`와 wizard는 그대로 비밀 값을 받지 않는다 | 010 |
 | 030 | SPEC 반드시 지킬 것 6과 PRD 003 범위 1·6: credential 해석은 runtime override, environment, local auth store, provider config의 precedence를 결정적으로 적용하고, environment·literal·command 값을 푼다. 빈 환경 변수에 대한 말은 없고, 구현은 선언된 환경 변수의 이름만 있으면 값이 비어도 environment 자리로 썼다 | environment 자리는 값이 빈 글이 아닐 때만이다(048 `${이름}` 풀기와 같은 뜻). 빈 글이면 없는 것으로 보고 local auth store, command, provider config 순서로 간다. 순서와 비어 있지 않은 값의 우선은 그대로다(소유 범위 9) | 040 |
 | 030, 010 | 030 PRD 003 범위 4: source fingerprint와 stale detection. 구현은 OAuth 갱신 때만 fingerprint를 적는다. 010 SPEC "현재 구현" 5번의 Codex·Copilot token import·login 처리와 그 뒤 더해진 `provider <id> import-key`(`import_provider_api_key`)는 인증 저장소의 provider 항목만 바꾸고 fingerprint를 적거나 지우지 않는다. 그래서 갱신 뒤 선언을 바꾼 provider는 다시 로그인해도 인증이 건너뛰어진다 | 이 명령들이 새 인증을 저장할 때 그 provider의 fingerprint를 그때 선언의 것으로 적는다. 가져온 API key도 fingerprint를 가지게 되어, 그 뒤 선언이 바뀌면 다른 인증처럼 stale로 건너뛴다. 갱신 때 적고 다르면 건너뛰는 stale detection은 그대로다(소유 범위 9) | 040 |
+| 010 | SPEC "현재 구현" 5번의 Codex login과 USAGE "Codex provider 인증": login은 언제나 provider를 `openai_codex`, model을 `gpt-5.4`로 고른다. `gpt-5.4`는 "보수적인 기본값"이다 | login은 그 계정의 Codex 모델 목록으로 모델을 고르고, 이미 고른 Codex 모델이 목록에 있으면 그대로 둔다. 목록을 읽지 못할 때만 config의 Codex 모델이나 코드의 기본값(`gpt-6.1-sol`)을 쓴다. provider를 Codex로 고르는 것은 그대로다(소유 범위 11) | 060 |
+| 010, 030 | 010 SPEC "현재 구현" 5번의 Codex login·갱신과 030 PRD 003의 OAuth credential 꼴과 갱신: token의 계정 ID는 id token, 그다음 access token에서 맨 위 `chatgpt_account_id`, 점이 든 한 칸 이름, `organizations`의 첫 `id`로 읽는다(실제 token의 중첩 꼴은 읽지 못한다) | 두 token의 `https://api.openai.com/auth` 객체 안 `chatgpt_account_id`를 먼저 읽고, 없을 때만 지금의 세 칸을 지금 순서로 본다(소유 범위 11) | 060 |
+| 003, 019, 034 | 003 SPEC의 Codex client(responses stream을 해석하고 실패를 `LlmResponse`로 돌린다), 019 PRD 000 "provider error body가 raw secret 없이 redacted message로 정규화", 034의 Codex client 구현(시험 `ordinary_codex_error_body_is_replaced_by_fixed_safe_facts`): 실패한 Codex 응답의 답은 언제나 고정된 `HTTP <상태>: provider error`(429는 사용량 문장)다 | 정해 둔 `error.code`(지금 `model_not_found`)이면 052의 고정 문장과 요청에 쓴 모델 이름을 답한다. 공급자가 쓴 글은 지금처럼 넣지 않고, 다른 실패는 지금 문장 그대로다(소유 범위 11) | 060 |
+| 029, 030 | 029 PRD 007(stale owner는 evidence-first로 다루고 heartbeat 만료만으로 지우지 않는다)과, 030 통합 때 더한 lock-aware 인계(USAGE runtime 시작 문단 "fresh heartbeat는 PID namespace가 달라도 인계하지 않습니다", 시험 `fresh_lock_aware_heartbeat_blocks_pid_namespace_takeover`): lock protocol marker는 PID가 죽었거나 heartbeat가 지났을 때만 시작이 인계한다 | 그 둘에 더해, process lock을 잡은 runtime은 marker의 PID가 자기 PID이고 자기가 marker보다 뒤에 시작했다는 증거가 있으면 heartbeat가 유효해도 인계한다. 다른 PID의 유효한 heartbeat는 지금처럼 막는다(소유 범위 11) | 060 |
 
 아래는 바꾸지 않는다.
 
@@ -174,6 +209,9 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 - `runtime inspect` readiness의 `provider_auth` 판정.
 - 030 credential 해석의 나머지(자리 순서, 인증 저장소 규칙, OAuth 갱신, 상태 기록). PRD 000이 자리 찾기를 함수로 떼어 내도 runtime이 고르는 provider와 자리, 그 결과는 같다. 위 표의 두 줄만 PRD 040이 바꾸고, `provider status`는 같은 함수라 그 바뀐 동작을 그대로 보인다.
 - 031·048 marker의 뜻과 `--recover`. 052는 `onboard`도 그 marker에서 멈추게 할 뿐이다(소유 범위 3).
+- Codex 실패 처리의 나머지: 정해 둔 코드가 아닌 실패의 문장, 429 문장, 너무 큰 본문의 transport 오류, 재시도 판단(`error_status_code`, `retry-after`, `x-should-retry`), 이미지·media 경로의 실패 처리.
+- owner lease의 나머지: lock protocol이 없는 marker는 `runtime recover`가 필요하고, `runtime recover`·`runtime stop`·`runtime restart`의 판정과 lifecycle 기록은 그대로다.
+- `provider codex import-token`은 네트워크를 쓰지 않는다. `--select`가 적는 모델 값만 바뀐 코드의 기본값이 된다.
 
 ## 반드시 지킬 것
 
@@ -185,6 +223,9 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 - 시작할 때의 쓰기 확인은 미리 알리는 것뿐이다. 확인을 지나도 실제 쓰기는 지금처럼 실패할 수 있고, 그때의 오류는 지금과 같다.
 - Cargo 테스트는 가짜 `docker`, 임시 폴더, 임시 폴더에 복사한 저장소 꼴로 돈다. 사용자의 data 폴더와 실제 저장소의 `.env`를 쓰지 않는다.
 - `Cargo.lock`에 새 crate를 더하지 않는다. 숨긴 입력과 terminal 시험은 `libc`(termios, pty)로 한다. 그것으로 안 되면 멈추고 사용자에게 묻는다.
+- Codex가 실패한 응답에 쓴 글(`message`, `detail` 등)은 답·오류·로그에 넣지 않는다. 정해 둔 오류 코드일 때만 052의 고정 문장과 요청에 쓴 모델 이름을 쓴다.
+- 강제 종료 뒤의 인계는 process lock을 잡은 뒤, marker가 lock protocol을 가지고 그 PID가 자기 PID이며 자기가 marker보다 뒤에 시작했다는 증거가 있을 때만 한다. 그 밖의 owner 판정은 바꾸지 않는다.
+- Cargo 테스트는 Codex 모델 목록과 오류를 가짜 transport나 로컬 가짜 HTTP 서버로 본다. 실제 Codex나 사용자의 인증을 쓰지 않는다.
 
 ## 수용 조건
 
@@ -233,7 +274,7 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
    - 쓸 수 없는 임시 data 폴더에서 소유 범위 7의 명령이 폴더 경로, 주인과 실행 UID:GID, 고치는 방법을 담은 글로 실패하고, 원시 `Permission denied (os error 13)`만 남기지 않는다. data 폴더가 없고 그 부모에 쓸 수 없을 때도 같다.
    - official-container 증거가 있을 때와 없을 때 고치는 방법이 다르다. 주인이 `root`인 경우의 글은 주인 번호를 넣어 만든 시험으로 확인한다.
    - 쓸 수 있는 폴더에서는 지금과 같이 돈다.
-9. 문서가 소유 범위 8과 맞다(소유 범위 9·10의 문서 포함).
+9. 문서가 소유 범위 8과 맞다(소유 범위 9·10·11의 문서 포함).
 10. fmt, workspace clippy `-D warnings`, 변경한 package 테스트가 통과한다. 전체 workspace 테스트는 사용자 승인을 받아 실행한다.
 11. 빈 환경 변수와 다시 저장한 인증(Cargo):
    - 수용 조건 1의 같은 경우 표에서, 인증 저장소의 Anthropic key와 빈 `ANTHROPIC_API_KEY`는 `ready`이고 runtime이 저장한 key를 쓴다. config `apiKey`(`.env.json`으로 푼 값)와 빈 환경 변수도 `ready`이고 runtime이 그 값을 쓴다. 비어 있지 않은 환경 변수는 지금처럼 저장한 key보다 먼저 쓰이고, 공백만인 값은 지금처럼 그 자리이며 `provider status`가 비었다고 알린다. 나머지 경우의 결과는 수용 조건 1과 같다.
@@ -253,6 +294,23 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
       - 끈 상태: 켤지 묻고, 켜면 `--enable`(설정을 바꾸면 그 옵션도)을 넘긴다. 켜지 않으면 명령을 부르지 않는다.
       - gateway가 돌고 있었고 명령이 성공했으며 출력에 `unchanged`가 없을 때만 restart한다. 출력이 `unchanged`이거나 명령이 실패했으면 restart하지 않는다.
       - terminal이 아니면 묻지 않고 지금과 같은 명령 순서다.
+13. Codex 모델·오류와 강제 종료 뒤 시작(Cargo, 실제 Codex 없이. AGENTS.md대로 시험은 바뀐 동작에만, 되도록 기존 시험에 더한다):
+    - 로그인 모델:
+      - 고르는 규칙 표는 세 갈래를 낸다. 그대로 둠은 config의 Codex 모델이 목록에 있을 때다. 계정 목록에서 고름은 목록에 없는 `gpt-5.4`일 때이고, 더 작은 `priority`의 숨은 모델은 건너뛰며 같은 `priority`면 목록 순서다. 목록을 읽지 못하면 Codex일 때는 그대로 두고, 아니면 코드의 기본값을 쓴다.
+      - 가짜 transport로 한 로그인 저장은 `<apiBase>/codex/models?client_version=…`에 그 token과 계정 ID header로 한 번 묻는다. config의 provider·모델과 `Model check:` 줄이 맞고, 출력에 token이 없다.
+      - 목록이 계정 ID나 token을 되돌린 이름은 건너뛰어 config와 출력에 남지 않는다.
+    - Codex 오류:
+      - `model_not_found` 본문은 정해 둔 문장과 요청한 모델 이름이 된다. 공급자 글에 비밀 같은 문자열을 넣어도 답에 없다.
+      - 모르는 코드와 64 KiB를 넘는 `model_not_found` 본문은 지금 문장이다. 꼴이 맞지 않는 모델 이름은 `the configured model`이다.
+      - 실제 transport로 로컬 HTTP 서버가 준 400 `model_not_found`도 같은 문장이 된다.
+      - 기존 `codex_error_security` 시험 두 개(JSON이 아닌 본문, 너무 큰 본문)는 그대로 통과한다.
+    - 계정 ID: 기존 token 응답 시험이 실제 꼴(중첩) claim에서도 계정 ID를 읽는다. id token에 옛 꼴(`organizations`)만 있고 access token에 실제 꼴이 있으면 access token의 계정 ID를 쓴다.
+    - 인계 판정:
+      - 기존 `fresh_lock_aware_heartbeat_blocks_pid_namespace_takeover`에 두 가지를 더 본다. 자기 PID이고 뒤에 시작한 증거가 있으면 heartbeat가 유효해도 바꿀 수 있다. 자기 PID라도 증거가 없으면 막는다.
+      - 실제 marker 파일과 가짜 procfs(이 기계에는 `/proc`가 없어 뒤에 시작한 증거를 만든다)로 시작의 marker 인계 경로를 부르면, heartbeat가 유효한 자기 PID marker가 바로 새 generation으로 바뀌고 prior owner lifecycle이 남는다.
+      - 다른 PID(1)의 유효한 heartbeat는 지금처럼 막는다.
+      - `lock_aware_dead_owner_is_replaced_during_startup`·`prd007_stale_start_blocks_and_retains_marker`는 그대로 통과한다.
+    - 실제 Docker(사용자 승인 뒤, 선택): 서버에서 gateway의 runtime process를 host에서 `kill -KILL`로 죽이면(손으로 끈 것이 아니라 restart policy가 다시 띄운다) stale ownership 오류 없이 바로 다시 시작한다. 새 image로 `provider codex login`을 하면 계정 목록의 모델을 고른다. 돌리지 않으면 PRD 060 종료 확인에 그 결정과 확인하지 못한 것을 적는다.
 
 위 조건은 052의 단독 종료 기준이다. 수용 조건 6은 사용자가 돌리지 않기로 결정할 수 있다. 그러면 그 PRD의 종료 확인에 결정과 이유, 확인하지 못한 것을 적고 scoped로 닫는다(048 수용 조건 10과 같다).
 
@@ -277,6 +335,11 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 - Discord의 `streaming`과 `replyInThread`는 지금 효과가 없다(소유 범위 10). 답을 쓰는 동안 조금씩 보여 주기나 스레드를 새로 열어 답하기는 이 스펙의 범위가 아니다.
 - runtime이 먼저 읽는 다른 이름의 Discord 칸(`channelIds` 등)이 있으면 스크립트와 `channels connect discord`는 그 설정을 바꾸지 않고 멈춘다. 사용자가 그 칸을 손으로 지워야 한다.
 - 스크립트는 사람을 비우고 모든 메시지에 답하는 조합도 다시 확인한 뒤 받아들인다. 그 서버의 누구나 봇을 부를 수 있게 된다.
+- Codex 모델 목록(`/backend-api/codex/models`)은 공개 문서가 없는 ChatGPT backend 경로다. 꼴이 바뀌거나 막히면 로그인은 목록을 읽지 못한 경우로 가서 config의 Codex 모델이나 코드의 기본값을 쓰고 그 까닭을 알린다. 코드의 기본값은 시간이 지나면 다시 계정에 없을 수 있다.
+- 이미 `gpt-5.4`처럼 계정에 없는 모델을 적어 둔 설치는 사용자가 모델을 바꾸거나 다시 로그인할 때까지 실패한다. 이제는 봇의 답이 까닭과 할 일을 알린다. `provider status`는 모델이 계정에 있는지 보지 않는다(네트워크가 필요하다).
+- 정해 둔 Codex 오류 코드는 `model_not_found` 하나다. 다른 거절은 지금처럼 `HTTP <상태>: provider error`다.
+- 강제 종료 뒤 바로 인계는 이 data 폴더를 쓰는 runtime이 모두 같은 기계에서 같은 process lock을 본다는 데 기댄다. 여러 기계가 한 data 폴더를 나눠 쓰는 것은 015가 지원하지 않는 모양이다. 컨테이너가 앞 process가 시작한 지 5초 안에 다시 뜨면 뒤에 시작한 증거가 없어 지금처럼 heartbeat가 지나기를 기다린다.
+- gateway의 정상 종료가 Docker의 종료 대기(기본 10초)보다 길면 Docker가 강제로 끈다. 052는 그 뒤의 시작만 고치고 종료 시간은 바꾸지 않는다.
 
 ## 실행 PRD와 독립 종료
 
@@ -290,12 +353,13 @@ PRD 문서는 구현을 시작할 때 쓴다. 각 PRD는 앞 번호의 닫힌 �
 | 030 권한 오류 | 소유 범위 7과 그 문서 | 020(고치는 방법에 스크립트를 적는다) | 수용 조건 8, 10 |
 | 040 빈 provider 환경 변수와 다시 저장한 인증 | 소유 범위 9와 그 문서 | 000(자리 찾기 함수와 `provider status`) | 수용 조건 11, 10 |
 | 050 Discord 설정 질문 | 소유 범위 10과 그 문서 | 010(`channels connect discord`와 `--status`), 020(설정 스크립트의 Discord 단계) | 수용 조건 12, 10 |
+| 060 Codex 모델·오류와 강제 종료 뒤 시작 | 소유 범위 11과 그 문서 | 020(설정 스크립트의 로그인 단계와 Docker 설명 문서), 040(로그인 저장 때 적는 fingerprint) | 수용 조건 13, 10 |
 
 수용 조건 9와 10은 각 PRD가 자기 변경에 대해 확인한다.
 
 ## 종료 증거 (2026-11-09)
 
-같은 날 사용자 결정으로 소유 범위 10과 PRD 050을 더해 이 스펙을 다시 열었다(`Planned revision (implemented baseline)`: PRD 000–040의 구현과 검증은 그대로이고, 소유 범위 10은 PRD 050의 구현과 독립 검토 PASS까지 했으며 전체 workspace 시험과 종료 확인 전이다). 아래는 PRD 000–040의 종료 증거이고, PRD 050이 닫히면 이 절에 더한다.
+같은 날 사용자 결정으로 소유 범위 10과 PRD 050을 더해 이 스펙을 다시 열었다(`Planned revision (implemented baseline)`: PRD 000–040의 구현과 검증은 그대로이고, 소유 범위 10은 PRD 050의 구현과 독립 검토 PASS까지 했으며 전체 workspace 시험과 종료 확인 전이다). 이어서 같은 날 사용자 결정으로, 처음 설정 뒤 서버에서 드러난 Codex 모델·오류와 강제 종료 뒤 시작 문제(소유 범위 11)와 PRD 060을 더했다. PRD 060도 구현과 독립 검토 PASS까지 했고 전체 workspace 시험과 종료 확인 전이다. 아래는 PRD 000–040의 종료 증거이고, PRD 050·060이 닫히면 이 절에 더한다.
 
 PRD [000](prds/000-provider-status-and-gateway-hint.md)·[010](prds/010-onboard-and-discord-connect.md)은 전체 workspace 시험(3,727 passed / 0 failed / 8 ignored)과 함께 `277a32f`로, PRD [020](prds/020-setup-script-and-container-home.md)·[030](prds/030-data-folder-permission-errors.md)·[040](prds/040-empty-provider-environment-and-saved-credentials.md)은 전체 workspace 시험(3,752 passed / 0 failed / 8 ignored)과 함께 `738061c`로 닫혔다. 모두 `Complete (Scoped)`이고, 계획과 구현을 각각 독립 검토(Oracle)가 PASS할 때까지 고쳤다. 이는 현재 self-hosted 지원 범위의 scoped 완료이며 전체 출시 seal이 아니다. 실행 기록은 로컬 `.omo/evidence/spec052/`(추적하지 않음)에 있다.
 

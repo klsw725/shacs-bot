@@ -81,6 +81,7 @@ fn codex_login(config: &Path) -> Result<(), CliError> {
             expires: None,
             account_id: None,
         },
+        |_| Err("offline".to_owned()),
     )
     .map(drop)
 }

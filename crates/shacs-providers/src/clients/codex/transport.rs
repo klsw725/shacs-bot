@@ -1,10 +1,12 @@
 use super::{
     CodexHttpStreamResponse, CodexHttpTransport, CodexRequestParts, UreqCodexHttpTransport,
-    CODEX_ERROR_RESPONSE_MAX_BYTES, CODEX_ERROR_RESPONSE_READ_LIMIT, CODEX_SSE_MAX_AGGREGATE_BYTES,
-    CODEX_SSE_MAX_FRAME_BYTES, CODEX_SSE_MAX_LINE_BYTES, DEFAULT_HTTP_TIMEOUT,
+    CODEX_ERROR_CODE_BODY_MAX_BYTES, CODEX_ERROR_RESPONSE_MAX_BYTES,
+    CODEX_ERROR_RESPONSE_READ_LIMIT, CODEX_SSE_MAX_AGGREGATE_BYTES, CODEX_SSE_MAX_FRAME_BYTES,
+    CODEX_SSE_MAX_LINE_BYTES, DEFAULT_HTTP_TIMEOUT,
 };
 use crate::clients::sse::read_sse_frame_texts_bounded;
 use crate::error::ProviderError;
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::time::Duration;
@@ -82,8 +84,7 @@ impl CodexHttpTransport for UreqCodexHttpTransport {
                 CODEX_SSE_MAX_AGGREGATE_BYTES,
             )?
         } else {
-            read_codex_error_body_bounded(&mut response, status)?;
-            String::new()
+            known_error_code_body(&read_codex_error_body_bounded(&mut response, status)?)
         };
         Ok(CodexHttpStreamResponse {
             status,
@@ -111,10 +112,21 @@ fn response_headers(headers: &ureq::http::HeaderMap) -> BTreeMap<String, String>
         .collect()
 }
 
+/// Keeps only an allowlisted `error.code` of a failed response, so the
+/// provider's text never leaves the transport (Spec 019 PRD 000, Spec 034).
+fn known_error_code_body(bytes: &[u8]) -> String {
+    if bytes.len() > CODEX_ERROR_CODE_BODY_MAX_BYTES {
+        return String::new();
+    }
+    super::response::known_codex_error_code(&String::from_utf8_lossy(bytes))
+        .map(|code| json!({"error": {"code": code}}).to_string())
+        .unwrap_or_default()
+}
+
 fn read_codex_error_body_bounded(
     response: &mut ureq::http::Response<ureq::Body>,
     status: u16,
-) -> Result<(), ProviderError> {
+) -> Result<Vec<u8>, ProviderError> {
     if response
         .headers()
         .get("content-length")
@@ -142,7 +154,7 @@ fn read_codex_error_body_bounded(
     if body.len() > CODEX_ERROR_RESPONSE_MAX_BYTES {
         return Err(codex_error_body_error(status));
     }
-    Ok(())
+    Ok(body)
 }
 
 fn codex_error_body_error(status: u16) -> ProviderError {
