@@ -22,13 +22,21 @@ FROM python:3.14-slim-bookworm AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        chromium \
         curl \
+        fonts-noto-cjk \
         libssl3 \
+        novnc \
+        websockify \
+        x11vnc \
+        xauth \
+        xvfb \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 --shell /bin/bash shacs \
     && mkdir -p /home/shacs/.shacs-bot \
     && chown -R shacs:shacs /home/shacs \
-    && chmod 1777 /home/shacs
+    && chmod 1777 /home/shacs \
+    && install -d -m 0755 /etc/chromium/policies/managed
 
 COPY --from=node /usr/local/bin/ /usr/local/bin/
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
@@ -37,13 +45,16 @@ RUN npm install -g @steipete/summarize \
     && npm cache clean --force
 
 COPY --from=builder /app/crates/target/release/shacs-bot /usr/local/bin/shacs-bot
+# The directory above is made first: COPY --chmod would give new parents 0644,
+# which the non-root runtime user cannot traverse.
+COPY --chown=root:root --chmod=0644 docker/shacs-browser.json /etc/chromium/policies/managed/shacs-browser.json
 
 USER shacs
 ENV HOME=/home/shacs
 ENV SHACS_RUNTIME_PACKAGE=shacs-bot-official-container
 WORKDIR /home/shacs
 
-EXPOSE 18790 8900 8765
+EXPOSE 18790 8900 8765 6080
 
 ENTRYPOINT ["shacs-bot"]
 CMD ["status"]

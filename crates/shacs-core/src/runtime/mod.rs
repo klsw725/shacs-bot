@@ -12,6 +12,8 @@ mod automation_gates;
 mod automation_lifecycle;
 mod automation_payload;
 mod automation_production;
+mod browser_host;
+mod browser_start_evidence;
 mod classifier_evidence;
 #[cfg(unix)]
 mod confined_read;
@@ -102,6 +104,8 @@ mod policy_safety_snapshot;
 mod process_envelope;
 mod process_gate;
 mod provider_credentials;
+pub use browser_host::*;
+pub use browser_start_evidence::BrowserStartEvidence;
 mod quiet_tools;
 mod replay;
 mod runner;

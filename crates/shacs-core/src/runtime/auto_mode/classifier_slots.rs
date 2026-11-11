@@ -21,6 +21,7 @@ const DEFAULT_SOFT_DENY: &[&str] = &[
     "[Credential Search] Searching environment variables, config files, keychains, or other files for credentials or tokens, or using a credential the user did not provide for this task.",
     "[Unrequested Account Action] Acting through an account or an authenticated API (posting, buying, booking, changing settings, deleting) when the user did not ask for that action.",
     "[Affecting Others] Messaging people, chats, or channels other than the current conversation, or changing or deleting shared resources the assistant did not create in this session.",
+    "[Browser Commitment] In the browser, submitting or confirming a purchase, booking, payment, message, post, or account-setting change the user did not ask for.",
 ];
 const DEFAULT_ALLOW: &[&str] = &[
     "[Current Conversation] Sending results, summaries, or generated files to the current conversation.",

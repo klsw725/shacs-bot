@@ -70,6 +70,19 @@ pub struct PermissionMaterials {
     pub auto_mode_escalation: Option<AutoModeEscalation>,
 }
 
+impl PermissionMaterials {
+    /// Static action facts for a host startup, without classifier or approval work.
+    pub fn for_startup(action: &PermissionedAction, environment: &PermissionEnvironment) -> Self {
+        permission_materials(MaterialsInput {
+            action,
+            environment,
+            auto_mode: false,
+            allow_workspace_edits: false,
+            preflight_refusal: None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "source")]
 pub enum AutoAllow {
@@ -127,10 +140,13 @@ pub(crate) fn permission_materials(input: MaterialsInput<'_>) -> PermissionMater
         tool_name: &action.tool_name,
         file,
         command,
-        host: arguments
-            .get("url")
-            .and_then(Value::as_str)
-            .and_then(url_host),
+        host: (if action.tool_name == "browser" {
+            arguments.pointer("/browser_action/origin")
+        } else {
+            arguments.get("url")
+        })
+        .and_then(Value::as_str)
+        .and_then(url_host),
     };
     let matches = rule_match::match_rules(
         &environment.user_rules,

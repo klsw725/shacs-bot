@@ -9,6 +9,7 @@ mod auto_mode_setup;
 mod automation_outcome;
 mod automation_producer;
 mod automation_worker;
+pub mod browser;
 #[cfg(test)]
 #[path = "codex_login_model_tests.rs"]
 mod codex_login_model_tests;
@@ -1179,6 +1180,7 @@ pub struct ProviderStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeInspectReport {
+    pub browser: browser::BrowserStatus,
     pub config_path: PathBuf,
     pub config_exists: bool,
     pub workspace: PathBuf,
@@ -3489,6 +3491,18 @@ fn save_onboard_config_to_path(config: &shacs_config::Config, path: &Path) -> Re
 
 fn onboard_config_defaults() -> Value {
     json!({
+        "tools": {
+            "browser": {
+                "enable": false,
+                "startupTimeoutSeconds": 20,
+                "idleTimeoutSeconds": 300,
+                "pageTimeoutSeconds": 30,
+                "view": {
+                    "enable": false,
+                    "password": ""
+                }
+            }
+        },
         "permissions": {
             "autoApproval": {
                 "enabled": false,
@@ -4138,6 +4152,9 @@ fn runtime_capability_ceiling_from_registry(registry: &ToolRegistry) -> Vec<Safe
             "web_fetch" | "web_search" | "image_generate" => {
                 capabilities.push(SafetyCapability::NetOutbound)
             }
+            "browser" => {
+                capabilities.extend([SafetyCapability::NetOutbound, SafetyCapability::BrowserAct]);
+            }
             "message" => capabilities.push(SafetyCapability::ExternalDelivery),
             "cron" => capabilities.push(SafetyCapability::AutomationSchedule),
             "my" | "self" => capabilities.push(SafetyCapability::RuntimeConfigWrite),
@@ -4170,6 +4187,7 @@ fn safety_capability_label(capability: SafetyCapability) -> &'static str {
         SafetyCapability::AppInstall => "app_install",
         SafetyCapability::RuntimeConfigWrite => "runtime_config_write",
         SafetyCapability::SelfModification => "self_modification",
+        SafetyCapability::BrowserAct => "browser_act",
     }
 }
 
@@ -4647,6 +4665,7 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
                 "digest": &report.containment.digest,
             },
             "generated_media": generated_media,
+            "browser": report.browser,
             "spec035_media_projections": json!([]),
             "spec033": spec033,
             "sessions": {
@@ -11522,13 +11541,21 @@ where
     tokio::pin!(termination_signal);
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => return RuntimeShutdownReason::CtrlC,
-            reason = &mut termination_signal => return reason,
+            _ = tokio::signal::ctrl_c() => {
+                browser::shutdown_process_browser();
+                return RuntimeShutdownReason::CtrlC;
+            },
+            reason = &mut termination_signal => {
+                browser::shutdown_process_browser();
+                return reason;
+            },
             _ = tokio::time::sleep(Duration::from_millis(250)) => {
                 if let Ok(Some(reason)) = runtime_stop_request_reason_for_owner(&data_dir, &owner_id) {
+                    browser::shutdown_process_browser();
                     return reason;
                 }
                 if owner_fence.is_lost() {
+                    browser::shutdown_process_browser();
                     return RuntimeShutdownReason::OwnerLost;
                 }
                 if processor_exited
@@ -16859,6 +16886,7 @@ pub fn serve_web_ui(options: WebOptions) -> Result<String, CliError> {
         report.assets_dir.clone(),
         async {
             let _ = tokio::signal::ctrl_c().await;
+            browser::shutdown_process_browser();
         },
     ))?;
     Ok(format!(
@@ -19416,6 +19444,31 @@ impl AgentLoopChatCompletionAdapter {
         self
     }
 
+    /// Supply process-scoped transports for an embedded runtime. Run identity
+    /// and permissions still come from the selected configuration and turn.
+    pub fn with_browser_clients(
+        mut self,
+        provider: Arc<dyn ProviderClient>,
+        browser: Arc<dyn shacs_core::runtime::BrowserHost>,
+        containment: Option<(ContainmentSnapshotRef, DockerContainmentSnapshot)>,
+    ) -> Self {
+        self.client = provider;
+        if let Some((containment, rules)) = containment {
+            self.containment_snapshot = Some(containment);
+            #[cfg(not(test))]
+            {
+                self.permission_rule_containment = rules;
+            }
+            #[cfg(test)]
+            let _ = rules;
+        }
+        if self.allow_side_effect_tools {
+            self.tools
+                .register(shacs_core::tools::BrowserTool::new(browser));
+        }
+        self
+    }
+
     fn execution_snapshot_source(&self) -> shacs_core::runtime::LiveExecutionSnapshotSource {
         self.execution_snapshot_source_from(self.read_run_config().as_ref())
     }
@@ -19484,6 +19537,9 @@ impl AgentLoopChatCompletionAdapter {
             media_root: self.media_dir.clone(),
             attach: self.native_image_input_supported,
         });
+        config.browser_screenshots = bundle
+            .as_ref()
+            .and_then(|bundle| bundle.config.tools.browser.screenshots);
         if let Some(media_root) = self.media_dir.parent() {
             config.media_roots.push(media_root.to_path_buf());
         }

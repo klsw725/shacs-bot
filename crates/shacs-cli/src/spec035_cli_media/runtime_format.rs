@@ -11,6 +11,7 @@ use shacs_session::durable_migration::DurableMigrationAction;
 pub(crate) fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
     let state = runtime_inspect_header(&report);
     let mut lines = state.lines;
+    lines.push(format!("Browser: {}", serde_json::json!(report.browser)));
     if let Some(marker) = &report.lifecycle.ownership.marker {
         lines.push(format!(
             "Owner: ref={} mode={} renewed_at_ms={} expires_at_ms={}",

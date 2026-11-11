@@ -1955,6 +1955,9 @@ fn auto_mode_reviewed_context(
     executor: &RuntimeToolExecutor<'_>,
 ) -> ToolExecutionContext {
     let action = review.action;
+    if action.tool_name == "browser" {
+        context.browser_reviewed_action_digest = Some(action.action_digest.clone());
+    }
     let preset = context.permission_evaluator.take();
     let decision = permission_decision_for_action(executor.registry(), action, &context);
     if decision.reason != PermissionPolicyReason::EvaluatorUnavailable {
@@ -2299,6 +2302,7 @@ fn classifier_eligible_action(action: &PermissionedAction, context: &ToolExecuti
                         .require_docker_containment_for_exec
                         || rule_input.containment.confirmed_non_privileged()
                 }
+                SafetyCapability::BrowserAct => context.permission_interactive,
                 SafetyCapability::NetOutbound
                 | SafetyCapability::SecretRead
                 | SafetyCapability::ExternalDelivery

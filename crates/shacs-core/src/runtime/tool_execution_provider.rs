@@ -27,6 +27,24 @@ pub(super) fn tool_call_execution_context(
         ToolCallExecutionContext::default()
     }
     .with_provider_invocation(provider_invocation)
+    .with_browser_binding(
+        action
+            .redacted_arguments
+            .get("browser_binding_digest")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    )
+    .with_browser_context(
+        context
+            .browser_context
+            .as_ref()
+            .filter(|browser| {
+                browser.effective_session_id == action.session_id
+                    && browser.permission_mode_snapshot == context.permission_mode_snapshot
+                    && browser.permission_interactive == context.permission_interactive
+            })
+            .cloned(),
+    )
     .with_hidden_paths(context.permission_environment.clone());
     match (
         action.capabilities.contains(&SafetyCapability::ProcExec),

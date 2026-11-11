@@ -10,11 +10,11 @@ use shacs_core::runtime::{
     ProviderCredentialClientConfig, ProviderCredentialRuntime,
 };
 use shacs_core::tools::{
-    AskUserTool, CronTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
-    ImageGenerateTool, ImageGenerateToolConfig, ListDirTool, McpRuntime, McpServerConnectionReport,
-    MemorySearchTool, MessageTool, PathContext, ReadFileTool, SelfRuntimeState, SelfTool,
-    StdioMcpConnector, ToolRegistry, WebFetchConfig, WebFetchTool, WebSearchConfig, WebSearchTool,
-    WriteFileTool,
+    AskUserTool, BrowserTool, CronTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool,
+    GrepTool, ImageGenerateTool, ImageGenerateToolConfig, ListDirTool, McpRuntime,
+    McpServerConnectionReport, MemorySearchTool, MessageTool, PathContext, ReadFileTool,
+    SelfRuntimeState, SelfTool, StdioMcpConnector, ToolRegistry, WebFetchConfig, WebFetchTool,
+    WebSearchConfig, WebSearchTool, WriteFileTool,
 };
 use shacs_cron::PersistentCronService;
 use shacs_providers::{
@@ -48,6 +48,11 @@ pub(crate) fn production_tool_registry(
     };
     let file_state = Arc::new(Mutex::new(FileState::new()));
     let mut registry = ToolRegistry::new();
+    if allow_side_effect_tools {
+        registry.register(BrowserTool::new(Arc::new(
+            crate::browser::process_browser_host(bundle),
+        )));
+    }
     let cron_service = Arc::new(
         PersistentCronService::new(bundle.context.runtime_subdir("cron").join("jobs.json"))
             .map_err(CliError::Io)?,

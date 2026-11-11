@@ -1054,6 +1054,7 @@ fn adapter_label(adapter: ProcessAdapterKind) -> &'static str {
         ProcessAdapterKind::PluginTool => "plugin_tool",
         ProcessAdapterKind::PluginCommand => "plugin_command",
         ProcessAdapterKind::McpStdio => "mcp_stdio",
+        ProcessAdapterKind::Browser => "browser",
     }
 }
 

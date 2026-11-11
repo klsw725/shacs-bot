@@ -353,7 +353,7 @@ fn boundary_kind(adapter: ProcessAdapterKind) -> RuntimeBoundaryKind {
         ProcessAdapterKind::PluginHook => RuntimeBoundaryKind::PluginHook,
         ProcessAdapterKind::PluginTool => RuntimeBoundaryKind::PluginTool,
         ProcessAdapterKind::PluginCommand => RuntimeBoundaryKind::PluginCommand,
-        ProcessAdapterKind::McpStdio => RuntimeBoundaryKind::McpStdio,
+        ProcessAdapterKind::McpStdio | ProcessAdapterKind::Browser => RuntimeBoundaryKind::McpStdio,
     }
 }
 

@@ -3,7 +3,8 @@
 
 use super::permission_materials::{AutoAllow, PermissionMaterials};
 use crate::runtime::permission_policy::{
-    ask_or_deny, remembered_decision, strongest_remembered_match,
+    ask_or_deny, remembered_decision, store_unavailable_decision, strongest_remembered_match,
+    unattended_browser_act_denial,
 };
 use crate::runtime::{
     AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, EvaluatorConfidence, EvaluatorScopeMatch,
@@ -53,10 +54,10 @@ pub(crate) fn decide_auto_mode(
         );
     }
     if input.remembered_store_unavailable {
-        return ask_or_deny(
-            interactive,
-            PermissionPolicyReason::RememberedStoreUnavailable,
-        );
+        return store_unavailable_decision(input);
+    }
+    if let Some(denied) = unattended_browser_act_denial(input) {
+        return denied;
     }
     if let Some(approval) = input
         .approval

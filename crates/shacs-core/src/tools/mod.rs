@@ -1,6 +1,7 @@
 mod ask;
 pub(crate) mod ask_action;
 mod base;
+mod browser_tool;
 mod cron;
 mod file_state;
 mod filesystem;
@@ -28,6 +29,7 @@ pub use ask::{
 pub use base::{
     JsonMap, Tool, ToolCallExecutionContext, ToolDefinition, ToolResult, ValidationError,
 };
+pub use browser_tool::BrowserTool;
 pub use cron::CronTool;
 pub use file_state::{FileReadState, FileState};
 pub use filesystem::{

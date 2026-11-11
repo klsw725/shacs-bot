@@ -260,7 +260,7 @@ fn estimate_deferrable_schema_tokens(definitions: &[Value]) -> usize {
 }
 
 fn is_deferrable(definition: &Value) -> bool {
-    schema_name(definition).is_some_and(|name| name.starts_with("mcp_"))
+    schema_name(definition).is_some_and(|name| name.starts_with("mcp_") || name == "browser")
         || definition
             .get("function")
             .and_then(Value::as_object)

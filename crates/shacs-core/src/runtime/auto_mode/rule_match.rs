@@ -84,9 +84,10 @@ fn blocking_match(
     if let Some(rule) = tool_rule {
         return Some(rule.text.clone());
     }
-    if let (Some(host), true) = (&subject.host, subject.tool_name == "web_fetch") {
+    if let Some(host) = &subject.host {
         if let Some(rule) = rules.iter().find(|rule| {
-            matches!(&rule.specifier, RuleSpecifier::Domain(pattern) if pattern.matches(host))
+            selects_tool(&rule.tool, subject)
+                && matches!(&rule.specifier, RuleSpecifier::Domain(pattern) if pattern.matches(host))
         }) {
             return Some(rule.text.clone());
         }
@@ -178,7 +179,7 @@ fn allow_match(
                     && selects_tool(&rule.tool, subject)
             }
             RuleSpecifier::Domain(pattern) => {
-                subject.tool_name == "web_fetch"
+                selects_tool(&rule.tool, subject)
                     && subject
                         .host
                         .as_deref()

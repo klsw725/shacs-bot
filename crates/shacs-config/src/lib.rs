@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, process};
 
 mod auth_source;
+mod browser_config;
 mod config_migration;
 mod config_migration_state;
 mod config_write;
@@ -27,6 +28,7 @@ mod secrets_migration;
 mod trusted_runtime_config;
 
 pub use auth_source::*;
+pub use browser_config::{BrowserConfig, BrowserViewConfig, UserLocalBrowserEnable};
 pub use config_migration::*;
 pub use config_migration_state::{ConfigMigrationFileState, ConfigMigrationOperation};
 pub use config_write::{
@@ -486,6 +488,8 @@ impl Default for HeartbeatConfig {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolsConfig {
+    #[serde(default)]
+    pub browser: BrowserConfig,
     #[serde(default)]
     pub web: WebToolsConfig,
     #[serde(default)]
@@ -1301,10 +1305,32 @@ pub fn resolve_config_env_refs(
     env: &impl EnvSource,
 ) -> Result<(), ConfigError> {
     let mut value = serde_json::to_value(&*config)?;
+    // The viewer password is the one optional secret: the recommended config
+    // references `${SHACS_BROWSER_VIEW_PASSWORD}` whether or not a value
+    // exists, and a missing value is the viewer's `password_missing`, not a
+    // load error that names the variable. It still resolves through the same
+    // source and order (process environment, then `.env.json`) as everything
+    // else; every other field keeps the strict error.
+    let view_password = value
+        .pointer_mut(BROWSER_VIEW_PASSWORD_POINTER)
+        .and_then(|password| {
+            let reference = password.as_str()?.to_owned();
+            *password = Value::String(String::new());
+            Some(reference)
+        });
     resolve_env_value(&mut value, env).map_err(ConfigError::Env)?;
+    if let (Some(reference), Some(password)) = (
+        view_password,
+        value.pointer_mut(BROWSER_VIEW_PASSWORD_POINTER),
+    ) {
+        *password = Value::String(interpolate_env_with_source(&reference, env).unwrap_or_default());
+    }
     *config = serde_json::from_value(value)?;
     Ok(())
 }
+
+/// JSON pointer of `tools.browser.view.password` (Spec 049 PRD 040 scope 2).
+const BROWSER_VIEW_PASSWORD_POINTER: &str = "/tools/browser/view/password";
 
 /// Resolves `${NAME}` from a non-empty `env` value, then the `.env.json`
 /// next to `config_path` (Spec 048 PRD 010 scope 2), and returns that file.

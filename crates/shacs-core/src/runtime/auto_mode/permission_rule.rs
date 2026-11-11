@@ -29,6 +29,7 @@ const BUILTIN_TOOLS: &[&str] = &[
     "propose_web_watch",
     "read_file",
     "spawn",
+    "browser",
     "web_fetch",
     "web_search",
     "web_watch_status",
@@ -280,7 +281,7 @@ fn rule_specifier(
                 _ => Ok(RuleSpecifier::Path(pattern)),
             }
         }
-        ToolSelector::Tool(name) if name == "web_fetch" => specifier
+        ToolSelector::Tool(name) if matches!(name.as_str(), "web_fetch" | "browser") => specifier
             .strip_prefix("domain:")
             .and_then(HostPattern::parse)
             .map(RuleSpecifier::Domain)

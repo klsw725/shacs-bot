@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Spec 049 browser fixture</title>
+<label>Query <input id="query"></label>
+<button onclick="document.querySelector('#result').textContent='RESULT: '+document.querySelector('#query').value">Apply</button>
+<p id="result">Ready</p>
+<button onclick="window.open('/popup.html')">Popup</button>
+<a href="/download.txt" download>Download</a>
+<label>Upload <input type="file"></label>
+<label>Password <input type="password" value="secret-fixture"></label>
+<label>New password <input autocomplete="new-password" value="secret-autocomplete"></label>
+<a href="file:///etc/passwd">Internal document</a>
+<button onclick="location.href='chrome://version'">Internal script</button>
+<a href="/images.html">Many images</a>

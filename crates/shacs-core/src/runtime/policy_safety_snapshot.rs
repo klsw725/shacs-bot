@@ -204,5 +204,6 @@ fn capability_label(capability: SafetyCapability) -> &'static str {
         SafetyCapability::AppInstall => "app_install",
         SafetyCapability::RuntimeConfigWrite => "runtime_config_write",
         SafetyCapability::SelfModification => "self_modification",
+        SafetyCapability::BrowserAct => "browser_act",
     }
 }

@@ -3225,6 +3225,8 @@ fn subagent_permissioned_action_context_inherits_snapshots_and_origin() -> Resul
         scope_ref: Some("scope:test".to_owned()),
     };
     let context = ToolExecutionContext {
+        browser_context: None,
+        browser_reviewed_action_digest: None,
         channel: "cli".to_owned(),
         chat_id: "direct".to_owned(),
         message_id: Some("turn:cli:direct".to_owned()),

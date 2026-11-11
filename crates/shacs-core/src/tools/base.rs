@@ -1,5 +1,8 @@
 use crate::controlled_child::ControlledChildAbort;
-use crate::runtime::{PermissionEnvironment, ProcessAdapterKind, ProcessGateInput};
+use crate::runtime::{
+    BrowserCallContext, BrowserError, BrowserPreparedAction, PermissionEnvironment,
+    ProcessAdapterKind, ProcessGateInput,
+};
 use serde_json::{json, Map, Value};
 use shacs_providers::ProviderInvocation;
 use std::path::Path;
@@ -83,6 +86,8 @@ pub struct ToolDefinition {
 
 #[derive(Debug, Clone, Default)]
 pub struct ToolCallExecutionContext {
+    pub browser_context: Option<BrowserCallContext>,
+    pub browser_binding_digest: Option<String>,
     pub(crate) process_gate_input: Option<ProcessGateInput>,
     pub(crate) process_abort: Option<ControlledChildAbort>,
     provider_invocation: Option<ProviderInvocation>,
@@ -92,6 +97,8 @@ pub struct ToolCallExecutionContext {
 impl ToolCallExecutionContext {
     pub fn new(process_gate_input: Option<ProcessGateInput>) -> Self {
         Self {
+            browser_context: None,
+            browser_binding_digest: None,
             process_gate_input,
             process_abort: None,
             provider_invocation: None,
@@ -101,6 +108,16 @@ impl ToolCallExecutionContext {
 
     pub fn with_hidden_paths(mut self, environment: Option<Arc<PermissionEnvironment>>) -> Self {
         self.hidden_paths = environment;
+        self
+    }
+
+    pub fn with_browser_context(mut self, context: Option<BrowserCallContext>) -> Self {
+        self.browser_context = context;
+        self
+    }
+
+    pub fn with_browser_binding(mut self, digest: Option<String>) -> Self {
+        self.browser_binding_digest = digest;
         self
     }
 
@@ -165,6 +182,14 @@ pub trait Tool: Send + Sync {
 
     fn process_adapter_kind(&self) -> Option<ProcessAdapterKind> {
         None
+    }
+
+    fn prepare_browser_action(
+        &self,
+        _session_id: &str,
+        _arguments: &Value,
+    ) -> Result<BrowserPreparedAction, BrowserError> {
+        Err(BrowserError::ContextUnavailable)
     }
 
     /// Why `execute` would refuse these arguments before acting, found with

@@ -117,6 +117,79 @@ fn event_result(result: &AgentRunResult, name: &str) -> String {
 }
 
 #[test]
+fn browser_results_check_only_executed_text_and_image_references() -> TestResult {
+    for (denied, check, warning) in [
+        (false, Ok("yes"), true),
+        (false, Ok("no"), false),
+        (false, Err("connection refused"), false),
+        (true, Ok("yes"), false),
+    ] {
+        let setup = Setup::new()?;
+        let (mut registry, _) = setup.registry(Exec::Gated);
+        registry.register(shacs_core::tools::BrowserTool::new(Arc::new(
+            crate::spec049_browser_tool::Host::default(),
+        )));
+        let provider = RoutingProvider::new(
+            vec![
+                calls(vec![tool_call(
+                    "browser-result",
+                    "browser",
+                    json!({"action":"open","url":"https://example.com"}),
+                )]),
+                answer("done"),
+            ],
+            vec![Ok("no")],
+        )
+        .with_checks(vec![check]);
+        let mut config = agent_loop_config(&setup, true);
+        config.browser_screenshots = Some(true);
+        config.tool_images = Some(shacs_core::runtime::ToolImageSettings {
+            media_root: setup.media.clone(),
+            attach: true,
+        });
+        if denied {
+            config.permission_environment = Some(setup.environment(&Rules::deny(&["browser"])));
+        }
+        let mut agent = AgentLoop::new(
+            MessageBus::new(),
+            SessionManager::new(&setup.workspace)?,
+            ContextBuilder::new(&setup.workspace),
+            &registry,
+            &provider,
+            config,
+        );
+        agent.process_direct("read the fixture", Some("browser-result"))?;
+        let payloads = provider.check_payloads();
+        assert_eq!(payloads.len(), usize::from(!denied));
+        if let Some(payload) = payloads.first() {
+            assert_eq!(payload["tool"], "browser");
+            let text = payload["result"].as_str().ok_or("result text")?;
+            for expected in [
+                "example.com",
+                "Fixture",
+                "Search",
+                "Visible result",
+                "[image: tool-results/",
+            ] {
+                assert!(text.contains(expected), "{text}");
+            }
+            let request = serde_json::to_string(&provider.check_requests()[0].messages)?;
+            assert!(
+                !request.contains("iVBOR")
+                    && !request.contains("data:image")
+                    && !request.contains("image_url")
+            );
+            assert!(!request.contains("Images returned by the tool calls"));
+        }
+        assert_eq!(
+            read_back(&provider, "browser-result").contains(WARNING),
+            warning
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn a_result_with_instructions_gets_the_warning_and_keeps_its_text() -> TestResult {
     for flagged in [true, false] {
         // Given

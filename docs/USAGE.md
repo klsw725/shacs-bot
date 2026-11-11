@@ -1,5 +1,118 @@
 # shacs-bot 사용 가이드
 
+## 컨테이너 브라우저
+
+어시스턴트는 `browser` 도구로 페이지를 열고 보이는 요소의 번호로 조작합니다. 설정을 켜는 것만으로 브라우저를 바로 띄우지는 않으며 첫 호출 때 시작합니다. 사용자가 그 화면을 보기만 하는 기능은 아래 [브라우저 화면 보기](#브라우저-화면-보기)에서 켭니다.
+
+공식 Docker image 안에서 사용자 설정 파일에 다음 값을 넣습니다. `onboard`는 빠진 기본값만 채우고 기존 값을 보존합니다. workspace 안 설정이나 모델 인자는 실행 허락으로 받지 않습니다. 별도 설정 파일을 선택할 때도 workspace 밖의 사용자 소유 경로를 사용하세요.
+
+```json
+{
+  "tools": {
+    "browser": {
+      "enable": false,
+      "startupTimeoutSeconds": 20,
+      "idleTimeoutSeconds": 300,
+      "pageTimeoutSeconds": 30,
+      "view": {
+        "enable": false,
+        "password": ""
+      }
+    }
+  }
+}
+```
+
+`enable: true`는 브라우저 프로세스 시작만 허락합니다. 시작 때 공식 컨테이너 증명과 거절 규칙도 확인하며, 권한 mode나 대화형 여부에 기대지 않습니다. 페이지의 클릭·입력 승인을 대신하는 설정은 아닙니다. 시작 시간은 5–60초, 미사용 시간은 60–1800초, 한 동작 시간은 5–120초 범위에서 정하고 범위 밖 값은 설정 오류입니다.
+
+한 프로세스에서는 한 세션만 브라우저를 사용합니다. 다른 세션은 즉시 사용 중이라는 결과를 받습니다. 같은 세션은 다음 대화에서도 이어 쓰지만 미사용 한도에 도달하면 닫힙니다. Xvfb 가상 화면 위에 Chromium 일반 창을 띄우며 프로필·HOME·임시 자료는 현재 UID로 `/tmp/shacs-browser-…` 아래에만 만듭니다. 닫을 때 자식 프로세스를 종료하고 임시 폴더를 지웁니다. 강제 SIGKILL이나 전원 중단 때 남은 폴더는 다른 실행이 임의로 지우지 않습니다. gateway·api는 메모리 한도 2G, 예약 512M, 공유 메모리 256mb를 사용합니다.
+
+연결은 SOCKS5에서 이름을 한 번만 해석하고, 나온 주소를 모두 기존 `NetworkGuard`로 확인한 뒤 그 주소로 연결합니다. `tools.ssrfWhitelist`는 주소 단위 허용이며 포트를 구별하지 않습니다. 같은 컨테이너 주소나 loopback을 허용하면 API·WebSocket 등 그 주소의 다른 포트도 열릴 수 있습니다. DevTools는 TCP 포트 없이 파이프로만 연결합니다.
+
+내부 주소를 막는 Chromium 정책은 추가 방어이며 유일한 차단 장치가 아닙니다. 페이지 내용은 http(s) 주 문서가 읽기 전후와 이벤트 기록에서 동일할 때만 반환합니다. 파일 업로드·다운로드는 거절합니다. 자식 프로세스는 빈 환경에서 필요한 경로와 화면 설정만 받으며 provider 비밀 값이나 `.env.json` 값을 상속하지 않습니다. 다만 Chromium sandbox는 꺼져 있고 shacs-bot과 같은 컨테이너·UID로 실행되므로 브라우저 취약점이 data 폴더의 비밀 파일을 읽을 위험은 남습니다.
+
+`runtime inspect`의 `Browser`와 diagnostics의 `browser`는 `enabled`, `available`, `reason`, `state`, `ownerObserved`, `updatedAtMs`와 화면 보기 상태 `view`를 보여 줍니다. 별도 inspect는 현재 실행 소유자와 일치하는 `runtime/browser-state.json`만 인정합니다. 소유자가 바뀌거나 유효 시간이 끝났거나 파일을 읽을 수 없으면 `unknown`입니다. 한 번 실행하고 끝나는 CLI처럼 소유 표식이 없으면 별도 inspect로 실행 상태를 보장하지 않으며 `ownerObserved: false`입니다. URL·페이지 내용·프로필 경로는 상태 파일과 진단에 넣지 않습니다.
+
+### 브라우저 화면 보기
+
+Docker가 도는 그 컴퓨터에서 어시스턴트가 조작하는 브라우저 창을 보기만 할 수 있습니다. 공식 image의 `x11vnc`가 브라우저의 가상 화면을 container 안 `127.0.0.1:5900`에만 내보내고, `websockify`가 noVNC 페이지와 그 연결을 container 포트 6080에서 제공합니다. Compose는 gateway의 6080을 host `127.0.0.1:6080`에만, api의 6080을 host `127.0.0.1:6081`에만 publish합니다. 다른 interface에는 열지 않고 5900은 publish하지 않습니다.
+
+켜려면 `tools.browser.view.enable`을 `true`로 두고 비밀번호는 data 폴더의 `.env.json`에 둡니다. config에는 이름만 적습니다.
+
+```json
+{"tools": {"browser": {"enable": true, "view": {"enable": true, "password": "${SHACS_BROWSER_VIEW_PASSWORD}"}}}}
+```
+
+```json
+{"SHACS_BROWSER_VIEW_PASSWORD": "example-only-change-me-7Qp2"}
+```
+
+`${이름}`은 다른 비밀과 같은 순서로 풉니다. 비어 있지 않은 process 환경 변수가 먼저, 그다음 `.env.json`이며 runtime이 `.env.json` 값을 환경에 내보내지는 않습니다. 이 칸만은 값이 아직 없어도 설정 오류가 아닙니다. `"${SHACS_BROWSER_VIEW_PASSWORD}"`를 적어 두고 값을 어디에도 두지 않으면(화면 보기를 꺼 둔 채로도) shacs-bot과 브라우저는 그대로 시작하고, 화면 보기를 켰다면 `password_missing`으로 화면 보기만 쓸 수 없습니다. 다른 칸의 `${이름}` 누락은 지금처럼 설정 오류입니다. config에 비밀번호를 직접 적었다면 `runtime config-migrate`가 다른 `password` 키처럼 `SHACS_TOOLS_BROWSER_VIEW_PASSWORD`로 옮깁니다. `onboard`는 기존 `view` 값을 보존하고 없을 때만 `enable: false`, `password: ""` stub을 더하며, 비밀번호를 대신 만들어 주지 않습니다.
+
+브라우저가 뜨면 gateway는 `http://127.0.0.1:6080/vnc.html`, api는 `http://127.0.0.1:6081/vnc.html`을 host의 브라우저에서 열고 noVNC 화면의 비밀번호 칸에 값을 칩니다(주소에 비밀번호를 넣지 않습니다). 한 번 실행하고 끝나는 CLI의 안내 주소는 6080이며 실제 publish는 사용자의 Compose 설정에 따릅니다. 화면은 보기 전용입니다. 보기 페이지를 고쳐 클릭·키를 보내도 `x11vnc`가 서버에서 버리고(`-viewonly`), selection·clipboard 교환도 양방향으로 끕니다(`-nosel -noclipboard`). 화면을 보는 사람이 있어도 어시스턴트의 동작·한도·승인 판정은 같습니다.
+
+비밀번호 규칙과 한계:
+
+- 8자 이상 128자 이하여야 합니다. 권장은 8–128자의 무작위 ASCII입니다. VNC 인증은 방식의 한계로 **앞 8자만** 확인하므로 긴 비밀번호의 뒷부분은 보안에 더해지지 않습니다. 128자를 넘는 값은 x11vnc가 비밀번호 파일을 줄 단위(1024바이트)로 읽어 두 개의 비밀번호로 받아들일 수 있어 거절합니다.
+- 글자는 **인쇄 가능한 ASCII**(`!`부터 `~`까지, 코드 0x21–0x7E)만 받습니다. 공백·탭·줄바꿈 등 제어 문자와 한글·악센트 글자 같은 비ASCII 글자는 어느 위치에 있어도 거절합니다. noVNC는 비밀번호를 UTF-16 글자 코드로, x11vnc는 UTF-8 파일로 다루어 비ASCII 비밀번호는 맞게 쳐도 인증되지 않기 때문입니다. `#`으로 시작하는 값과 `__SKIP__`·`__COMM__`·`__EMPTY__`·`__BEGIN_VIEWONLY__`가 어디든 들어 있는 값도 x11vnc 비밀번호 파일 문법과 겹쳐 거절합니다.
+- 켰는데 값이 없으면 `password_missing`, 짧으면 `password_too_short`, 길면 `password_too_long`, 위 형식이면 `password_format_invalid`, image에 프로그램이 없으면 `package_missing`입니다. 이때 화면 보기만 `unavailable`이고 브라우저는 그대로 시작합니다. 비밀번호 파일은 만들지 않습니다.
+- container 안 `127.0.0.1:5900`을 다른 프로그램이 이미 듣고 있으면 비밀번호 파일을 만들지 않고 `port_in_use`로 화면 보기만 실패합니다. x11vnc가 떠도 그 포트의 주인이 그 x11vnc임을 확인한 뒤에만 noVNC 연결(`websockify`)을 엽니다.
+- host와 container 사이 연결은 암호화하지 않습니다. 그래서 host의 `127.0.0.1`에만 열며, 같은 컴퓨터에서 비밀번호를 아는 사람은 화면을 볼 수 있습니다. 화면에는 주소창·팝업까지 그대로 보이고 비밀을 따로 가리지 않습니다.
+
+비밀번호는 `x11vnc`에 넘길 때만 브라우저의 0700 임시 폴더 안에 예측할 수 없는 이름의 0600 파일로 한 줄 쓰고, `x11vnc`가 읽은 뒤 지웁니다(`-passwdfile rm:…`). 시작 성공은 VNC listener가 열리고 그 파일이 없어진 것을 확인한 뒤에만 기록합니다. 명령줄 인자, 자식 환경 변수, 로그, 어시스턴트에게 가는 글, channel 메시지, inspect·diagnostics에는 비밀번호나 변수 이름이 없습니다. `x11vnc`·`websockify`도 Chromium과 같은 빈 환경·허용 목록 규칙으로 시작하므로 provider 비밀이나 `.env.json` 값을 물려받지 않습니다.
+
+화면 보기는 브라우저와 함께 켜지고 꺼집니다. 브라우저(가상 화면·Chromium·DevTools)가 시작 한도 안에 먼저 뜨고, 그 뒤 화면 보기가 자기 몫의 10초 안에 시작합니다. 이 10초는 브라우저 시작 한도와 별개여서 화면 보기가 늦어도 브라우저는 실패하지 않으며, 첫 호출이 그만큼 더 걸릴 수 있습니다. `x11vnc`나 `websockify` 중 하나만 죽으면 둘을 모두 닫고 `failed`로 기록하되 브라우저는 계속 쓰며, 그 브라우저가 떠 있는 동안 자동으로 다시 켜지 않습니다. 다음에 브라우저가 새로 뜰 때 다시 시도합니다. 브라우저를 닫거나 Xvfb·Chromium이 죽거나 미사용으로 닫히거나 shacs-bot이 끝나면 화면 보기도 끝나고 비밀번호 파일도 남지 않습니다. 화면 보기를 켜면 container가 `x11vnc`·`websockify` 두 process만큼 CPU와 메모리를 더 쓰고, 화면을 보고 있는 동안 전송량이 늘어납니다.
+
+`runtime inspect`와 diagnostics의 `browser.view`는 `enabled`, `state`(`disabled`, `unavailable`, `starting`, `open`, `failed`, `closed`, `unknown`), `reason`, `url`을 보여 줍니다. `url`은 열려 있을 때만 있습니다. 별도 inspect에서는 브라우저 상태와 같은 소유자 검증을 거치므로 소유자가 다르거나 유효 시간이 끝났으면 `state: unknown`이고 이전 URL로 열림을 주장하지 않습니다. 꺼짐·비밀번호 문제·프로그램 부재 같은 설정상의 사실은 `enabled`와 `reason`으로 그대로 보입니다. 보기 연결에서 입력을 받거나 로그인하는 일은 이 기능의 범위가 아닙니다.
+
+실제 Docker에서 화면 보기를 확인하는 opt-in 명령은 `bash scripts/spec049-viewer-check.sh --approved`입니다. 별도 Compose project에 gateway·api 역할 container 둘과 정적 페이지 container를 띄우고, 임시 `.env.json`의 비밀번호(출력하지 않습니다)로 host `127.0.0.1:6080`·`6081`에서 framebuffer를 받는지, 틀린 비밀번호가 거절되는지, 인증한 client가 보낸 클릭·키·clipboard가 페이지를 바꾸지 않는지, 5900이 publish되지 않고 브라우저가 viewer·API 포트에 가지 못하는지, 시작 뒤 비밀번호 파일이 없는지, viewer 자식 하나를 죽여도 `look`이 되는지, 브라우저를 닫으면 viewer가 끝나는지 확인합니다. 끝나면 자신의 project와 임시 자료만 지웁니다.
+
+### 번호로 페이지 조작하기
+
+도구 호출 예시는 다음과 같습니다. `revision`에는 바로 앞 결과의 값을 넣습니다.
+
+```json
+{"action":"open","url":"https://example.com"}
+{"action":"look"}
+{"action":"type","element":1,"revision":"바로 앞 결과의 revision","text":"검색어","submit":false}
+{"action":"click","element":2,"revision":"입력 결과의 revision"}
+{"action":"scroll","direction":"down"}
+{"action":"wait","text":"검색 결과","timeoutMs":1000}
+{"action":"back"}
+{"action":"close"}
+```
+
+각 결과는 URL·제목·번호·역할·이름·현재 값·보이는 글과 잘린 개수를 알려 줍니다. 번호는 다음 결과가 발급되거나 페이지·탭이 바뀌면 만료됩니다. 지난 번호, 이름이나 종류가 바뀐 요소, 다른 요소에 가려진 버튼에는 입력하지 않습니다. 다시 `look`한 뒤 새 번호와 `revision`을 사용하세요. 입력은 기존 값을 교체하며 `submit: true`면 마지막에 Enter를 누릅니다. `press`는 Enter, Tab, Shift+Tab, Escape, 방향키, Home, End, PageUp, PageDown, Backspace, Delete만 받습니다. `scroll`에 요소 번호를 주려면 `revision`도 함께 줍니다. `wait`는 최대 10초이며 글을 못 찾으면 시간 초과 사실과 현재 화면을 돌려줍니다.
+
+### 페이지 조작의 권한 판정
+
+`browser`의 권한은 tool 이름이 아니라 동작마다 정합니다. `open`·`look`·`scroll`·`back`·`wait`·`close`는 `net_outbound`(웹 읽기)이고, `click`·`type`·`press`는 capability `browser_act`(페이지에 영향을 주는 조작)입니다. `browser_act`는 `net_outbound`·`proc_exec`와 별개라서 다른 capability의 허용이 이를 대신하지 못하며, 하위 실행에 물려준 권한 한도에 `browser_act`가 없으면 조작은 거절됩니다. 이미 저장된 한도에 이 값이 저절로 더해지지는 않고, 공식 container의 production 실행은 `net_outbound`와 `browser_act`를 모두 한도에 넣습니다. 알 수 없는 `action`은 정규화 오류로 거절합니다.
+
+| mode / 실행 | 읽기 동작(`net_outbound`) | 조작 동작(`browser_act`) |
+|---|---|---|
+| `auto`(대화형) | `web_fetch`와 같은 classifier 판정 | classifier 판정. 허용일 때만 실행 |
+| `default`·`accept_edits` | `web_fetch`와 같은 판정 | 대화형이면 승인 질문 |
+| `plan` | 여섯 읽기 동작 허용(`web_fetch`는 계속 거절) | 대화형이면 승인 질문, 비대화형이면 거절 |
+| `dont_ask` | `web_fetch`와 같은 판정 | 거절 |
+| 비대화형(`bypass_permissions` 밖) | `web_fetch`와 같은 판정(`plan`의 읽기 허용은 그대로) | 거절. 질문도 classifier 호출도 없음 |
+| `bypass_permissions`(대화형·비대화형) | `web_fetch`와 같은 판정 | 실행 |
+
+모든 행에서 사용자의 deny·ask 규칙, 상속된 권한 한도, 정규화 오류가 먼저 적용됩니다. allow 규칙이나 기억된 승인으로 비대화형·`dont_ask`의 조작이 실행되지는 않습니다. 비밀번호·파일 입력 거절과 http(s) 문서 검사는 어떤 허용으로도 풀리지 않습니다.
+
+classifier와 승인 질문은 요소 번호가 아니라 내용을 봅니다. shacs-bot은 마지막 `look` 결과에서(브라우저를 새로 띄우거나 페이지를 바꾸지 않고) 사이트(origin), 요소의 역할과 이름, 입력할 글과 Enter 여부 또는 누를 키, 요소가 실제로 속한 양식의 이름과 제출 주소·방식, 제출 버튼의 `formaction`·`formmethod` 같은 override를 적어 질문의 `Arguments`와 classifier 요청의 action에 넣습니다. `press`는 지금 focus된 요소(shadow DOM·자식 frame 안 포함)를 적고, Enter의 제출 대상을 확인할 수 없으면 실행하지 않고 다시 보라고 돌려줍니다. 이 설명은 비밀 값 가리기와 `.env.json` 값 가리기(`[secret 이름]`)를 거치며, 가린 값이 같아도 원본이 다른 호출은 승인을 공유하지 않습니다. 승인이나 classifier 허용 뒤 실제 입력 직전에 같은 내용을 DOM에서 다시 읽어 비교하고, 사이트·문서·요소·양식·제출 주소·방식·submitter·focus 중 하나라도 바뀌었으면 입력하지 않고 `browser_stale_revision`으로 다시 `look`하라고 돌려줍니다. 승인이나 classifier 결과를 새 대상에 다시 쓰지 않으며, 지난 revision으로 부른 조작도 같은 결과입니다. `look`·`scroll`·`back`·`wait`도 실행 직전에 지금 문서가 판정 때 문서와 같은지 확인하고, 다르면 읽지 않고 다시 판정을 받게 합니다. 첫 입력 이벤트(mousedown, keydown)를 보낸 뒤에야 변경이 드러나면 더 입력하지 않고 브라우저를 닫아 `browser_document_changed`를 돌려주며, 이미 보낸 첫 이벤트는 되돌리지 못합니다. `type`은 글과 Enter가 승인한 칸에 가는지(focus) 확인하고, `click`은 누르기 직전과 놓기 직전에 같은 자리에 그 요소가 있는지 다시 확인합니다. Tab·Shift+Tab은 focus 이동을 의도한 결과로 받되 새 focus가 같은 문서 안에 있어야 하고, 다른 키는 focus까지 엄격히 확인합니다. 페이지가 새 탭(popup)을 열면 그 탭이 현재 탭이 되고 이전 탭은 닫히며, 탭이 여러 개 열리면 마지막 탭만 남습니다. 클릭이 연 탭은 그 클릭의 결과로 새 번호와 함께 돌아오고, 그 뒤의 판정은 새 탭 자신의 주소와 문서를 봅니다. 새 탭에 아직 http(s) 문서가 없으면(`about:blank`) 볼 것이 없어 `open`으로 주소를 열어야 합니다. `scroll`·`wait`는 실행 중에도 문서가 바뀌면 멈추고 결과를 돌려주지 않습니다.
+
+규칙에서는 `browser`와 `browser(domain:<host>)`를 쓸 수 있습니다. host pattern의 뜻은 `web_fetch(domain:…)`과 같고(`*.example.com`, 대소문자와 끝 점 무시), `open`은 열 주소의 host, 다른 동작은 지금 페이지의 host에 맞춥니다. 페이지가 없을 때의 `close`는 domain 규칙에 맞지 않고 bare `browser`에만 맞습니다. `browser(domain:…)` 규칙은 `web_fetch`에, `web_fetch(domain:…)` 규칙은 `browser`에 적용되지 않습니다. 예: `"ask": ["browser(domain:*.bank.example)"]`, `"deny": ["browser(domain:example.com)"]`.
+
+auto mode 기본 `softDeny`의 마지막 항목은 `[Browser Commitment]`입니다: 브라우저에서 사용자가 요청하지 않은 구매·예약·결제·메시지·게시·계정 설정 변경을 제출하거나 확정하는 동작을 막습니다. 사용자가 그 동작을 직접·구체적으로 말한 대화에서만 풀리며, 어시스턴트의 글이나 tool 결과, 승인 답은 사용자 의도가 되지 않습니다.
+
+요소와 양식의 이름은 페이지가 정하므로 그 이름이 실제 효과를 정직하게 설명한다는 보장은 없습니다. 실행된 `browser` 결과의 글(URL·제목·요소 목록·보이는 글·그림 참조)은 도구 결과 검사를 받지만 캡처 그림 안의 글은 검사하지 않으며, 검사에 걸려도 결과를 지우지 않고 경고만 덧붙입니다. 거절된 호출은 검사하지 않습니다. 하위 작업과 workflow 자식에는 `browser`를 제공하지 않습니다.
+
+`tools.browser.screenshots`를 생략하면 해당 모델이 그림을 받는 경우에만 번호표가 그려진 캡처를 만듭니다. `false`면 캡처와 번호표 그리기를 모두 생략하고, `true`면 모델의 그림 지원과 관계없이 캡처합니다. 그림을 못 받는 모델도 같은 번호 목록으로 조작하며, `true`로 저장한 그림은 파일 참조 글로만 받습니다. 캡처는 media 폴더의 `tool-results/`에 저장되고 그림을 받는 모델에는 최근 3개만 첨부합니다. 5 MiB가 넘는 그림은 저장하지 않고 글 결과는 유지합니다. 오래된 캡처는 자동으로 지우지 않습니다.
+
+비밀번호 칸과 비밀번호 자동완성 칸에는 입력하지 않으며 값은 `[입력 불가]`로 표시합니다. 파일 올리기·내려받기도 거절하고, 내려받기는 `web_fetch`를 사용합니다. http(s) 밖의 주소와 사용자 정보가 붙은 URL은 열지 않습니다. 접근성 정보 없는 canvas, 가려진 요소, 자동화를 차단하는 사이트는 다루지 못할 수 있습니다. 페이지가 화면의 번호표를 바꾸어도 실제 조작은 내부 번호 목록과 클릭 위치 확인을 기준으로 합니다.
+
+실제 Docker 확인은 자동 시험에 포함하지 않습니다. 사용자 승인 뒤 저장소 루트에서 `bash scripts/spec049-browser-check.sh --approved`를 실행하세요. 별도 Compose project·network와 임시 data·workspace·config, 전용 정적 페이지 container를 만들고 그 페이지 container의 IPv4 한 개(`/32`)만 허용합니다. 끝나면 자신의 project와 임시 자료만 지웁니다. 실제 Chromium·정책 적용·메모리 확인은 이 명령을 실행하기 전까지 미검증입니다.
+
 ## 명시적으로 맡긴 작업
 
 먼저 분리된 workspace에서 `onboard`와 `session create --session cli:direct --workspace /tmp/shacs-ws`를 실행하세요. `/work create <목표>`는 대화 중 사용자가 직접 지속 위임할 때 사용합니다. 일반 질문이나 모호한 요청은 자동으로 위임으로 저장하지 않습니다. 어시스턴트가 `propose_entrusted_work` 도구로 제안한 경우에도 같은 대화·발신자에게 표시된 `/work accept <proposal-id>`를 명시적으로 보내야 생성됩니다. `/work decline <proposal-id>` 또는 일반적인 `yes`는 위임 동의가 아닙니다. 대화에서는 `/work read <work-id>`, `/work edit <work-id> <expected-revision> <instructions>`, `/work pause|resume|done|clear <work-id>`를 사용할 수 있습니다. 대화의 `edit`는 이전 예산·결정·남은 질문을 보존하고 지시 내용만 교체합니다.
@@ -406,7 +519,7 @@ Context limits는 bounded file bytes, folder entry limit, URL byte limit, provid
 9. 읽기만 하는 file tool과, 보호 경로가 아닌 workspace 안 쓰기(`permissions.autoApproval.allowWorkspaceEdits`가 켜졌을 때)는 허용합니다.
 10. 나머지는 transcript classifier가 봅니다. 허용이면 실행하고, 막거나 판정하지 못하면 실행하지 않고 그 까닭을 tool 결과로 어시스턴트에게 돌려준 뒤 turn을 잇습니다. 3번 연속이나 한 세션에서 20번 막혔을 때만 묻습니다([막힌 뒤](#막힌-뒤)).
 
-다른 mode에서도 비밀 파일 쓰기, deny 규칙, 기억된 거절은 거절이고, 비밀 파일 읽기와 critical path 제거는 그 호출을 승인할 때만 실행하며, ask 규칙은 허용될 호출을 묻기로 바꿉니다. `dont_ask`에서는 이 묻기가 거절이고, `bypass_permissions`에서도 이 규칙은 걸립니다. 022의 정적 규칙과 local 자동 승인, `permissions.autoApproval`의 `allowProcExecVerification`·`requireDockerContainmentForExec`는 auto mode에서 쓰지 않으며, `protectedTargets`는 보호 경로에 더해집니다.
+다른 mode에서도 비밀 파일 쓰기, deny 규칙, 기억된 거절은 거절이고, 비밀 파일 읽기와 critical path 제거는 그 호출을 승인할 때만 실행하며, ask 규칙은 허용될 호출을 묻기로 바꿉니다. `dont_ask`에서는 이 묻기가 거절이고, `bypass_permissions`에서도 이 규칙은 걸립니다. `browser`의 조작 동작(`browser_act`)과 `plan`의 브라우저 읽기 허용은 [페이지 조작의 권한 판정](#페이지-조작의-권한-판정)의 표를 따릅니다. 022의 정적 규칙과 local 자동 승인, `permissions.autoApproval`의 `allowProcExecVerification`·`requireDockerContainmentForExec`는 auto mode에서 쓰지 않으며, `protectedTargets`는 보호 경로에 더해집니다.
 
 #### 기본 mode
 
@@ -435,7 +548,7 @@ user-local config(`--config`로 고른 파일, 기본은 `~/.shacs-bot/config.js
 
 - `exec`, `exec(<pattern>)`: `*`는 공백을 포함한 아무 글에 맞습니다. 끝의 ` *`와 `:*`는 앞부분만 있는 명령에도 맞습니다(`exec(ls *)`는 `ls`와 `ls -la`에 맞고 `lsof`에는 맞지 않습니다). `&&`, `||`, `;`, `|`로 이은 명령은 deny·ask는 하나라도 맞으면, allow는 모두 맞아야 걸립니다. `timeout`·`nohup`·`xargs` 같은 감싸기와 앞의 환경 변수 대입은 떼고 봅니다.
 - `read`, `edit`, `read(<경로>)`, `edit(<경로>)`: 경로는 gitignore 문법입니다. `//`는 절대 경로, `~/`는 home, `/`는 config 파일의 폴더, 그 밖은 workspace 기준이고, 이름만 적으면(`.env`) 어느 깊이에서든 맞습니다. 경로는 적은 그대로와 symlink를 따라간 경로를 함께 봅니다. `read` deny는 쓰기도 막고, `read` deny·ask에 맞는 경로는 `list_dir`·`glob`·`grep`이 폴더를 훑는 결과에서도 빠집니다.
-- `web_fetch(domain:<host>)`(`*.example.com` 지원), `mcp_<server>`, 그 밖의 tool 이름(`message`, `cron`, `spawn`, `image_generate`, `my` 등). deny·ask는 tool 자리에 glob(`mcp_*`)을 받습니다.
+- `web_fetch(domain:<host>)`와 `browser(domain:<host>)`(`*.example.com` 지원. `browser`는 `open`이면 열 주소의 host, 다른 동작이면 지금 페이지의 host에 맞추며 두 tool 사이에 서로 적용되지 않습니다), `mcp_<server>`, 그 밖의 tool 이름(`browser`, `message`, `cron`, `spawn`, `image_generate`, `my` 등). deny·ask는 tool 자리에 glob(`mcp_*`)을 받습니다.
 - 판정 순서는 deny → ask → allow입니다. auto mode에서는 넓은 allow 규칙을 쓰지 않습니다: `exec`, `exec(*)`, 셸·실행기를 통째로 여는 pattern(`python3 *`, `bash -lc *`), `sudo`·`env`·`ssh` 같은 감싸기, 패키지 실행기(`npx *`, `npm run *`, `cargo run *`), `py*`처럼 그 이름들을 덮는 pattern, `spawn` allow. 규칙은 지우지 않으며 다른 mode에서는 그대로 씁니다. `permissions.autoMode.classifyAllShell`을 켜면 auto mode에서 `exec` allow 규칙을 모두 쓰지 않습니다.
 - 읽을 수 없는 규칙(빈 글, 괄호 짝 오류, tool이 받지 않는 지정)과 글자 배열이 아닌 목록은 쓰지 않고 진단에 남깁니다. 목록마다 200개, 규칙마다 1,000자까지 받습니다.
 

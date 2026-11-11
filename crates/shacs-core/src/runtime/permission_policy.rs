@@ -18,6 +18,7 @@ pub enum PermissionPolicyDecisionKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionPolicyReason {
+    BrowserUserLocalEnable,
     StaticDeny,
     StaticAskRequired,
     ProtectedTarget,
@@ -188,12 +189,9 @@ fn decide_without_user_rules(input: PermissionPolicyInput) -> PermissionPolicyDe
     }
 
     match input.action.permission_mode_snapshot.mode {
-        PermissionMode::Plan => return decide_plan(&input),
+        PermissionMode::Plan if !browser_mode_action(&input) => return decide_plan(&input),
         PermissionMode::BypassPermissions if input.remembered_store_unavailable => {
-            return ask_or_deny(
-                input.interactive,
-                PermissionPolicyReason::RememberedStoreUnavailable,
-            );
+            return store_unavailable_decision(&input);
         }
         PermissionMode::BypassPermissions => {
             return decision(
@@ -202,7 +200,8 @@ fn decide_without_user_rules(input: PermissionPolicyInput) -> PermissionPolicyDe
                 DecisionRefs::default(),
             );
         }
-        PermissionMode::Default
+        PermissionMode::Plan
+        | PermissionMode::Default
         | PermissionMode::AcceptEdits
         | PermissionMode::Auto
         | PermissionMode::DontAsk => {}
@@ -219,10 +218,11 @@ fn decide_without_user_rules(input: PermissionPolicyInput) -> PermissionPolicyDe
     }
 
     if input.remembered_store_unavailable {
-        return ask_or_deny(
-            input.interactive,
-            PermissionPolicyReason::RememberedStoreUnavailable,
-        );
+        return store_unavailable_decision(&input);
+    }
+
+    if let Some(denied) = unattended_browser_act_denial(&input) {
+        return denied;
     }
 
     if static_ask_blocks_approval(&input) {
@@ -299,6 +299,55 @@ fn decide_without_user_rules(input: PermissionPolicyInput) -> PermissionPolicyDe
     }
 }
 
+/// Browser input with nobody watching: `dont_ask`, or a non-interactive run
+/// outside `bypass_permissions` (Spec 049 PRD 030 scope 4). This is a mode
+/// boundary, not an overridable baseline: it comes after the ceiling,
+/// argument errors and the user's deny and ask rules, and before an approval,
+/// an allow rule, a remembered approval or the classifier could authorize
+/// the call. An ask rule keeps its own reason.
+pub(crate) fn unattended_browser_act(input: &PermissionPolicyInput) -> bool {
+    let mode = input.action.permission_mode_snapshot.mode;
+    input
+        .action
+        .capabilities
+        .contains(&SafetyCapability::BrowserAct)
+        && (mode == PermissionMode::DontAsk
+            || (!input.interactive && mode != PermissionMode::BypassPermissions))
+}
+
+/// An unreadable remembered-permission store asks, except where nobody may
+/// be asked: unattended browser input is refused with the same reason.
+pub(crate) fn store_unavailable_decision(
+    input: &PermissionPolicyInput,
+) -> PermissionPolicyDecision {
+    ask_or_deny(
+        input.interactive && !unattended_browser_act(input),
+        PermissionPolicyReason::RememberedStoreUnavailable,
+    )
+}
+
+pub(crate) fn unattended_browser_act_denial(
+    input: &PermissionPolicyInput,
+) -> Option<PermissionPolicyDecision> {
+    if !unattended_browser_act(input) {
+        return None;
+    }
+    let reason = if input
+        .materials
+        .as_ref()
+        .is_some_and(|materials| materials.ask_rule.is_some())
+    {
+        PermissionPolicyReason::UserRuleAsk
+    } else {
+        PermissionPolicyReason::ModeBaselineDeny
+    };
+    Some(decision(
+        PermissionPolicyDecisionKind::Deny,
+        reason,
+        DecisionRefs::default(),
+    ))
+}
+
 fn static_ask_blocks_approval(input: &PermissionPolicyInput) -> bool {
     !input.interactive
         && input.static_rule_decision.kind == StaticRuleDecisionKind::AskRequired
@@ -309,7 +358,12 @@ fn static_ask_blocks_approval(input: &PermissionPolicyInput) -> bool {
 }
 
 fn decide_plan(input: &PermissionPolicyInput) -> PermissionPolicyDecision {
-    if all_capabilities(input, &[SafetyCapability::FsRead]) {
+    if browser_mode_action(input) && input.action.capabilities == [SafetyCapability::BrowserAct] {
+        ask_or_deny(input.interactive, PermissionPolicyReason::ModeBaselineAsk)
+    } else if all_capabilities(input, &[SafetyCapability::FsRead])
+        || (browser_mode_action(input)
+            && input.action.capabilities == [SafetyCapability::NetOutbound])
+    {
         decision(
             PermissionPolicyDecisionKind::Allow,
             PermissionPolicyReason::ModeBaselineAllow,
@@ -322,6 +376,24 @@ fn decide_plan(input: &PermissionPolicyInput) -> PermissionPolicyDecision {
             DecisionRefs::default(),
         )
     }
+}
+
+fn browser_mode_action(input: &PermissionPolicyInput) -> bool {
+    input.action.tool_name == "browser"
+        && match input
+            .action
+            .redacted_arguments
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("open" | "look" | "scroll" | "back" | "wait" | "close") => {
+                input.action.capabilities == [SafetyCapability::NetOutbound]
+            }
+            Some("click" | "type" | "press") => {
+                input.action.capabilities == [SafetyCapability::BrowserAct]
+            }
+            _ => false,
+        }
 }
 
 fn decide_default(input: &PermissionPolicyInput) -> PermissionPolicyDecision {

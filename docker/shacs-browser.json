@@ -1,0 +1,7 @@
+{
+  "URLBlocklist": ["*"],
+  "URLAllowlist": ["http://*", "https://*"],
+  "DownloadRestrictions": 3,
+  "DefaultFileSystemReadGuardSetting": 2,
+  "DefaultFileSystemWriteGuardSetting": 2
+}

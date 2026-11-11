@@ -1,9 +1,10 @@
 use crate::runtime::{
     decide_permission, evaluate_static_rules, ApprovalCorrelation, AutoEvaluatorVerdict,
-    ContainmentPermissionProof, InheritedPermissionContext, PermissionMaterials,
-    PermissionPolicyDecision, PermissionPolicyDecisionKind, PermissionPolicyInput,
-    PermissionRuleInput, ProcessAdapterKind, ProcessEnvelopeAdmission, ProcessExecutionEnvelope,
-    ProcessIdentity, ProcessRedactedCommand, RememberedPermissionPolicyMatch,
+    BrowserStartEvidence, ContainmentPermissionProof, InheritedPermissionContext,
+    PermissionMaterials, PermissionPolicyDecision, PermissionPolicyDecisionKind,
+    PermissionPolicyInput, PermissionPolicyReason, PermissionRuleInput, ProcessAdapterKind,
+    ProcessEnvelopeAdmission, ProcessExecutionEnvelope, ProcessIdentity, ProcessRedactedCommand,
+    RememberedPermissionPolicyMatch, StaticRuleDecisionKind,
 };
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -124,6 +125,7 @@ pub struct ProcessGateInput {
 /// the same way (Spec 048 PRD 000 scope 1).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessGatePolicyMaterials {
+    pub browser_start: Option<BrowserStartEvidence>,
     pub remembered_rules: Vec<RememberedPermissionPolicyMatch>,
     pub remembered_store_unavailable: bool,
     pub materials: Option<PermissionMaterials>,
@@ -196,17 +198,48 @@ impl ProcessGate {
         validate_policy_ref(&input)?;
         let static_rule_decision =
             evaluate_static_rules(&input.envelope.action, &input.permission_rules);
-        let policy_decision = decide_permission(PermissionPolicyInput {
-            action: input.envelope.action.clone(),
-            static_rule_decision,
-            evaluator: input.evaluator.clone(),
-            approval: input.approval.clone(),
-            inherited_context: input.inherited_context.clone(),
-            remembered_rules: input.policy_materials.remembered_rules.clone(),
-            remembered_store_unavailable: input.policy_materials.remembered_store_unavailable,
-            interactive: input.interactive,
-            materials: input.policy_materials.materials.clone(),
-        });
+        let policy_decision = if input.envelope.adapter == ProcessAdapterKind::Browser {
+            let allowed = static_rule_decision.kind != StaticRuleDecisionKind::Deny
+                && !input
+                    .policy_materials
+                    .materials
+                    .as_ref()
+                    .is_some_and(|materials| materials.deny_rule.is_some())
+                && input
+                    .policy_materials
+                    .browser_start
+                    .as_ref()
+                    .is_some_and(|evidence| evidence.admits(&input.envelope));
+            PermissionPolicyDecision {
+                kind: if allowed {
+                    PermissionPolicyDecisionKind::Allow
+                } else {
+                    PermissionPolicyDecisionKind::Deny
+                },
+                reason: if allowed {
+                    PermissionPolicyReason::BrowserUserLocalEnable
+                } else {
+                    PermissionPolicyReason::StaticDeny
+                },
+                evaluator_ref: None,
+                approval_ref: None,
+                approval_error: None,
+                remembered_rule_ref: None,
+                can_handoff_to_tool_runtime: allowed,
+            }
+        } else {
+            decide_permission(PermissionPolicyInput {
+                action: input.envelope.action.clone(),
+                static_rule_decision,
+                evaluator: input.evaluator.clone(),
+                approval: input.approval.clone(),
+                inherited_context: input.inherited_context.clone(),
+                remembered_rules: input.policy_materials.remembered_rules.clone(),
+                remembered_store_unavailable: input.policy_materials.remembered_store_unavailable,
+                interactive: input.interactive,
+                materials: input.policy_materials.materials.clone(),
+            })
+        };
         if input.terminal_precondition != ProcessGateTerminalPrecondition::Ready
             || !containment_proof_admits(&input)
             || policy_decision.kind != PermissionPolicyDecisionKind::Allow

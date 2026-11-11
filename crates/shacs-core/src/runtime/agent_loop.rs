@@ -270,6 +270,7 @@ enum PermissionApprovalReply {
 
 #[derive(Clone)]
 pub struct AgentLoopConfig {
+    pub browser_screenshots: Option<bool>,
     pub workspace: PathBuf,
     pub tool_images: Option<ToolImageSettings>,
     pub media_roots: Vec<PathBuf>,
@@ -329,6 +330,7 @@ impl AgentLoopConfig {
             workspace: workspace.into(),
             media_roots: Vec::new(),
             tool_images: None,
+            browser_screenshots: None,
             model: model.into(),
             settings: GenerationSettings::default(),
             retry_mode: ProviderRetryMode::Standard,
@@ -1753,6 +1755,17 @@ impl<'a> AgentLoop<'a> {
         let checkpoint_manager_capture = checkpoint_manager.clone();
         let checkpoint_execution_ledger = execution_ledger.clone();
         let tool_context = ToolExecutionContext {
+            browser_context: Some(crate::runtime::BrowserCallContext {
+                effective_session_id: session_key.clone(),
+                permission_mode_snapshot: self.config.permission_mode_snapshot.clone(),
+                permission_interactive: self.config.permission_interactive,
+                browser_screenshots: self.config.browser_screenshots,
+                native_image_input_supported: self
+                    .config
+                    .tool_images
+                    .as_ref()
+                    .is_some_and(|images| images.attach),
+            }),
             channel: message.channel.clone(),
             chat_id: message.chat_id.clone(),
             message_id: message
@@ -1768,6 +1781,7 @@ impl<'a> AgentLoop<'a> {
             permission_auto_approval: self.config.permission_auto_approval.clone(),
             permission_ceiling_snapshot: self.config.permission_ceiling_snapshot.clone(),
             permission_evaluator: self.config.permission_evaluator.clone(),
+            browser_reviewed_action_digest: None,
             permission_interactive: self.config.permission_interactive,
             permission_approval_cache: None,
             permission_session_approval_cache: session_approval_cache_entries(&session),

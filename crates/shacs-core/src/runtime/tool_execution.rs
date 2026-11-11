@@ -8,20 +8,20 @@ use crate::runtime::permission_remembered::remembered_permission_matcher_matches
 use crate::runtime::{
     approval_decision_options, containment_permission_proof_for_process_gate, correlate_approval,
     correlate_policy_safety_snapshot_ref, decide_permission, evaluate_static_rules,
-    normalize_runtime_tool_call, ApprovalCacheEntry, ApprovalCorrelation, ApprovalCorrelationError,
-    ApprovalDecisionKind, ApprovalExplanation, ApprovalRequest, AutoEvaluatorVerdict,
-    AutoEvaluatorVerdictKind, AutoModeEscalation, ContainmentSnapshotRef, EvaluatorConfidence,
-    EvaluatorScopeMatch, InheritedPermissionContext, PermissionCeilingSnapshot,
-    PermissionEnvironment, PermissionMode, PermissionModeSnapshot, PermissionPolicyDecision,
-    PermissionPolicyDecisionKind, PermissionPolicyInput, PermissionPolicyReason,
-    PermissionRuleInput, PermissionedAction, PermissionedActionInput, PermissionedActionOrigin,
-    ProcExecSummary, ProcessAdapterKind, ProcessContainmentProofCandidate,
-    ProcessEnvelopeAdmission, ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput,
-    ProcessGateInput, ProcessGatePolicyMaterials, ProcessGateTerminalPrecondition, ProcessIdentity,
-    ProcessRedactedCommand, ProjectPermissionStoreConfig, RecentAutoModeDenial,
-    RecentAutoModeRetryToken, SafetyCapability, SessionApprovalCacheEntry,
-    SessionApprovalReuseMatch, SessionRememberedPermissionRule, StaticRuleDecision,
-    StaticRuleDecisionKind,
+    normalize_runtime_tool_call, ActionNormalizationError, ApprovalCacheEntry, ApprovalCorrelation,
+    ApprovalCorrelationError, ApprovalDecisionKind, ApprovalExplanation, ApprovalRequest,
+    AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, AutoModeEscalation, ContainmentSnapshotRef,
+    EvaluatorConfidence, EvaluatorScopeMatch, InheritedPermissionContext,
+    PermissionCeilingSnapshot, PermissionEnvironment, PermissionMode, PermissionModeSnapshot,
+    PermissionPolicyDecision, PermissionPolicyDecisionKind, PermissionPolicyInput,
+    PermissionPolicyReason, PermissionRuleInput, PermissionedAction, PermissionedActionInput,
+    PermissionedActionOrigin, ProcExecSummary, ProcessAdapterKind,
+    ProcessContainmentProofCandidate, ProcessEnvelopeAdmission, ProcessExecutionEnvelope,
+    ProcessExecutionEnvelopeInput, ProcessGateInput, ProcessGatePolicyMaterials,
+    ProcessGateTerminalPrecondition, ProcessIdentity, ProcessRedactedCommand,
+    ProjectPermissionStoreConfig, RecentAutoModeDenial, RecentAutoModeRetryToken, SafetyCapability,
+    SessionApprovalCacheEntry, SessionApprovalReuseMatch, SessionRememberedPermissionRule,
+    StaticRuleDecision, StaticRuleDecisionKind,
 };
 use crate::tools::{
     CronTool, MessageTool, PreparedToolCall, SpawnTool, ToolCallExecutionContext, ToolRegistry,
@@ -201,6 +201,8 @@ impl RuntimeToolExecutionReport {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolExecutionContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_context: Option<crate::runtime::BrowserCallContext>,
     pub channel: String,
     pub chat_id: String,
     pub message_id: Option<String>,
@@ -218,6 +220,8 @@ pub struct ToolExecutionContext {
     pub permission_ceiling_snapshot: Option<PermissionCeilingSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_evaluator: Option<AutoEvaluatorVerdict>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_reviewed_action_digest: Option<String>,
     /// Set on one call's context when the auto mode block counts reached a
     /// limit with it (Spec 048 PRD 020 scope 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -247,6 +251,7 @@ pub struct ToolExecutionContext {
 impl Default for ToolExecutionContext {
     fn default() -> Self {
         Self {
+            browser_context: None,
             channel: String::new(),
             chat_id: String::new(),
             message_id: None,
@@ -258,6 +263,7 @@ impl Default for ToolExecutionContext {
             permission_auto_approval: AutoApprovalConfig::default(),
             permission_ceiling_snapshot: None,
             permission_evaluator: None,
+            browser_reviewed_action_digest: None,
             permission_auto_mode_escalation: None,
             permission_interactive: false,
             permission_approval_cache: None,
@@ -667,6 +673,10 @@ pub(crate) struct PermissionEvaluation {
     inherited_context: Option<InheritedPermissionContext>,
     interactive: bool,
     policy_materials: ProcessGatePolicyMaterials,
+    /// Why the browser host could not prepare the call (stale numbers, another
+    /// session's browser): the model needs that reason to look again (Spec
+    /// 049 PRD 030 scope 3).
+    browser_refusal: Option<String>,
     pub(crate) decision: PermissionPolicyDecision,
 }
 
@@ -690,7 +700,12 @@ impl PermissionEvaluation {
         let content = match refusal {
             Some(content) => content,
             None if classifier_row => blocked_call::tool_result(self.evaluator.as_ref()),
-            None => return permission_block_message(tool_call_id, name, &self.decision),
+            None => match &self.browser_refusal {
+                Some(detail) if self.decision.kind == PermissionPolicyDecisionKind::Deny => {
+                    format!("Permission denied: tool call was not executed ({detail}).")
+                }
+                _ => return permission_block_message(tool_call_id, name, &self.decision),
+            },
         };
         RuntimeToolMessage {
             images: Vec::new(),
@@ -770,11 +785,12 @@ pub(crate) fn permission_evaluation_for_action(
         },
     );
     let policy_materials = ProcessGatePolicyMaterials {
+        browser_start: None,
         remembered_rules: remembered_rules.clone(),
         remembered_store_unavailable: project_state.store_unavailable,
         materials,
     };
-    let decision = decide_permission(PermissionPolicyInput {
+    let mut decision = decide_permission(PermissionPolicyInput {
         action: action.clone(),
         static_rule_decision,
         evaluator: evaluator.clone(),
@@ -785,6 +801,33 @@ pub(crate) fn permission_evaluation_for_action(
         interactive: context.permission_interactive,
         materials: policy_materials.materials.clone(),
     });
+    // The classifier reviewed one target; a changed target after review is
+    // refused. An existing refusal (ceiling, rule, argument error) keeps its
+    // own, stronger reason.
+    if action.tool_name == "browser"
+        && decision.kind != PermissionPolicyDecisionKind::Deny
+        && context
+            .browser_reviewed_action_digest
+            .as_deref()
+            .is_some_and(|digest| digest != action.action_digest)
+    {
+        decision.kind = PermissionPolicyDecisionKind::Deny;
+        decision.reason = PermissionPolicyReason::StaticDeny;
+        decision.can_handoff_to_tool_runtime = false;
+    }
+    let browser_refusal = (action.tool_name == "browser")
+        .then(|| {
+            action
+                .normalization_errors
+                .iter()
+                .find_map(|error| match error {
+                    ActionNormalizationError::InvalidArguments { detail, .. } => {
+                        Some(detail.clone())
+                    }
+                    _ => None,
+                })
+        })
+        .flatten();
     PermissionEvaluation {
         rule_input,
         evaluator,
@@ -792,6 +835,7 @@ pub(crate) fn permission_evaluation_for_action(
         inherited_context,
         interactive: context.permission_interactive,
         policy_materials,
+        browser_refusal,
         decision,
     }
 }
@@ -1097,7 +1141,8 @@ fn auto_approval_allows_capabilities(
                 SafetyCapability::NetOutbound => {
                     matches!(action.tool_name.as_str(), "web_fetch" | "web_search")
                 }
-                SafetyCapability::SecretRead
+                SafetyCapability::BrowserAct
+                | SafetyCapability::SecretRead
                 | SafetyCapability::ExternalDelivery
                 | SafetyCapability::AutomationSchedule
                 | SafetyCapability::AppInstall

@@ -320,17 +320,64 @@ fn normalize_tool_candidate(
     let input = sanitize_input(input);
     let environment = input.permission_environment.clone();
     let mut normalization_errors = Vec::new();
+    let mut decision_arguments = arguments.clone();
+    let capabilities = if tool_name == "browser" {
+        let capabilities = match arguments.get("action").and_then(Value::as_str) {
+            Some("open" | "look" | "scroll" | "back" | "wait" | "close") => {
+                vec![SafetyCapability::NetOutbound]
+            }
+            Some("click" | "type" | "press") => vec![SafetyCapability::BrowserAct],
+            _ => {
+                normalization_errors.push(ActionNormalizationError::InvalidArguments {
+                    tool_name: tool_name.to_owned(),
+                    detail: "browser_invalid_arguments: unknown action".to_owned(),
+                });
+                Vec::new()
+            }
+        };
+        if !capabilities.is_empty() {
+            let preparation = registry
+                .prepare_call(tool_name, arguments.clone())
+                .map_err(|_| "browser_invalid_arguments".to_owned())
+                .and_then(|_| {
+                    registry
+                        .get(tool_name)
+                        .ok_or_else(|| "browser_context_unavailable".to_owned())
+                })
+                .and_then(|tool| {
+                    tool.prepare_browser_action(&input.session_id, arguments)
+                        .map_err(|error| error.to_string())
+                });
+            match preparation {
+                Ok(browser) => {
+                    decision_arguments["browser_action"] = browser.description;
+                    decision_arguments["browser_binding_digest"] = json!(browser.digest);
+                    // The host digest binds its target. Independently bind the raw call
+                    // so redaction can never merge approvals for distinct secret inputs.
+                    decision_arguments["browser_argument_digest"] = json!(digest_json(arguments));
+                }
+                Err(detail) => {
+                    normalization_errors.push(ActionNormalizationError::InvalidArguments {
+                        tool_name: tool_name.to_owned(),
+                        detail,
+                    })
+                }
+            }
+        }
+        capabilities
+    } else {
+        tool_capabilities(registry, tool_name)
+    };
     let views = action_secrets::argument_views(
         tool_name,
-        arguments,
-        checked_redacted_arguments(arguments, &mut normalization_errors),
+        &decision_arguments,
+        checked_redacted_arguments(&decision_arguments, &mut normalization_errors),
         environment.as_deref(),
     );
     let redacted_arguments = views.exposed;
     let secret_ref_evidence =
         secret_ref_evidence_from_arguments(arguments, tool_name, &mut normalization_errors);
     let argument_digest = digest_json(&redacted_arguments);
-    let capabilities = tool_capabilities(registry, tool_name);
     let target_refs = target_refs_from_arguments(&redacted_arguments);
     let action_digest = digest_json(&action_digest_material(
         tool_name,
@@ -339,27 +386,33 @@ fn normalize_tool_candidate(
         &capabilities,
         &secret_ref_evidence,
     ));
-    let decision = DecisionArguments(views.decision.map(|arguments| {
-        let action_digest = digest_json(&action_digest_material(
-            tool_name,
-            &digest_json(&arguments),
-            &target_refs_from_arguments(&arguments),
-            &capabilities,
-            &secret_ref_evidence,
-        ));
-        let policy_safety_snapshot_ref = policy_safety_snapshot_ref(
-            &input,
-            &capabilities,
-            input.containment_snapshot.clone(),
-            &action_digest,
-        )
-        .ok();
-        Box::new(DecisionArgumentsInner {
-            arguments,
-            action_digest,
-            policy_safety_snapshot_ref,
-        })
-    }));
+    let hidden_browser = tool_name == "browser" && decision_arguments != redacted_arguments;
+    let decision = DecisionArguments(
+        views
+            .decision
+            .or_else(|| hidden_browser.then(|| redacted_arguments.clone()))
+            .map(|arguments| {
+                let action_digest = digest_json(&action_digest_material(
+                    tool_name,
+                    &digest_json(&arguments),
+                    &target_refs_from_arguments(&arguments),
+                    &capabilities,
+                    &secret_ref_evidence,
+                ));
+                let policy_safety_snapshot_ref = policy_safety_snapshot_ref(
+                    &input,
+                    &capabilities,
+                    input.containment_snapshot.clone(),
+                    &action_digest,
+                )
+                .ok();
+                Box::new(DecisionArgumentsInner {
+                    arguments,
+                    action_digest,
+                    policy_safety_snapshot_ref,
+                })
+            }),
+    );
     let snapshot_digest = digest_json(&json!({
         "permission_mode_snapshot": &input.permission_mode_snapshot,
         "containment_snapshot": &input.containment_snapshot,
@@ -745,6 +798,7 @@ fn capability_label(capability: SafetyCapability) -> &'static str {
         SafetyCapability::AppInstall => "app_install",
         SafetyCapability::RuntimeConfigWrite => "runtime_config_write",
         SafetyCapability::SelfModification => "self_modification",
+        SafetyCapability::BrowserAct => "browser_act",
     }
 }
 

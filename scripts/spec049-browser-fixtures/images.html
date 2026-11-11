@@ -1,0 +1,11 @@
+<!doctype html><title>Image fixture</title><p>MANY IMAGES</p>
+<script>
+for (let i=0;i<48;i++) {
+  const canvas=document.createElement('canvas');
+  canvas.width=1024;canvas.height=1024;
+  const context=canvas.getContext('2d');
+  context.fillStyle=`hsl(${i*7} 70% 50%)`;context.fillRect(0,0,1024,1024);
+  const image=new Image();image.src=canvas.toDataURL();image.width=128;image.height=128;
+  document.body.append(image);
+}
+</script>

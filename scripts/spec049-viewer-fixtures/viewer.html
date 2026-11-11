@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Viewer fixture</title>
+</head>
+<body>
+<h1>VIEWER FIXTURE</h1>
+<p id="events">EVENTS: 0</p>
+<label>Field <input id="field" value="untouched"></label>
+<script>
+let count = 0;
+function bump(kind) {
+  count += 1;
+  document.getElementById("events").textContent = "EVENTS: " + count + " LAST: " + kind;
+}
+for (const type of ["mousedown", "mouseup", "click", "keydown", "keyup", "paste"]) {
+  document.addEventListener(type, () => bump(type), true);
+}
+</script>
+</body>
+</html>

@@ -954,6 +954,7 @@ impl SubagentRuntime {
         spec.max_iterations = config.max_iterations;
         spec.max_tool_result_chars = config.max_tool_result_chars;
         spec.tool_context = ToolExecutionContext {
+            browser_context: None,
             channel: envelope.origin_channel.clone(),
             chat_id: envelope.origin_chat_id.clone(),
             message_id: Some(envelope.parent_turn_id.clone()),
@@ -969,6 +970,7 @@ impl SubagentRuntime {
             permission_auto_approval: AutoApprovalConfig::default(),
             permission_ceiling_snapshot: config.permission_ceiling_snapshot.clone(),
             permission_evaluator: None,
+            browser_reviewed_action_digest: None,
             permission_interactive: false,
             permission_approval_cache: None,
             permission_session_approval_cache: Vec::new(),

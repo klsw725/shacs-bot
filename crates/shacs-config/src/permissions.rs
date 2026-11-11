@@ -15,6 +15,7 @@ const ALL_SAFETY_CAPABILITIES: &[SafetyCapability] = &[
     SafetyCapability::AppInstall,
     SafetyCapability::RuntimeConfigWrite,
     SafetyCapability::SelfModification,
+    SafetyCapability::BrowserAct,
 ];
 
 const READ_ONLY_CAPABILITIES: &[SafetyCapability] = &[SafetyCapability::FsRead];
@@ -136,6 +137,7 @@ pub enum SafetyCapability {
     AppInstall,
     RuntimeConfigWrite,
     SelfModification,
+    BrowserAct,
 }
 
 impl SafetyCapability {
@@ -155,6 +157,7 @@ impl SafetyCapability {
             "app_install" => Some(Self::AppInstall),
             "runtime_config_write" => Some(Self::RuntimeConfigWrite),
             "self_modification" => Some(Self::SelfModification),
+            "browser_act" => Some(Self::BrowserAct),
             _ => None,
         }
     }
@@ -721,7 +724,7 @@ mod tests {
 
     #[test]
     fn safety_capability_taxonomy_is_canonical_and_unknown_is_not_known() {
-        assert_eq!(SafetyCapability::all().len(), 10);
+        assert_eq!(SafetyCapability::all().len(), 11);
         for capability in [
             "fs_read",
             "fs_write",
@@ -733,6 +736,7 @@ mod tests {
             "app_install",
             "runtime_config_write",
             "self_modification",
+            "browser_act",
         ] {
             assert!(SafetyCapability::parse(capability).is_some());
         }

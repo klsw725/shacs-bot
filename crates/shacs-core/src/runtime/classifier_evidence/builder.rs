@@ -140,6 +140,7 @@ fn precedence_for_decision(decision: &PermissionPolicyDecision) -> StaticPolicyP
         | PermissionPolicyReason::EvaluatorUncertain
         | PermissionPolicyReason::PromptInjectionSignal => StaticPolicyPrecedence::ApprovalRequired,
         PermissionPolicyReason::ModeBaselineAllow
+        | PermissionPolicyReason::BrowserUserLocalEnable
         | PermissionPolicyReason::ModeBaselineDeny
         | PermissionPolicyReason::EvaluatorAllow
         | PermissionPolicyReason::ApprovalAccepted
@@ -176,7 +177,8 @@ fn success_disposition(decision: &PermissionPolicyDecision) -> ClassifierDisposi
         PermissionPolicyReason::EvaluatorUncertain => ClassifierDisposition::DenyCandidateRecorded,
         PermissionPolicyReason::PromptInjectionSignal => ClassifierDisposition::AskUser,
         PermissionPolicyReason::CeilingViolation => ClassifierDisposition::NotInvokedCeiling,
-        PermissionPolicyReason::StaticDeny
+        PermissionPolicyReason::BrowserUserLocalEnable
+        | PermissionPolicyReason::StaticDeny
         | PermissionPolicyReason::ProtectedTarget
         | PermissionPolicyReason::UserRuleDeny
         | PermissionPolicyReason::SecretFileWrite

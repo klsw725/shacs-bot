@@ -21,6 +21,7 @@ x-common-config: &common-config
 
 services:
   shacs-gateway:
+    shm_size: "256mb"
     container_name: shacs-gateway
     <<: *common-config
     command:
@@ -35,16 +36,18 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8765:8765"
+      - "127.0.0.1:6080:6080"
     deploy:
       resources:
         limits:
           cpus: "1"
-          memory: 1G
+          memory: 2G
         reservations:
           cpus: "0.25"
-          memory: 256M
+          memory: 512M
 
   shacs-api:
+    shm_size: "256mb"
     container_name: shacs-api
     <<: *common-config
     profiles:
@@ -59,14 +62,15 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8900:8900"
+      - "127.0.0.1:6081:6080"
     deploy:
       resources:
         limits:
           cpus: "1"
-          memory: 1G
+          memory: 2G
         reservations:
           cpus: "0.25"
-          memory: 256M
+          memory: 512M
 
   shacs-cli:
     <<: *common-config

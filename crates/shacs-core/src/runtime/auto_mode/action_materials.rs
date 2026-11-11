@@ -28,10 +28,15 @@ pub(crate) fn action_materials(
     let environment = context.permission_environment.as_deref()?;
     let auto_mode = action.permission_mode_snapshot.mode == PermissionMode::Auto;
     let tool_refusal = registry.get(&action.tool_name).and_then(|tool| {
-        action
-            .decision_arguments()
-            .as_object()
-            .and_then(|params| tool.preflight_refusal(params))
+        action.decision_arguments().as_object().and_then(|params| {
+            let mut params = params.clone();
+            if action.tool_name == "browser" {
+                params.remove("browser_action");
+                params.remove("browser_binding_digest");
+                params.remove("browser_argument_digest");
+            }
+            tool.preflight_refusal(&params)
+        })
     });
     let mut materials = permission_materials::permission_materials(MaterialsInput {
         action,

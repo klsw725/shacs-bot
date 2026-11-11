@@ -68,6 +68,7 @@ pub(crate) fn runtime_inspect_with_owner(
     let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
     let update_marker = read_runtime_update_marker(&marker_path)?;
     let ownership = inspect_runtime_ownership(&bundle.context.data_dir, now_millis())?;
+    let browser = crate::browser::inspect(&bundle, &ownership);
     let stop_request = read_runtime_stop_request_marker(&runtime_stop_request_marker_path(
         &bundle.context.data_dir,
     ))?;
@@ -108,6 +109,7 @@ pub(crate) fn runtime_inspect_with_owner(
     .map_err(|error| CliError::Runtime(error.to_string()))?;
 
     Ok(RuntimeInspectReport {
+        browser,
         config_path,
         config_exists,
         workspace,

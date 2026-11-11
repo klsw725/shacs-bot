@@ -6,6 +6,8 @@
 //! file as several modules). Add new integration tests here as modules instead
 //! of new `tests/*.rs` files, which each link a separate test binary.
 
+mod spec049_browser_registry;
+
 #[path = "readiness_owner_parity.rs"]
 pub mod readiness_owner_parity;
 #[path = "remembered_permissions_cli.rs"]
@@ -48,6 +50,9 @@ pub mod spec047_memory_cli;
 pub mod spec048_ask_verbose;
 #[path = "spec048_secrets_migration_cli.rs"]
 pub mod spec048_secrets_migration_cli;
+mod spec049_browser_runtime;
+#[cfg(unix)]
+mod spec049_browser_viewer;
 #[cfg(unix)]
 #[path = "spec052_data_folder_access.rs"]
 pub mod spec052_data_folder_access;

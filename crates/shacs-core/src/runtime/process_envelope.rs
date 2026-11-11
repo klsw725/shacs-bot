@@ -11,6 +11,7 @@ pub enum ProcessAdapterKind {
     PluginTool,
     PluginCommand,
     McpStdio,
+    Browser,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
