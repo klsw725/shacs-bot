@@ -1,6 +1,6 @@
 # PRD 010. container 브라우저와 경계
 
-Status: Planned
+Status: Complete (Scoped)
 
 Depends on: [PRD 000](000-tool-result-images.md)의 닫힌 결과. PRD 020–040과 050·051의 구현에 의존하지 않는다.
 
@@ -91,6 +91,89 @@ Depends on: [PRD 000](000-tool-result-images.md)의 닫힌 결과. PRD 020–040
 3. image policy·실행 인자·Compose·사용 문서 diff와 Cargo 검증 기록. Debian policy 실제 적용과 실제 메모리 사용은 020 Docker 증거로 남긴다.
 
 PRD 010은 `BrowserHost`를 직접 쓰는 가짜 시험으로 닫는다. PRD 020–040의 구현을 종료 조건에 넣지 않는다.
+
+## 구현 결정 (2026-11-10)
+
+- 시작 증거는 `shacs-config::UserLocalBrowserEnable`이 선택한 사용자 설정 파일을 직접 읽어 만들며, 필드는 비공개이고 역직렬화·bool 생성자가 없다. 선택 경로와 실제 경로, workspace와 원문을 보존하고 실행 직전에 다시 확인한다. workspace 안의 설정 파일은 명시적으로 선택했더라도 시작 증거로 받지 않는다. `BrowserStartEvidence`는 이 값과 실행 envelope 전체(세대 식별자·정책 snapshot 포함)를 묶고 envelope를 다시 구성해 무결성을 확인한다. browser 경로만 일반 mode 판정을 건너뛰며 static deny, terminal precondition, containment proof와 시작 receipt 검증을 유지한다. containment 비교는 기존 MCP 자식 프로세스 경계의 같은 규칙을 재사용하며 receipt의 adapter는 `browser`다.
+- pipe의 단일 수신 worker가 모든 JSON 메시지에 수신 순서와 문서 변경 회차를 붙인다. 이벤트와 응답은 하나의 FIFO로 전달하고, 호출자는 응답 앞의 이벤트를 처리한다. 전후 frame tree 응답의 target/session/frame/loader/URL과 문서 변경 회차가 모두 같아야 읽기 payload를 반환한다. 별도 이벤트 소비자의 실행 순서에 의존하지 않는다. `pipe_receive_order_prevents_event_response_race`는 이벤트와 후속 응답을 한 번에 보내도 이 회차가 응답에 먼저 반영되는지 확인한다.
+- 실제 실행·proxy·CDP·manager·owner 상태는 `shacs-cli/src/browser/`의 leaf 모듈에 있다. core에는 host 계약과 gate 증거만 있다. lifecycle participant는 매 generation마다 factory에서 만들고 gate closure 안에서만 시작한다. 기본 factory는 없으며 viewer 프로그램은 실행하지 않는다.
+- `BrowserSession::act`는 동작과 그 뒤의 검증된 화면 읽기를 같은 deadline 안에서 실행해 `BrowserRead`를 반환한다. 후속 tool은 동작 뒤 별도 30초 읽기를 시작하지 않고 이 결과를 사용한다.
+- 별도 inspect의 owner binding은 registry 생성 때 추측하지 않고 generation을 시작할 때 현재 marker에서 얻는다. 소유자·PID·시작 시각·config 경로/내용 digest·workspace가 맞는 상태만 읽으며 holder가 있으면 별도 관찰에서는 busy다. 시작하지 않은 일회 CLI의 live 상태는 unknown이다.
+- DNS는 연결 시도마다 한 번 수행하고 전 주소를 검사한 뒤 첫 검증 주소로 직접 연결한다. 연결 실패를 같은 DNS 목록의 무한 재시도로 늘리지 않으며 Chromium의 다음 연결 시도는 새로 resolve한다. 시스템 DNS 응답 대기는 5초로 제한한다.
+
+Cargo 검증과 최종 수용 시험 결과는 독립 검토에 전달하는 구현 보고에 남긴다. 실제 Chromium·Docker·Debian policy 적용은 본 PRD의 종료 시험에 포함하지 않았으며 PRD 020의 opt-in Docker 확인 범위다.
+
+### 구현 위치와 수용 시험
+
+| 범위 | 구현 |
+|---|---|
+| 1 | core `runtime/browser_host.rs`의 호출 context, host/session, 요청·결과 계약. `tests/it/spec049_browser_host.rs`의 가짜 host |
+| 2·7 | `Dockerfile`, `docker-compose.yml`, `docker/shacs-browser.json` |
+| 3 | config `browser_config.rs`의 파일 출처 증거, core `browser_start_evidence.rs`·`process_gate.rs`, CLI `browser/startup.rs` |
+| 4·11 | CLI `browser/browser_process.rs`의 임시 폴더·자식 환경·실행 인자·파이프 FD·parent-death·역순 정리·viewer participant |
+| 5 | CLI `browser/cdp_connection.rs`의 NUL JSON 수송·수신 순서·deadline·EOF |
+| 6 | CLI `browser/browser_proxy.rs`의 SOCKS5 CONNECT, 전 주소 검사, 검증 소켓 직접 연결 |
+| 8·9 | CLI `browser/cdp_document.rs`의 전후 문서 검사·동일 수신 회차·download deny·chooser 거절 |
+| 10 | CLI `browser/browser_manager.rs`의 process singleton·즉시 busy·직렬 실행·background idle 정리·공통 동작 deadline |
+| 12 | config `BrowserConfig`, CLI onboard·inspect·diagnostics, `browser/browser_state.rs`의 owner-bound 0600 원자적 snapshot |
+| 13 | README와 `docs/USAGE.md`의 설정·종료 표면·한도·임시 profile·주소 허용 목록·남은 위험 |
+
+`crates/shacs-cli/tests/it/spec049_browser_runtime.rs`는 명시된 다섯 시험
+`startup_gate_and_process_lifecycle`, `proxy_checks_all_resolved_addresses_without_relookup`,
+`document_guard_discards_changed_and_internal_documents`, `timeouts_cleanup_and_owner_snapshot`,
+`onboard_and_inspect_browser`와 수신 순서 회귀 시험
+`pipe_receive_order_prevents_event_response_race`를 담는다.
+`crates/shacs-config/tests/it/spec049_browser_config.rs`는 `browser_defaults_and_limits`를 담는다.
+모두 기존 `tests/it/main.rs`에 등록했으며 새 test binary는 없다.
+
+Required Contract 1·2는 시작 증거와 browser 전용 gate, 3은 proxy와 DevTools pipe,
+4는 검증된 읽기, 5·7은 generation 환경과 정리, 6은 owner snapshot 검증과 lockfile 무변경으로 대응한다.
+
+### 검증 환경에서 바로잡은 것
+
+- 첫 `spec033_release_closure` 실행 중 이 문서를 고쳤으므로 그 실행의 source manifest 비교는 유효한 고정 소스 검증이 아니었다. `validate_spec033_release_artifacts_against`는 명령 실행 전후의 README·crates·docs 파일 내용 해시를 비교한다. 소스를 고정한 재실행에서는 같은 현재 코드로 7/7이 통과했고, 깨끗한 HEAD `594e43363971b2b08cb9171cc951bbbc27527015`에서도 7/7이 통과했다. 기존 permission/containment snapshot이나 recorded trajectory fixture는 변경하지 않았다.
+- HEAD 비교에 현재 checkout과 같은 `CARGO_TARGET_DIR`를 병렬로 사용한 것은 잘못이었다. 이후 하위 Cargo 명령이 현재 core의 `UserLocalBrowserEnable` import를, 그 타입이 없는 HEAD의 config 산출물에 연결해 `E0432`로 실패했다. 현재 config 소스에는 해당 타입과 re-export가 존재하고, 공유 산출물의 dependency 기록에는 `browser_config.rs` 포함/미포함 버전이 함께 있었다. `cargo clean --manifest-path crates/Cargo.toml -p shacs-config`로 해당 crate의 혼합 산출물만 제거했다. 소스 수정 없이 단독 재실행한 `spec033_release_runner`는 15 passed / 0 failed / 1 ignored, CLI의 `separate_cli_and_tui_processes_observe_updated_active_runtime_facts`는 1 passed / 0 failed였다.
+- 이후 HEAD 비교는 별도 worktree의 자체 `crates/target/`을 쓰며, 최종 현재 checkout 검증은 HEAD 비교가 끝난 뒤 실행한다. 최종 core·CLI 시험에는 `--no-fail-fast`를 사용한다. 시험이 진행되는 동안 소스나 문서를 고치지 않는다.
+- 현재 checkout의 기본 target 경로라도 `CARGO_TARGET_DIR` 환경 변수로 내보내면 기존 격리 시험의 자식 `cargo clean`에도 전달된다(`generated_media_release/runner/isolation_cache_test.rs`). 한 검증 실행에서 이 때문에 실제 시험 산출물이 지워졌으므로 그 실행은 폐기했다. 해당 환경 변수를 해제한 최종 core 실행에서는 503개 단위 시험과 나머지 모든 대상이 통과했다. 기존 시험이나 기록된 증거는 수정하지 않았다.
+
+### 초기 구현 검증 결과 (2026-11-10)
+
+| 명령 | 결과 |
+|---|---|
+| `cargo fmt --manifest-path crates/Cargo.toml --all -- --check --config imports_granularity=Module,format_macro_matchers=true` | exit 0 |
+| `cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets --locked -- -D warnings` | exit 0. 기존 `imap-proto v0.10.2` future-compatibility 안내만 |
+| `cargo test --manifest-path crates/Cargo.toml -p shacs-config -q --locked` | 120 passed / 0 failed / 0 ignored |
+| `cargo test --manifest-path crates/Cargo.toml -p shacs-core -q --locked --no-fail-fast` | 1,979 passed / 0 failed / 5 ignored. `CARGO_TARGET_DIR`를 해제한 실행 |
+| `cargo test --manifest-path crates/Cargo.toml -p shacs-cli -q --locked --no-fail-fast` | 583 passed / 0 failed / 3 ignored |
+
+개수는 하위 시험 프로세스가 출력한 중복 결과를 제외한 package 합계다. core는 69개 결과 묶음, CLI는 19개 결과 묶음을 확인했다. 최종 core 검증의 전후 source manifest 내용 해시는 모두 `sha256:9195bb1f9be8003891eceb8ef85d26af92e22191381a8d02735c189bfa3289e5`였다. 이 결과를 문서에 적는 작업은 검증 종료 후 수행했다.
+
+HEAD 비교는 깨끗한 `594e43363971b2b08cb9171cc951bbbc27527015`에서 수행했다. `spec033_release_closure`는 7/7, `spec033_release_runner`는 15 passed / 0 failed / 1 ignored, `separate_cli_and_tui_processes_observe_updated_active_runtime_facts`는 1/1이었다. 현재 변경도 같은 대상들을 통과했다.
+
+최종 로그는 `/tmp/spec049-final-core-clean-env.log`, `/tmp/spec049-final-cli-tests.log`, `/tmp/spec049-config-tests.log`다. `Cargo.lock`·의존성·이전 스펙 문서는 변경하지 않았고, 전체 workspace 시험·Docker·실제 Chromium은 실행하지 않았다. PRD 상태는 독립 검토 전이므로 `Implemented (independent review pending)`으로 유지한다.
+
+## 독립 검토 수정
+
+- 시작 규칙은 enable 증거가 읽은 동일 user-local 파일 바이트의 `permissions.allow/ask/deny`에서 얻는다. CLI가 기존 규칙 matcher로 `browser_startup` action의 자료를 만들고 gate에 전달하므로 `deny: ["*"]` 같은 실제 설정이 자식 생성 전에 거절된다. ask는 자료에 남지만 이 시작의 추가 조건으로 쓰지 않는다. 등록 시점 bundle의 규칙이 달라도 파일의 거절을 지울 수 없다. 수용 시험은 수동 `deny_rule` 주입 대신 실제 설정 파일을 읽어 zero-spawn을 확인한다.
+- 규칙의 `${NAME}` 참조는 기존 process 환경·`.env.json` 해석 순서를 그대로 사용한다. gate 직전에 해석 결과도 다시 비교하므로 참조 값 변경은 기존 시작 증거를 무효로 한다.
+- DevTools fd는 nonblocking으로 설정하고, 부분 쓰기마다 남은 deadline 안에서 `poll`한다. 읽기 응답 대기도 짧은 구간마다 같은 취소 신호를 확인한다. manager의 shutdown은 generation 잠금을 기다리기 전에 신호를 보내므로 가득 찬 pipe를 쓰는 호출이 잠금을 붙잡고 종료를 막지 않는다. 실제 OS pipe의 읽는 쪽을 열린 채 전혀 읽지 않는 가짜 peer에 8 MiB 요청을 보내 timeout·shutdown의 bounded return과 자식 정리·임시 폴더 삭제를 확인한다.
+
+### 수정 후 검증 결과
+
+`CARGO_TARGET_DIR`를 해제하고 Cargo 명령을 하나씩 실행했다. fmt는 지정된 두 config 옵션을 포함한 `--check`, lint는 `--workspace --all-targets --locked -- -D warnings`로 통과했다.
+
+| 시험 | passed | failed | ignored |
+|---|---:|---:|---:|
+| CLI `--test it -q --locked spec049` | 7 | 0 | 0 |
+| core `--test it -q --locked spec049` | 11 | 0 | 0 |
+| config `--test it -q --locked spec049` | 1 | 0 | 0 |
+| CLI `-q --locked --no-fail-fast` 전체 package | 584 | 0 | 3 |
+| core `-q --locked --no-fail-fast` 전체 package | 1,979 | 0 | 5 |
+| config `-q --locked --no-fail-fast` 전체 package | 120 | 0 | 0 |
+
+`startup_gate_and_process_lifecycle`은 실제 deny/ask 파일과 `${NAME}` 참조를 읽고, 매칭된 ask 자료가 존재하지만 시작을 막지 않는 것도 확인한다. `stalled_pipe_write_times_out_and_shutdown_cancels_with_cleanup`은 새 통신 회귀 시험이다. `browser_defaults_and_limits`에는 참조 값 변경으로 증거가 무효화되는 경우와 선택 config 폴더의 `.env.json`을 쓰는 경우를 더했다.
+
+최종 로그는 `/tmp/spec049-review-ask-{cli,core,config}-targeted.log`, `/tmp/spec049-review-ask-cli-full.log`, `/tmp/spec049-review-final-core-full.log`, `/tmp/spec049-review-final-config-full.log`에 있다. 마지막 ask assertion 변경 뒤에는 CLI 전체를 다시 실행했으며, 변경되지 않은 core 전체 결과는 유지했다. config 전체도 요청한 `--no-fail-fast` 명령으로 확인했다. 검증 도중 소스와 문서를 수정하지 않았다.
 
 ## 남은 제한
 

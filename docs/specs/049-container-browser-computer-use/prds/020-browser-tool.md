@@ -1,6 +1,6 @@
 # PRD 020. browser tool
 
-Status: Planned
+Status: Complete (Scoped)
 
 Depends on: [PRD 000](000-tool-result-images.md)와 [PRD 010](010-container-browser-and-boundary.md)의 닫힌 결과. PRD 030·040과 050·051의 구현에 의존하지 않는다.
 
@@ -97,6 +97,28 @@ Depends on: [PRD 000](000-tool-result-images.md)와 [PRD 010](010-container-brow
 4. 문서 diff, Cargo 검증 기록과 `Cargo.lock` 확인.
 
 PRD 020은 bypass에서의 조작과 다른 mode의 명시적 거절까지로 독립 종료한다. 030이 닫히기 전 기능 제한을 최종 권한 계약이라고 설명하지 않는다.
+
+## 구현 결정 (2026-11-10)
+
+- 번호 snapshot은 registry의 `BrowserTool`이 아닌 CLI의 `CdpDocument`가 보관한다. `BrowserRead`에 `revision`, 공개 요소 목록, 생략 개수와 안내를 더하고 `BrowserAction`에 번호 대상 동작과 wait를 더했다. PRD 010의 검증된 읽기·동작 deadline·세션 소유권을 그대로 소비하며 이전 PRD 문서는 수정하지 않는다. process 전체 단조 증가 회차와 target/session/loader/문서 이벤트 회차를 SHA-256으로 묶어 revision을 만들므로 registry 재생성과 browser generation 교체에서 번호가 재사용되지 않는다.
+- AX 순서 대신 `DOM.getDocument`의 DOM 순서로 번호를 붙인다. 요소 값과 민감 입력 여부는 DOM에서 읽고 raw AX 값을 외부 결과로 내보내지 않는다. click의 box와 mouse event는 root visual viewport의 CSS 좌표를 쓰고, `DOM.getNodeForLocation`에는 현재 `cssVisualViewport.pageX/pageY`를 더한 root document CSS 좌표를 보낸다. frame id와 대상·자손 관계를 확인하며 대응을 확인할 수 없는 frame이나 가려진 요소에는 입력하지 않는다.
+- 독립 검토의 스크롤 좌표 오류를 수정했다. Chromium commit `6e148db946ad40745b3ecffb758336a412819d13`의 `third_party/blink/renderer/core/inspector/inspector_dom_agent.cc:1876–1909`는 위치 조회 좌표에 layout zoom을 적용한 뒤 `LocalFrameView::DocumentToFrame`으로 layout scroll을 뺀다. 같은 commit의 `inspector_highlight.cc:224–245,2538–2577`는 자식 frame을 root로 옮기고 visual viewport 좌표로 box를 만들며, `inspector_page_agent.cc:1697–1720`는 문서 기준 CSS visual viewport offset을 반환한다. 공식 CDP `Page.VisualViewport`와 `Input.dispatchMouseEvent` 계약도 각각 문서 기준 offset과 viewport 기준 mouse 좌표를 명시한다. 따라서 자식 frame의 scroll은 이미 root box에 반영되어 다시 더하지 않는다. 정수 document 조회점을 먼저 정한 뒤 그 점에서 같은 page offset을 빼 mouse 좌표를 얻어 소수점 scroll에서도 두 점이 일치하게 한다. root 조회는 부모 문서의 덮인 iframe도 검사한다. 조회 오류 중 정수 code `-32000`과 message `No node found at given location`이 모두 정확히 일치할 때만 후보 거절로 처리한다. 다른 오류나 잘못된 error 형식은 `Protocol`로 반환하며 후보 재시도 없이 generation을 폐기한다. 정상 응답의 다른 frame·다른 node도 후보 거절이며, 모든 후보가 거절되면 입력 없이 `browser_target_covered`를 반환하고 브라우저를 유지한다.
+- 번호를 사용하는 동작 시작 때 snapshot을 꺼내 무효화한다. DOM의 연결·이름·역할·입력 종류와 문서 이벤트 회차를 다시 확인한다. stale/covered/input 거절은 browser generation을 유지해 다시 look할 수 있으며 문서 guard·수송·시간 초과 오류는 기존 host 정리를 따른다.
+- 캡처의 번호표 삽입과 제거는 같은 문서 읽기 안에 있다. 제거는 캡처 오류나 target 전환 때에도 원래 CDP session으로 시도하며, 정리가 실패하면 화면 결과를 반환하지 않는다. 글 결과의 첫 text part는 URL·제목·revision·elements·text·truncated·notice를 가진 JSON 글이다. `truncated`는 생략 문자와 요소의 개수를 구별한다.
+- `BrowserCallContext`는 실제 AgentLoop run의 권한 snapshot·대화형 여부·유효 session key와 그림 설정으로 만들고 승인 대기 자료에도 직렬화한다. 공용 tool 실행 경계는 session·mode·대화형 여부의 불일치를 context 없음으로 처리한다. 브라우저는 deferred catalog에도 등록되며 같은 실행 경계와 schema를 쓴다. production adapter의 `with_browser_clients`는 가짜 provider/host와 그 host의 격리 snapshot을 주입하는 Rust embedding 연결점이다. 네이티브 Cargo 시험도 가짜 격리 증거로 실제 mode 정규화를 거치며 모델 인자나 설정의 bool로 증거를 대신하지 않는다. production의 process host는 실제 시작 gate에서 별도로 공식 container 증거를 확인한다.
+- 임시 판정은 `net_outbound`이고 사용자 규칙 parser에는 bare `browser` 이름만 더했다. `browser(domain:...)`, `browser_act`, classifier용 요소 설명과 viewer는 추가하지 않았다.
+- `scripts/spec049-browser-check.sh --approved`는 별도 Compose project, 임시 data/workspace/config, `172.30.249.2/32`만 허용한 정적 fixture container를 사용한다. 가짜 provider로 실제 API turn을 구동하고 정책 적용은 별도의 폐기 가능한 Chromium policy WebUI에서 모델 요청 밖으로 검사한다. 이 스크립트는 구현 중 실행하지 않았다. Docker 실행 승인은 대기 중이며 실제 Chromium·정책 적용·메모리·실제 페이지 좌표는 아직 미검증이다. 미실행을 사용자의 거절이나 scoped 완료로 기록하지 않는다.
+
+구현 위치: core `tools/browser_tool.rs`, `runtime/browser_host.rs`, `runtime/tool_execution_provider.rs`, `runtime/agent_loop.rs`; CLI `browser/browser_snapshot.rs`, `browser/cdp_document.rs`, 공용 registry와 adapter; config `browser_config.rs`.
+가짜 시험은 core `spec049_browser_tool.rs`의 수용 조건 1–4 이름과 CLI `spec049_browser_registry.rs`의 수용 조건 5 이름으로 기존 `it` 실행 파일에 등록했다. CLI의 `devtools_numbering_overlay_and_input_boundaries`는 실제 CDP 구현에 가짜 peer를 연결하여 DOM 순서·가시성·민감 입력·hit-test·자식 frame·popup·문서 변경·overlay 정리를 함께 검사한다. 최종 Cargo 결과와 lockfile 확인은 독립 검토 보고에 남긴다.
+
+## 종료 기록 (2026-11-11)
+
+- 코드: 독립 검토 3차 PASS(2026-11-10). 그 뒤 PRD 030 작업에서 바뀐 browser host 코드(popup 수락, 오류 글, 입력 직전 확인)는 PRD 030 독립 검토 12차 PASS가 이 PRD의 Scope 2·4·7 계약까지 함께 확인했다.
+- 수용 조건 6(실제 Docker): 사용자가 2026-11-10 실행을 승인했다. `bash scripts/spec049-browser-check.sh --approved`를 일회용 data·config·Compose project와 별도 test-page container(`172.30.249.2/32`만 whitelist)로 돌렸다.
+  - 처음 실행에서 찾아 고친 것: Dockerfile `COPY --chmod=0644`가 새로 만든 `/etc/chromium/policies/managed` 폴더도 0644로 만들어 비 root 사용자가 policy를 읽지 못했다(폴더를 먼저 0755로 만든다). `click` 뒤 `look`이 거절되던 것, `window.open` popup이 opener renderer 안에서 멈춰 `browser_PageTimeout`이 되던 것은 PRD 030에서 고쳤다.
+  - 마지막 tree의 결과: `EXIT=0`, `PASS: numbered input, capture, turns, popup, images, sensitive inputs, proxy and cleanup`. Chromium 156.0.8078.79(Debian bookworm), managed policy(`URLBlocklist ["*"]`, `URLAllowlist ["http://*","https://*"]`, `DownloadRestrictions 3`)가 `chrome://policy`에서 적용됨, shacs-bot API·WebSocket·가짜 VNC 포트로의 SOCKS 연결 거절, DevTools TCP listener 없음, 닫은 뒤 profile 폴더 없음. 기록은 로컬 실행 log이고 저장소에 넣지 않는다.
+- Cargo: fmt·workspace clippy `-D warnings`, `shacs-core` 1996 passed/5 ignored, `shacs-cli` 620 passed/3 ignored, `shacs-config` 120 passed, `Cargo.lock` 무변경. 전체 workspace 시험은 돌리지 않았다.
 
 ## 남은 제한
 

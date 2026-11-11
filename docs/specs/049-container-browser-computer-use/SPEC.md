@@ -1,6 +1,6 @@
 # 049. 컨테이너 브라우저 조작 구현 명세
 
-Status: Planned
+Status: Complete (Scoped)
 
 Consumes: 004·020 tool 실행과 tool surface, 009 context assembly, 010 host safety(network guard), 014 diagnostics, 015·023 공식 container image와 Compose, 022 permission mode·capability·승인 질문, 027·034 media 폴더, 030 process gate, 031 config schema, 048 auto mode 판정 순서·classifier·도구 결과 검사·`.env.json`과 `${이름}` 해석
 
@@ -186,6 +186,15 @@ Consumes: 004·020 tool 실행과 tool surface, 009 context assembly, 010 host s
 | [030 판정 연결](prds/030-decision-wiring.md) | 소유 범위 5(`browser_act`, 규칙 문법 포함) | 000–020 | 수용 조건 4, 8 |
 | [040 화면 보기](prds/040-screen-viewer.md) | 소유 범위 6, 7 중 `view`, 8 중 화면 보기 상태 | 000–030 | 수용 조건 5, 7, 8 |
 
-2026-11-08: PRD 000은 `Complete (Scoped)`다(독립 검토 2차 PASS). 2026-11-09: PRD 010–040 문서를 썼고 독립 검토 2차 PASS를 받았다. 구현 전이라 `Planned`다.
+2026-11-08: PRD 000은 `Complete (Scoped)`다(독립 검토 2차 PASS). 2026-11-09: PRD 010–040 문서를 썼고 독립 검토 2차 PASS를 받았다. 구현 전이라 `Planned`다. 2026-11-10: PRD 010은 `Complete (Scoped)`다(독립 검토 2차 PASS). 실제 Debian policy 적용과 실제 브라우저 동작은 PRD 020 Docker 확인에서 본다. 같은 날 PRD 020은 코드 독립 검토 3차 PASS를 받았다. 수용 조건 6의 Docker 확인은 사용자에게 두 번 물었으나 답이 없어 실행하지 않았고, 미실행 결정도 없으므로 `Implemented, closure blocked`다. 같은 날 PRD 030의 구현을 끝냈다. 2026-11-11: 사용자가 Docker 확인을 승인했고 실제 Docker 확인이 마지막 tree에서 통과해 PRD 020은 `Complete (Scoped)`다. PRD 030은 독립 검토 12차 PASS로 `Complete (Scoped)`다. 같은 날 PRD 040은 독립 검토 2차 PASS와 실제 Docker 화면 보기 확인 통과로 `Complete (Scoped)`이고, 스펙도 `Complete (Scoped)`다([종료 증거](#종료-증거-2026-11-11)).
 
 수용 조건 8은 각 PRD가 자기 변경에 대해 확인한다. PRD 010의 경계는 가짜 시험(수용 조건 3)으로 닫고, 실제 Docker의 경계 확인은 브라우저 조작이 생기는 PRD 020의 수용 조건 6에서 한다.
+
+## 종료 증거 (2026-11-11)
+
+PRD [000](prds/000-tool-result-images.md)–[040](prds/040-screen-viewer.md)이 모두 `Complete (Scoped)`다. 각 PRD는 구현 뒤 독립 검토 PASS를 받은 뒤에만 다음 PRD로 넘어갔다(010 2차, 020 3차, 030 12차, 040 2차). 이는 현재 self-hosted 지원 범위의 scoped 완료이며 전체 출시 seal이 아니다.
+
+- 수용 조건 1–5, 7, 8: 각 PRD의 수용 시험과 구현 메모대로 통과했다(위 표의 자체 완료 표면). 마지막 tree에서 `shacs-core` 1996 passed / 5 ignored, `shacs-cli` 623 passed / 3 ignored, `shacs-config` 121 passed, fmt·workspace clippy `-D warnings` 통과, `Cargo.lock` 무변경.
+- 수용 조건 6과 040의 실제 확인: 사용자 승인(2026-11-10)으로 일회용 data·config·Compose project와 별도 test-page container에서 돌렸다. `scripts/spec049-browser-check.sh`(Chromium 156, managed policy 적용, 번호 입력·캡처·turn 유지·popup·그림·민감 입력 거절·proxy 경계·정리)와 `scripts/spec049-viewer-check.sh`(인증·framebuffer·틀린 비밀번호·서버 쪽 입력 차단·clipboard·gateway 6080/api 6081·loopback publish·비밀번호 파일 부재·viewer 죽음·browser 닫기) 모두 `EXIT=0`. 기록은 로컬 실행 log이고 저장소에 넣지 않는다.
+- 실제 확인에서 찾아 고친 것: policy 폴더 권한(Dockerfile), click 뒤 `look` 거절과 `window.open` popup 멈춤(030), gateway turn thread가 끝나면 browser 자식이 죽던 `PR_SET_PDEATHSIG` 문제(040에서 010 코드를 고침).
+- 전체 workspace 시험은 돌리지 않았다. 변경은 아직 commit하지 않았다.
