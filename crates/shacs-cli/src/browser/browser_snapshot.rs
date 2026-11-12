@@ -165,14 +165,19 @@ impl BrowserSnapshot {
         })
     }
 
-    pub fn prepare(&self, arguments: &Value) -> Result<BrowserPreparedAction, BrowserError> {
+    pub fn prepare(
+        &self,
+        arguments: &Value,
+        control: u64,
+    ) -> Result<BrowserPreparedAction, BrowserError> {
         let action = arguments["action"].as_str().ok_or(BrowserError::Protocol)?;
         let mut material = json!({
             "origin":browser_action_binding::origin(&self.document.url)?,
             "revision":self.revision,"target":self.document.target_id,
             "session":self.document.session_id,"frame":self.document.frame_id,
             "loader":self.document.loader_id,"url":self.document.url,"epoch":self.epoch,
-            "role":null,"name":null,"form":null,"focus":null,"submitter":null
+            "role":null,"name":null,"form":null,"focus":null,"submitter":null,
+            "control":control
         });
         let facts = match action {
             "click" | "type" => {

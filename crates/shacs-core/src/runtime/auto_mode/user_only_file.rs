@@ -50,29 +50,40 @@ impl UserOnlyFiles {
     /// the folder that holds them. A bracket or brace part may match
     /// anything.
     pub fn pattern_may_write(&self, pattern: &Path) -> bool {
-        let pattern = shell_command::normalize(pattern);
-        let parts = pattern
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        let targets = self
+            .folders
+            .iter()
+            .flat_map(|folder| {
+                [
+                    folder.clone(),
+                    folder.join(DEFAULT_NOTICE_MARKER),
+                    folder.join(SETUP_HINT_OFF_MARKER),
+                ]
+            })
             .collect::<Vec<_>>();
-        let literal = parts.iter().take_while(|part| !is_glob(part)).count();
-        let real_prefix = real_path::real_path(&parts[..literal].iter().collect::<PathBuf>());
-        let real = real_prefix
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy().into_owned())
-            .chain(parts[literal..].iter().cloned())
-            .collect::<Vec<_>>();
-        self.folders.iter().any(|folder| {
-            let targets = [
-                folder.clone(),
-                folder.join(DEFAULT_NOTICE_MARKER),
-                folder.join(SETUP_HINT_OFF_MARKER),
-            ];
-            targets
-                .iter()
-                .any(|target| matches_path(&parts, target) || matches_path(&real, target))
-        })
+        pattern_reaches(pattern, &targets)
     }
+}
+
+/// Whether a path written with a glob may be one of `targets`, as written
+/// or with its literal prefix resolved. A bracket or brace part may match
+/// anything.
+pub(super) fn pattern_reaches(pattern: &Path, targets: &[PathBuf]) -> bool {
+    let pattern = shell_command::normalize(pattern);
+    let parts = pattern
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let literal = parts.iter().take_while(|part| !is_glob(part)).count();
+    let real_prefix = real_path::real_path(&parts[..literal].iter().collect::<PathBuf>());
+    let real = real_prefix
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .chain(parts[literal..].iter().cloned())
+        .collect::<Vec<_>>();
+    targets
+        .iter()
+        .any(|target| matches_path(&parts, target) || matches_path(&real, target))
 }
 
 /// Whether text that a command runs as code names a marker.

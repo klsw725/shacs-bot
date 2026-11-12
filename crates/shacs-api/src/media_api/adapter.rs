@@ -1,8 +1,8 @@
 use crate::{
-    ApiError, ApiModel, ChatCompletionInvocation, DiagnosticsKind, DiagnosticsRecord,
-    DiagnosticsSeverity, DiagnosticsSnapshot, RememberedPermissionProjection,
+    ApiError, ApiModel, ChatCompletionInvocation, ChatResponseWritten, DiagnosticsKind,
+    DiagnosticsRecord, DiagnosticsSeverity, DiagnosticsSnapshot, RememberedPermissionProjection,
     Spec030RuntimeProjection, Spec030UnavailableReason, Spec031ApiProjection,
-    Spec035TasksStreamEvent,
+    Spec035TasksStreamEvent, WebSocketRuntimeTurn, WebSocketRuntimeTurnEnd, WebSocketRuntimeTurns,
 };
 use serde_json::{json, Value};
 use shacs_channels::WebSocketServerEvent;
@@ -12,6 +12,7 @@ use shacs_projection::{
 };
 use shacs_providers::{LlmResponse, ProviderEvent};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub trait ChatCompletionAdapter {
     fn configured_model(&self) -> &str;
@@ -45,6 +46,27 @@ pub trait ChatCompletionAdapter {
             reason: response.finish_reason.clone(),
         });
         Ok(response)
+    }
+
+    /// Like `complete_chat`, and also returns what to run once the response was written
+    /// to the client in full. The server drops it without running it when the response
+    /// did not get that far.
+    fn complete_chat_reporting(
+        &self,
+        invocation: ChatCompletionInvocation,
+    ) -> Result<(LlmResponse, Option<ChatResponseWritten>), ApiError> {
+        self.complete_chat(invocation)
+            .map(|response| (response, None))
+    }
+
+    /// The streaming counterpart of `complete_chat_reporting`.
+    fn stream_chat_reporting(
+        &self,
+        invocation: ChatCompletionInvocation,
+        on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<(LlmResponse, Option<ChatResponseWritten>), ApiError> {
+        self.stream_chat(invocation, on_event)
+            .map(|response| (response, None))
     }
 
     fn persist_media_data_urls(&self, data_urls: &[String]) -> Result<Vec<String>, ApiError> {
@@ -182,16 +204,34 @@ pub trait ChatCompletionAdapter {
         ))
     }
 
+    /// Handles one frame and hands each event it makes to `on_event`, which returns
+    /// whether the event was written to the connection. A queued event is not a written one.
     fn process_websocket_frame_streaming(
         &self,
         frame: Value,
         client_id: &str,
         default_chat_id: &str,
-        on_event: &mut dyn FnMut(WebSocketServerEvent),
+        on_event: &mut dyn FnMut(WebSocketServerEvent) -> bool,
     ) -> Result<(), ApiError> {
         for event in self.process_websocket_frame(frame, client_id, default_chat_id)? {
             on_event(event);
         }
         Ok(())
+    }
+
+    /// Where the adapter offers the turns it starts by itself on a WebSocket
+    /// connection. `None` when it never starts one.
+    fn websocket_runtime_turns(&self) -> Option<Arc<WebSocketRuntimeTurns>> {
+        None
+    }
+
+    /// Runs a turn the adapter offered, on the connection it was handed to. Each event
+    /// goes to `on_event`, which returns whether it was written to the connection.
+    fn process_websocket_runtime_turn_streaming(
+        &self,
+        _turn: &WebSocketRuntimeTurn,
+        _on_event: &mut dyn FnMut(WebSocketServerEvent) -> bool,
+    ) -> Result<WebSocketRuntimeTurnEnd, ApiError> {
+        Ok(WebSocketRuntimeTurnEnd::Done)
     }
 }

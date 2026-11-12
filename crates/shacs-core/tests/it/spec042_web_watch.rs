@@ -13,4 +13,4 @@ mod observation;
 #[path = "spec042_web_watch/redirects.rs"]
 mod redirects;
 #[path = "spec042_web_watch/support.rs"]
-mod support;
+pub mod support;

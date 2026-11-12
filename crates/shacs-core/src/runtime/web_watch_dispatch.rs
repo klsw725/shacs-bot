@@ -56,7 +56,9 @@ impl DurableWorkDispatcher {
             let Some(entry) = self.admit(runtime.workspace, item, &wake, None)? else {
                 continue;
             };
-            if !admission.due_work_ids.contains(&item.work_id) || wake.due_at_ms > runtime.now_ms {
+            if !admission.runnable_work_ids.contains(&item.work_id)
+                || wake.due_at_ms > runtime.now_ms
+            {
                 continue;
             }
             let preparation = executor.prepare(&wake, &display_url(&entry.plan.url));

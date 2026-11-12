@@ -3,6 +3,7 @@
 //! command stops with who owns the folder, who runs the command and how to
 //! fix it, instead of the raw `Permission denied` its first write ends with.
 
+use super::browser_cli::BrowserOptions;
 use super::discord_connect_cli::DiscordConnectAction;
 use super::memory_cli::MemoryOptions;
 use super::provider_status_cli::CommandForm;
@@ -62,6 +63,7 @@ pub(super) fn write_target(command: &CliCommand) -> Option<PathBuf> {
             MemoryOptions::ModelInstall { config_path, .. }
             | MemoryOptions::Index { config_path, .. },
         ) => config_path,
+        CliCommand::Browser(BrowserOptions::Forget { config_path, .. }) => config_path,
         CliCommand::Tasks(options)
             if options.workspace.is_none()
                 && options.data_dir.is_none()

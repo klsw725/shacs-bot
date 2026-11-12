@@ -91,6 +91,7 @@ fn host_contract_uses_borrowed_call_context_without_tool_registration() -> Resul
         permission_interactive: false,
         browser_screenshots: None,
         native_image_input_supported: false,
+        media_root: None,
     };
     let session = host.acquire(&context)?;
     session.act(

@@ -10,6 +10,7 @@ mod automation_outcome;
 mod automation_producer;
 mod automation_worker;
 pub mod browser;
+mod browser_cli;
 #[cfg(test)]
 #[path = "codex_login_model_tests.rs"]
 mod codex_login_model_tests;
@@ -46,10 +47,14 @@ mod spec035_tasks_cli;
 mod spec036_observation_cli;
 mod spec036_work_cli;
 mod spec042_web_watch_cli;
+#[cfg(test)]
+#[path = "spec050_browser_ingress_tests.rs"]
+mod spec050_browser_ingress_tests;
 mod surface_approval_worker;
 mod tool_before_interaction;
 mod trajectory_cli;
 mod web_watch_profile;
+pub use consent_prompt::{Prompt, ScriptedPrompt, StdPrompt};
 pub use runtime_cleanup::{RemovedRuntimePath, RemovedRuntimePathKind, RuntimeCleanupReceipt};
 use spec035_cli_media::wiring::{
     format_runtime_inspect, production_tool_registry, runtime_inspect_inner,
@@ -127,7 +132,7 @@ use shacs_core::runtime::{
     SkillTrustActionKind, SkillTrustPermissionDecision, StreamDeltaCoalescer,
     SubagentExecutionConfig, SubagentRuntime, SurfaceActionOutcomeKind, SurfaceActionRequestKind,
     ToolEvent, ToolImageSettings, ToolSearchConfig, ToolSearchMode, ToolStatus,
-    HEARTBEAT_FILE_NAME,
+    HEARTBEAT_FILE_NAME, INBOUND_WORK_KIND,
 };
 use shacs_core::tools::{
     McpRuntime, McpServerConnectionReport, McpServerSpec, McpStartupGate, MessageTool,
@@ -221,7 +226,7 @@ use tungstenite::{connect as websocket_connect, Message as WebSocketMessage, Web
 
 #[cfg(test)]
 use surface_approval_worker::process_due_surface_approvals;
-use surface_approval_worker::start_surface_approval_worker;
+use surface_approval_worker::{start_surface_approval_worker, SurfaceApprovalWorker};
 
 #[cfg(any(test, feature = "spec031-test-fixture"))]
 #[doc(hidden)]
@@ -297,6 +302,7 @@ pub enum CliCommand {
     Improve(ImprovementOptions),
     Trajectory(trajectory_cli::TrajectoryOptions),
     Memory(memory_cli::MemoryOptions),
+    Browser(browser_cli::BrowserOptions),
     RuntimeInspect(RuntimeInspectOptions),
     TrustedRuntimeInspect(RuntimeInspectOptions, spec030_cli::Spec030CliFormat),
     RuntimeDiagnostics(RuntimeDiagnosticsOptions),
@@ -2018,6 +2024,8 @@ pub struct SessionDeleteReport {
 #[derive(Debug)]
 pub enum CliError {
     Api(ApiError),
+    /// What `browser forget` says when it removes nothing.
+    BrowserForget(String),
     Config(ConfigError),
     DataFolder(String),
     Io(std::io::Error),
@@ -2033,6 +2041,7 @@ impl fmt::Display for CliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Api(error) => write!(formatter, "{error}"),
+            Self::BrowserForget(said) => formatter.write_str(said),
             Self::Config(error) => write!(formatter, "{error}"),
             Self::DataFolder(message) => formatter.write_str(message),
             Self::Io(error) => write!(formatter, "CLI I/O failed: {error}"),
@@ -2925,6 +2934,7 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::Improve(options) => improvement_cli::run(options),
         CliCommand::Trajectory(options) => trajectory_cli::run(options),
         CliCommand::Memory(options) => memory_cli::run(options),
+        CliCommand::Browser(options) => browser_cli::run(options),
         CliCommand::RuntimeInspect(options) => runtime_inspect(options).map(format_runtime_inspect),
         CliCommand::TrustedRuntimeInspect(options, format) => {
             let observation =
@@ -3007,6 +3017,7 @@ where
         "improve" => improvement_cli::parse(parser, global_config),
         "trajectory" => trajectory_cli::parse(parser, global_config),
         "memory" => memory_cli::parse(parser, global_config),
+        "browser" => browser_cli::parse(parser, global_config),
         "runtime" => parse_runtime(parser, global_config),
         "session" | "sessions" => parse_session(parser, global_config),
         "skills" | "skill" => parse_skills(parser, global_config),
@@ -3497,6 +3508,9 @@ fn onboard_config_defaults() -> Value {
                 "startupTimeoutSeconds": 20,
                 "idleTimeoutSeconds": 300,
                 "pageTimeoutSeconds": 30,
+                "replyWaitMinutes": 30,
+                "takeoverMinutes": 15,
+                "persistLogin": false,
                 "view": {
                     "enable": false,
                     "password": ""
@@ -4665,7 +4679,7 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
                 "digest": &report.containment.digest,
             },
             "generated_media": generated_media,
-            "browser": report.browser,
+            "browser": browser::diagnostics(&report.browser),
             "spec035_media_projections": json!([]),
             "spec033": spec033,
             "sessions": {
@@ -11141,6 +11155,22 @@ fn complete_direct_message(
     Ok(render_agent_response(content, options.markdown, None))
 }
 
+/// The takeover episodes whose notice among `outbound` is part of `content`, the text
+/// that is shown to the user.
+fn browser_notices_in(outbound: &[shacs_channels::OutboundMessage], content: &str) -> Vec<String> {
+    outbound
+        .iter()
+        .filter_map(|message| {
+            let episode = message
+                .metadata
+                .get(shacs_core::runtime::BROWSER_EPISODE_NOTICE_METADATA)
+                .and_then(Value::as_str)?;
+            let notice = message.content.trim();
+            (!notice.is_empty() && content.contains(notice)).then(|| episode.to_owned())
+        })
+        .collect()
+}
+
 fn render_direct_turn_content(
     final_content: String,
     outbound: Vec<shacs_channels::OutboundMessage>,
@@ -11229,6 +11259,7 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
         bundle,
         options.allow_api_side_effects,
     )?);
+    install_browser_resume_notifier(&adapter, None);
     #[cfg(not(test))]
     spec030_startup_facts::publish_daemon_started(&adapter.spec030_fact_store())
         .map_err(|error| CliError::Runtime(error.to_string()))?;
@@ -11245,7 +11276,7 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
     }
     let shutdown = async move {
         let reason =
-            wait_for_ctrl_c_or_runtime_request(data_dir, owner_fence, owner_id, None).await;
+            wait_for_ctrl_c_or_runtime_request(data_dir, owner_fence, owner_id, Vec::new()).await;
         if let Ok(mut stored_reason) = shutdown_reason_writer.lock() {
             *stored_reason = reason;
         }
@@ -11362,8 +11393,8 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
     #[cfg(not(test))]
     spec030_startup_facts::publish_daemon_started(&adapter.spec030_fact_store())
         .map_err(|error| CliError::Runtime(error.to_string()))?;
-    let approval_worker =
-        start_surface_approval_worker(adapter.clone(), data_dir.clone(), owner_id.clone())?;
+    let gateway_work = GatewayDurableWork::new(data_dir.clone(), owner_id.clone());
+    let approval_worker = gateway_work.start_worker(adapter.clone())?;
     let heartbeat_worker = start_heartbeat_runtime(adapter.clone(), &bundle)?;
     let cron_worker = start_automation_cron_runtime(adapter.clone(), &data_dir)?;
     let supervisor = match ExternalChannelSupervisor::start(
@@ -11371,7 +11402,7 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
         specs,
         send_max_retries,
         external_context,
-        bundle.context.data_dir.clone(),
+        &gateway_work,
     ) {
         Ok(supervisor) => supervisor,
         Err(error) => {
@@ -11387,7 +11418,7 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
             return Err(error);
         }
     };
-    let supervisor_health = supervisor.health_signal();
+    let supervisor_health = vec![supervisor.health_signal(), approval_worker.failure_signal()];
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -11409,7 +11440,7 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
                     request_data_dir,
                     owner_fence,
                     owner_id,
-                    Some(supervisor_health.clone()),
+                    supervisor_health.clone(),
                 )
                 .await;
                 if let Ok(mut stored_reason) = shutdown_reason_writer.lock() {
@@ -11419,13 +11450,8 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
         ))
     } else {
         let reason = runtime.block_on(async {
-            wait_for_ctrl_c_or_runtime_request(
-                data_dir,
-                owner_fence,
-                owner_id,
-                Some(supervisor_health),
-            )
-            .await
+            wait_for_ctrl_c_or_runtime_request(data_dir, owner_fence, owner_id, supervisor_health)
+                .await
         });
         if let Ok(mut stored_reason) = shutdown_reason_store.lock() {
             *stored_reason = reason;
@@ -11516,13 +11542,13 @@ async fn wait_for_ctrl_c_or_runtime_request(
     data_dir: PathBuf,
     owner_fence: RuntimeOwnerFence,
     owner_id: String,
-    processor_exited: Option<Arc<AtomicBool>>,
+    component_exited: Vec<Arc<AtomicBool>>,
 ) -> RuntimeShutdownReason {
     wait_for_ctrl_c_or_runtime_request_with_termination_signal(
         data_dir,
         owner_fence,
         owner_id,
-        processor_exited,
+        component_exited,
         wait_for_termination_signal(),
     )
     .await
@@ -11532,7 +11558,7 @@ async fn wait_for_ctrl_c_or_runtime_request_with_termination_signal<F>(
     data_dir: PathBuf,
     owner_fence: RuntimeOwnerFence,
     owner_id: String,
-    processor_exited: Option<Arc<AtomicBool>>,
+    component_exited: Vec<Arc<AtomicBool>>,
     termination_signal: F,
 ) -> RuntimeShutdownReason
 where
@@ -11558,9 +11584,9 @@ where
                     browser::shutdown_process_browser();
                     return RuntimeShutdownReason::OwnerLost;
                 }
-                if processor_exited
-                    .as_ref()
-                    .is_some_and(|exited| exited.load(Ordering::SeqCst))
+                if component_exited
+                    .iter()
+                    .any(|exited| exited.load(Ordering::SeqCst))
                 {
                     return RuntimeShutdownReason::StartupFailed;
                 }
@@ -11642,6 +11668,36 @@ struct ExternalSupervisorShutdownReport {
     report: RuntimeShutdownReport,
 }
 
+/// Raises a component thread's signal when dropped while armed. The thread
+/// holds one for its whole run, so a panic raises the signal the same way an
+/// error return does: the gateway's shutdown wait only polls these signals and
+/// joins the thread after it has decided to stop.
+struct ThreadEndSignal {
+    signal: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl ThreadEndSignal {
+    fn armed(signal: Arc<AtomicBool>) -> Self {
+        Self {
+            signal,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ThreadEndSignal {
+    fn drop(&mut self) {
+        if self.armed {
+            self.signal.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ExternalProcessorShutdownControl {
     stop: Arc<AtomicBool>,
@@ -11666,6 +11722,7 @@ struct ExternalAgentTurnResult {
     turn_failed: bool,
     cancel_session_work: bool,
     priority_command: bool,
+    session_free_command: bool,
     turn_cancelled: bool,
 }
 
@@ -11777,11 +11834,82 @@ struct ExternalTransportRuntimeContext {
     lease_owner_ref: Option<String>,
     unified_session_key: Option<String>,
     spec035_hello: fn() -> Result<shacs_projection::Spec035TransportClientHello, String>,
+    browser: TransportBrowserHost,
+}
+
+/// The browser host the transports read arrivals from and report delivered
+/// episode notices to.
+#[derive(Clone, Default)]
+struct TransportBrowserHost(Option<Arc<dyn shacs_core::runtime::BrowserHost>>);
+
+impl fmt::Debug for TransportBrowserHost {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(if self.0.is_some() {
+            "BrowserHost(set)"
+        } else {
+            "BrowserHost(none)"
+        })
+    }
 }
 
 struct ExternalDurableWorkRuntime {
     data_dir: PathBuf,
     dispatcher: DurableWorkDispatcher,
+}
+
+/// The durable work of one gateway process. Every dispatcher opened here leases under the
+/// runtime owner, so a lease one of them holds past its expiry, such as a long automation run
+/// or a long turn, is not taken by another for the lease of a dead process.
+struct GatewayDurableWork {
+    data_dir: PathBuf,
+    lease_owner_ref: String,
+}
+
+impl GatewayDurableWork {
+    fn new(data_dir: PathBuf, runtime_owner_id: String) -> Self {
+        Self {
+            data_dir,
+            lease_owner_ref: runtime_owner_id,
+        }
+    }
+
+    fn start_worker(
+        &self,
+        adapter: Arc<AgentLoopChatCompletionAdapter>,
+    ) -> Result<SurfaceApprovalWorker, CliError> {
+        start_surface_approval_worker(adapter, self.data_dir.clone(), self.lease_owner_ref.clone())
+    }
+
+    fn open_ingress(
+        &self,
+        transport_context: &mut ExternalTransportRuntimeContext,
+        runtime_bus: &MessageBus,
+        unified_session_key: Option<String>,
+    ) -> Result<ExternalDurableWorkRuntime, CliError> {
+        transport_context.configure_durable_inbound(
+            self.data_dir.clone(),
+            self.lease_owner_ref.clone(),
+            unified_session_key,
+        );
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(&self.data_dir),
+            runtime_durable_work_payload_root(&self.data_dir),
+            runtime_bus.clone(),
+            self.lease_owner_ref.clone(),
+            DURABLE_WORK_LEASE_DURATION_MS,
+        )
+        .map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "external durable work dispatcher could not start: {}",
+                redact_string(&error.to_string())
+            ))
+        })?;
+        dispatch_due_external_work(&mut dispatcher, &self.data_dir, &BTreeSet::new())?;
+        Ok(ExternalDurableWorkRuntime {
+            data_dir: self.data_dir.clone(),
+            dispatcher,
+        })
+    }
 }
 
 impl ExternalTransportRuntimeContext {
@@ -11793,7 +11921,16 @@ impl ExternalTransportRuntimeContext {
             lease_owner_ref: None,
             unified_session_key: None,
             spec035_hello: || spec035_channel_worker_hello().map_err(|error| error.to_string()),
+            browser: TransportBrowserHost::default(),
         }
+    }
+
+    fn set_browser_host(&mut self, host: Option<Arc<dyn shacs_core::runtime::BrowserHost>>) {
+        self.browser = TransportBrowserHost(host);
+    }
+
+    fn browser_host(&self) -> Option<&dyn shacs_core::runtime::BrowserHost> {
+        self.browser.0.as_deref()
     }
 
     fn metadata_path(&self, name: &str) -> PathBuf {
@@ -11824,45 +11961,25 @@ impl ExternalTransportRuntimeContext {
             .lease_owner_ref
             .as_deref()
             .ok_or_else(|| "durable inbound lease owner is unavailable".to_owned())?;
-        let _enqueue_guard = DURABLE_INBOUND_ENQUEUE_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .map_err(|_| "durable inbound enqueue lock poisoned".to_owned())?;
         let mut durable_message = message.clone();
         if durable_message.session_key_override.is_none() {
             durable_message.session_key_override = self.unified_session_key.clone();
         }
-        let (state, admission) = durable_work_state_for_owner(data_dir, lease_owner_ref)
-            .map_err(|error| error.to_string())?;
-        if !admission.writable {
-            return Err(durable_work_admission_error(&admission).to_string());
-        }
-        if state
-            .work
-            .items
-            .values()
-            .filter(|item| !item.state.is_terminal())
-            .count()
-            >= DURABLE_WORK_MAX_OPEN_ITEMS
-        {
-            return Err(format!(
-                "open durable work limit {DURABLE_WORK_MAX_OPEN_ITEMS} reached"
-            ));
-        }
-        let mut dispatcher = DurableWorkDispatcher::open(
-            runtime_durable_event_root(data_dir),
-            runtime_durable_work_payload_root(data_dir),
-            runtime_bus.clone(),
-            lease_owner_ref,
-            DURABLE_WORK_LEASE_DURATION_MS,
-        )
-        .map_err(|error| error.to_string())?;
         let (work_id, dedupe_hint) = durable_inbound_identity(&durable_message);
+        // The arrival is read when the message first comes in and is stored with it, so a
+        // message that waits in the durable line keeps the episode it arrived in. It stays
+        // out of the identity, which a redelivered message must keep.
+        shacs_core::runtime::stamp_browser_arrival(self.browser_host(), &mut durable_message);
+        let _enqueue_guard = DURABLE_INBOUND_ENQUEUE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "durable inbound enqueue lock poisoned".to_owned())?;
+        let mut dispatcher = self.open_durable_line(runtime_bus, data_dir, lease_owner_ref)?;
         dispatcher
             .enqueue_inbound(work_id.clone(), &durable_message, Some(dedupe_hint), None)
             .map_err(|error| error.to_string())?;
         clear_pending_inbound_hint(data_dir, message);
-        if is_external_priority_command(message) {
+        if is_external_priority_command(message) || is_external_session_free_command(message) {
             let (state, admission) = durable_work_state_for_owner(data_dir, lease_owner_ref)
                 .map_err(|error| error.to_string())?;
             if !admission.writable {
@@ -11881,6 +11998,91 @@ impl ExternalTransportRuntimeContext {
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
+    }
+
+    /// Opens the durable line for one enqueue, after the admission and open work checks.
+    /// The caller holds the enqueue lock.
+    fn open_durable_line(
+        &self,
+        runtime_bus: &MessageBus,
+        data_dir: &Path,
+        lease_owner_ref: &str,
+    ) -> Result<DurableWorkDispatcher, String> {
+        let (state, admission) = durable_work_state_for_owner(data_dir, lease_owner_ref)
+            .map_err(|error| error.to_string())?;
+        if !admission.writable {
+            return Err(durable_work_admission_error(&admission).to_string());
+        }
+        if state
+            .work
+            .items
+            .values()
+            .filter(|item| !item.state.is_terminal())
+            .count()
+            >= DURABLE_WORK_MAX_OPEN_ITEMS
+        {
+            return Err(format!(
+                "open durable work limit {DURABLE_WORK_MAX_OPEN_ITEMS} reached"
+            ));
+        }
+        DurableWorkDispatcher::open(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_work_payload_root(data_dir),
+            runtime_bus.clone(),
+            lease_owner_ref,
+            DURABLE_WORK_LEASE_DURATION_MS,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// Puts the continuation of an ended takeover episode on the durable line of the
+    /// session that paused on it. The same episode is put there once: its work id and
+    /// dedupe hint are made from the episode alone.
+    fn enqueue_browser_resume(
+        &self,
+        runtime_bus: &MessageBus,
+        resume: &shacs_core::runtime::BrowserPendingResume,
+    ) -> Result<(), String> {
+        let data_dir = self
+            .durable_data_dir
+            .as_deref()
+            .ok_or_else(|| "durable inbound data directory is unavailable".to_owned())?;
+        let lease_owner_ref = self
+            .lease_owner_ref
+            .as_deref()
+            .ok_or_else(|| "durable inbound lease owner is unavailable".to_owned())?;
+        let message = browser_resume_inbound(resume);
+        let work_id = format!(
+            "{}{}",
+            shacs_core::runtime::BROWSER_RESUME_WORK_PREFIX,
+            resume.episode
+        );
+        let hint = format!(
+            "{}{}",
+            shacs_core::runtime::BROWSER_RESUME_HINT_PREFIX,
+            resume.episode
+        );
+        let _enqueue_guard = DURABLE_INBOUND_ENQUEUE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "durable inbound enqueue lock poisoned".to_owned())?;
+        let (state, _) = durable_work_state_for_owner(data_dir, lease_owner_ref)
+            .map_err(|error| error.to_string())?;
+        // A second message differs from the first in its timestamp alone, which the line
+        // would refuse as another identity under the same work id.
+        if state
+            .work
+            .items
+            .get(&work_id)
+            .is_some_and(|item| item.dedupe_hint.as_deref() == Some(hint.as_str()))
+        {
+            return Ok(());
+        }
+        let mut dispatcher = self.open_durable_line(runtime_bus, data_dir, lease_owner_ref)?;
+        dispatcher
+            .enqueue_inbound(work_id, &message, Some(hint), None)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     fn enqueue_inbound_with_hint(
@@ -11911,12 +12113,13 @@ impl ExternalChannelSupervisor {
         specs: Vec<ExternalTransportSpec>,
         send_max_retries: u32,
         mut transport_context: ExternalTransportRuntimeContext,
-        data_dir: PathBuf,
+        gateway_work: &GatewayDurableWork,
     ) -> Result<Self, CliError> {
         let stop = Arc::new(AtomicBool::new(false));
         let shutdown_reason = Arc::new(Mutex::new(RuntimeShutdownReason::Stop));
         let exited = Arc::new(AtomicBool::new(false));
         if specs.is_empty() {
+            install_browser_resume_notifier(&adapter, None);
             return Ok(Self {
                 stop,
                 shutdown_reason,
@@ -11925,38 +12128,16 @@ impl ExternalChannelSupervisor {
             });
         }
         let runtime_bus = MessageBus::bounded(EXTERNAL_RUNTIME_BUS_CAPACITY);
-        let lease_owner_ref = format!("runtime-{}-{}", std::process::id(), now_millis());
-        transport_context.configure_durable_inbound(
-            data_dir.clone(),
-            lease_owner_ref.clone(),
+        let durable_work = gateway_work.open_ingress(
+            &mut transport_context,
+            &runtime_bus,
             adapter
                 .defaults
                 .unified_session
                 .then(|| "api:default".to_owned()),
-        );
-        let mut durable_dispatcher = DurableWorkDispatcher::open(
-            runtime_durable_event_root(&data_dir),
-            runtime_durable_work_payload_root(&data_dir),
-            runtime_bus.clone(),
-            lease_owner_ref,
-            DURABLE_WORK_LEASE_DURATION_MS,
-        )
-        .map_err(|error| {
-            CliError::InvalidArguments(format!(
-                "external durable work dispatcher could not start: {}",
-                redact_string(&error.to_string())
-            ))
-        })?;
-        dispatch_due_external_work(
-            &mut durable_dispatcher,
-            &data_dir,
-            &BTreeSet::new(),
-            adapter.as_ref(),
         )?;
-        let durable_work = ExternalDurableWorkRuntime {
-            data_dir,
-            dispatcher: durable_dispatcher,
-        };
+        transport_context.set_browser_host(adapter.browser_host.clone());
+        install_browser_resume_notifier(&adapter, Some((&transport_context, &runtime_bus)));
         let (startup_tx, startup_rx) = mpsc::channel();
         let processor_shutdown = ExternalProcessorShutdownControl {
             stop: stop.clone(),
@@ -11964,7 +12145,7 @@ impl ExternalChannelSupervisor {
             exited: exited.clone(),
             startup_tx: Some(startup_tx),
         };
-        let handles = vec![thread::spawn(move || {
+        let handles = vec![Self::spawn_processor(exited.clone(), move || {
             run_external_agent_processor(
                 adapter,
                 runtime_bus,
@@ -12024,6 +12205,19 @@ impl ExternalChannelSupervisor {
             shutdown_reason,
             exited,
             handles,
+        })
+    }
+
+    /// Runs the processor on its own thread. `exited` is raised however that
+    /// thread ends, including an error return or a panic the processor did not
+    /// get to report itself.
+    fn spawn_processor(
+        exited: Arc<AtomicBool>,
+        processor: impl FnOnce() -> Result<ExternalSupervisorShutdownReport, CliError> + Send + 'static,
+    ) -> thread::JoinHandle<Result<ExternalSupervisorShutdownReport, CliError>> {
+        thread::spawn(move || {
+            let _ended = ThreadEndSignal::armed(exited);
+            processor()
         })
     }
 
@@ -12093,17 +12287,35 @@ fn run_external_agent_processor(
     runtime_bus: MessageBus,
     specs: Vec<ExternalTransportSpec>,
     send_max_retries: u32,
-    mut shutdown: ExternalProcessorShutdownControl,
+    shutdown: ExternalProcessorShutdownControl,
     transport_context: ExternalTransportRuntimeContext,
-    mut durable_work: ExternalDurableWorkRuntime,
+    durable_work: ExternalDurableWorkRuntime,
 ) -> Result<ExternalSupervisorShutdownReport, CliError> {
     let spec035_hello = transport_context.spec035_hello;
-    let mut channels = external_transport_channel_manager(
+    let channels = external_transport_channel_manager(
         specs,
         runtime_bus.clone(),
         send_max_retries,
         transport_context,
     );
+    run_external_agent_processor_with_channels(
+        adapter,
+        runtime_bus,
+        channels,
+        spec035_hello,
+        shutdown,
+        durable_work,
+    )
+}
+
+fn run_external_agent_processor_with_channels(
+    adapter: Arc<AgentLoopChatCompletionAdapter>,
+    runtime_bus: MessageBus,
+    mut channels: ChannelManager,
+    spec035_hello: fn() -> Result<shacs_projection::Spec035TransportClientHello, String>,
+    mut shutdown: ExternalProcessorShutdownControl,
+    mut durable_work: ExternalDurableWorkRuntime,
+) -> Result<ExternalSupervisorShutdownReport, CliError> {
     let startup_result = channels
         .start_all()
         .map(|()| channel_component_reports(&channels, "started"))
@@ -12197,6 +12409,11 @@ fn run_external_agent_processor(
                         })?;
                 }
                 let (work_id, dedupe_hint) = durable_inbound_identity(&message);
+                let mut durable_message = message.clone();
+                shacs_core::runtime::stamp_browser_arrival(
+                    adapter.browser_host.as_deref(),
+                    &mut durable_message,
+                );
                 let enqueue_guard = DURABLE_INBOUND_ENQUEUE_LOCK
                     .get_or_init(|| Mutex::new(()))
                     .lock()
@@ -12235,7 +12452,7 @@ fn run_external_agent_processor(
                 }
                 if let Err(error) = durable_work.dispatcher.enqueue_inbound(
                     work_id.clone(),
-                    &message,
+                    &durable_message,
                     Some(dedupe_hint),
                     None,
                 ) {
@@ -12244,19 +12461,21 @@ fn run_external_agent_processor(
                 }
                 clear_pending_inbound_hint(&durable_work.data_dir, &message);
                 drop(enqueue_guard);
-                if priority_command {
+                if priority_command || is_external_session_free_command(&message) {
                     if priority_stop {
                         cancel_external_active_session(&adapter.session_turn_lock, &session_key);
                     }
-                    if let Err(error) = request_external_session_cancellation(
-                        &mut durable_work.dispatcher,
-                        &durable_work.data_dir,
-                        &session_key,
-                        Some(&work_id),
-                    ) {
-                        eprintln!("external durable work cancellation failed: {error}");
-                        shutdown.stop.store(true, Ordering::SeqCst);
-                        break;
+                    if priority_command {
+                        if let Err(error) = request_external_session_cancellation(
+                            &mut durable_work.dispatcher,
+                            &durable_work.data_dir,
+                            &session_key,
+                            Some(&work_id),
+                        ) {
+                            eprintln!("external durable work cancellation failed: {error}");
+                            shutdown.stop.store(true, Ordering::SeqCst);
+                            break;
+                        }
                     }
                     let priority_dispatch = (|| -> Result<(), CliError> {
                         let (state, admission) = durable_work_state_for_owner(
@@ -12300,7 +12519,6 @@ fn run_external_agent_processor(
                     &mut durable_work.dispatcher,
                     &durable_work.data_dir,
                     &unavailable_sessions,
-                    adapter.as_ref(),
                 ) {
                     eprintln!("external durable work dispatch failed: {error}");
                     shutdown.stop.store(true, Ordering::SeqCst);
@@ -12309,7 +12527,8 @@ fn run_external_agent_processor(
                 continue;
             }
             let session_key = adapter.external_effective_session_key(&message);
-            if is_external_priority_command(&message) {
+            if is_external_priority_command(&message) || is_external_session_free_command(&message)
+            {
                 turn_handles.push(spawn_external_agent_turn(
                     adapter.clone(),
                     session_key,
@@ -12367,7 +12586,6 @@ fn run_external_agent_processor(
             &mut durable_work.dispatcher,
             &durable_work.data_dir,
             &unavailable_sessions,
-            adapter.as_ref(),
         ) {
             eprintln!("external durable work wake failed: {error}");
             shutdown.stop.store(true, Ordering::SeqCst);
@@ -12521,6 +12739,74 @@ fn channel_component_reports(
     reports
 }
 
+/// The runtime's own continuation of a paused `handoff` call. The marker it carries is
+/// never serialized, so only this function and the durable line can make one.
+fn browser_resume_inbound(resume: &shacs_core::runtime::BrowserPendingResume) -> InboundMessage {
+    let mut message = InboundMessage::new("system", "browser", resume.chat_id.clone(), "")
+        .with_session_key_override(resume.session_id.clone());
+    for (key, value) in [
+        ("injected_event", shacs_core::runtime::BROWSER_RESUME_EVENT),
+        ("episode", resume.episode.as_str()),
+        ("tool_call_id", resume.tool_call_id.as_str()),
+        ("reason", resume.reason.as_str()),
+    ] {
+        message
+            .metadata
+            .insert(key.to_owned(), Value::String(value.to_owned()));
+    }
+    message.with_owner_accepted_browser_resume(shacs_channels::OwnerAcceptedBrowserResume {
+        episode: resume.episode.clone(),
+        tool_call_id: resume.tool_call_id.clone(),
+        reason: resume.reason.clone(),
+    })
+}
+
+/// Lets the browser manager hand the continuation of an ended takeover episode to where
+/// its paused call goes on. Every long-running runtime that registers the browser tool
+/// installs it once: the gateway, with or without an external channel, and `serve`. A
+/// call that paused on a WebSocket connection is offered to the connections of this
+/// adapter and never enters the durable line, whose channels cannot reach a connection:
+/// the manager offers it again on every pass while the call still waits, and
+/// [`shacs_api::WebSocketRuntimeTurns`] lets it run once. Any other call goes to the
+/// durable line `external` feeds, and one that could not be put there is offered again.
+fn install_browser_resume_notifier(
+    adapter: &AgentLoopChatCompletionAdapter,
+    external: Option<(&ExternalTransportRuntimeContext, &MessageBus)>,
+) {
+    let Some(host) = adapter.browser_host.as_deref() else {
+        return;
+    };
+    let websocket = adapter.websocket_runtime_turns.clone();
+    let durable = external.map(|(context, bus)| browser_resume_notifier(context, bus));
+    host.set_resume_notifier(Box::new(move |resume| {
+        if resume.channel == WEBSOCKET_CHANNEL {
+            websocket.offer(&shacs_api::WebSocketRuntimeTurn {
+                chat_id: resume.chat_id.clone(),
+                token: resume.episode.clone(),
+            });
+            return false;
+        }
+        durable.as_ref().is_some_and(|enqueue| enqueue(resume))
+    }));
+}
+
+/// Puts a continuation on the durable line, and says whether the line took it.
+fn browser_resume_notifier(
+    transport_context: &ExternalTransportRuntimeContext,
+    runtime_bus: &MessageBus,
+) -> impl Fn(&shacs_core::runtime::BrowserPendingResume) -> bool + Send + Sync + 'static {
+    let mut context = transport_context.clone();
+    context.set_browser_host(None);
+    let bus = runtime_bus.clone();
+    move |resume| match context.enqueue_browser_resume(&bus, resume) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("browser resume enqueue failed: {}", redact_string(&error));
+            false
+        }
+    }
+}
+
 fn durable_inbound_identity(message: &InboundMessage) -> (String, String) {
     let mut value = serde_json::to_value(message).unwrap_or_default();
     if let Some(object) = value.as_object_mut() {
@@ -12549,6 +12835,10 @@ fn is_external_priority_command(message: &InboundMessage) -> bool {
     shacs_command::CommandRouter::builtin().is_priority(&message.content)
 }
 
+fn is_external_session_free_command(message: &InboundMessage) -> bool {
+    shacs_command::CommandRouter::builtin().is_session_free(&message.content)
+}
+
 fn handle_external_agent_turn_result(
     result: ExternalAgentTurnResult,
     runtime_bus: &MessageBus,
@@ -12567,10 +12857,17 @@ fn handle_external_agent_turn_result(
         turn_failed,
         cancel_session_work,
         priority_command,
+        session_free_command,
         turn_cancelled,
     } = result;
     let had_error = turn_failed || error.is_some();
-    finish_external_typing_indicator(typing_indicators, &session_key, subagent_runtime.as_ref());
+    if !session_free_command {
+        finish_external_typing_indicator(
+            typing_indicators,
+            &session_key,
+            subagent_runtime.as_ref(),
+        );
+    }
     if let Some(error) = error {
         eprintln!("external channel turn failed: {error}");
     }
@@ -12625,7 +12922,7 @@ fn handle_external_agent_turn_result(
             )?;
         }
     }
-    if !continue_session || priority_command {
+    if !continue_session || priority_command || session_free_command {
         return Ok(None);
     }
     let next = if let Some(message) = retry_message {
@@ -12671,8 +12968,14 @@ fn dispatch_due_external_work(
     dispatcher: &mut DurableWorkDispatcher,
     data_dir: &Path,
     unavailable_sessions: &BTreeSet<String>,
-    adapter: &AgentLoopChatCompletionAdapter,
 ) -> Result<(), CliError> {
+    // An intake that puts a priority command on the line dispatches it itself, and holds
+    // this lock from the enqueue to that dispatch. A pass that read the line in between
+    // would lease the command first and fail the intake, or lease it a second time.
+    let _enqueue_guard = DURABLE_INBOUND_ENQUEUE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| CliError::Runtime("durable inbound enqueue lock poisoned".to_owned()))?;
     let (state, admission) = durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
     if !admission.writable {
         return Err(durable_work_admission_error(&admission));
@@ -12690,12 +12993,6 @@ fn dispatch_due_external_work(
                 redact_string(&error.to_string())
             ))
         })?;
-    automation_worker::process_due_automation(dispatcher, data_dir, adapter).map_err(|error| {
-        CliError::InvalidArguments(format!(
-            "external automation dispatch failed: {}",
-            redact_string(&error)
-        ))
-    })?;
     Ok(())
 }
 
@@ -12915,6 +13212,9 @@ fn request_active_external_work_cancellation(
     Ok(())
 }
 
+/// Hands back the inbound turns this processor leased. The gateway's worker leases under the
+/// same owner, so the work kind is what keeps its running automation and approval work out of
+/// this: that work stays the worker's to end when it stops, after this processor has.
 fn requeue_owned_external_work(
     durable_work: &mut ExternalDurableWorkRuntime,
 ) -> Result<(), CliError> {
@@ -12926,6 +13226,7 @@ fn requeue_owned_external_work(
         .values()
         .filter(|item| {
             item.state == ReplayWorkState::Leased
+                && item.work_kind == INBOUND_WORK_KIND
                 && item.lease_owner_ref.as_deref() == Some(owner_ref.as_str())
         })
         .cloned()
@@ -13050,6 +13351,7 @@ fn spawn_external_agent_turn(
     result_tx: mpsc::Sender<ExternalAgentTurnResult>,
 ) -> thread::JoinHandle<()> {
     let priority_command = is_external_priority_command(&message);
+    let session_free_command = is_external_session_free_command(&message);
     thread::spawn(move || {
         let durable_work_id = message
             .metadata
@@ -13074,6 +13376,7 @@ fn spawn_external_agent_turn(
                 turn_failed: turn.stop_reason == "error",
                 cancel_session_work: turn.command == Some(AgentLoopCommandResult::StopRequested),
                 priority_command,
+                session_free_command,
                 turn_cancelled: external_turn_was_cancelled(&turn.stop_reason),
             },
             Ok(Err(error)) => {
@@ -13089,6 +13392,7 @@ fn spawn_external_agent_turn(
                     turn_failed: true,
                     cancel_session_work: false,
                     priority_command,
+                    session_free_command,
                     turn_cancelled: false,
                 }
             }
@@ -13102,6 +13406,7 @@ fn spawn_external_agent_turn(
                 turn_failed: true,
                 cancel_session_work: false,
                 priority_command,
+                session_free_command,
                 turn_cancelled: false,
             },
         };
@@ -14592,6 +14897,7 @@ fn run_telegram_transport(
             transport_context.send_attempts,
             &stop,
             Some(&metadata_path),
+            transport_context.browser_host(),
             |message| send_telegram_message(&agent, &config, message),
         );
         let body = json!({
@@ -14637,27 +14943,34 @@ fn send_telegram_message(
     agent: &ureq::Agent,
     config: &TelegramRuntimeConfig,
     message: OutboundMessage,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     if message_is_stream_delta(&message) || message_is_stream_end(&message) {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    let mut chunk_index = 0usize;
+    let mut ids = Vec::new();
     send_split_external_messages(&message.content, TELEGRAM_EXTERNAL_MESSAGE_LIMIT, |text| {
-        let include_reply = chunk_index == 0;
-        chunk_index += 1;
+        let include_reply = ids.is_empty();
         let value = post_json(
             agent,
             &telegram_url(&config.token, "sendMessage"),
             None,
             telegram_message_body(&message, text, None, include_reply),
         )?;
-        value
-            .get("result")
-            .and_then(|result| result.get("message_id"))
-            .and_then(json_id_string)
-            .ok_or_else(|| "Telegram sendMessage response missing message_id".to_owned())
+        let id = telegram_sent_message_id(&value)?;
+        ids.push(id.clone());
+        Ok(id)
     })?;
-    Ok(())
+    Ok(ids)
+}
+
+/// The id Telegram gave a sent message. A response without one is a failed send: nothing
+/// could be replied to.
+fn telegram_sent_message_id(response: &Value) -> Result<String, String> {
+    response
+        .get("result")
+        .and_then(|result| result.get("message_id"))
+        .and_then(json_id_string)
+        .ok_or_else(|| "Telegram sendMessage response missing message_id".to_owned())
 }
 
 fn telegram_message_body(
@@ -14721,6 +15034,10 @@ fn telegram_update_to_inbound(update: &Value) -> Option<InboundMessage> {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             message_thread_id: message.get("message_thread_id").and_then(json_id_string),
+            reply_to_message_id: message
+                .get("reply_to_message")
+                .and_then(|replied| replied.get("message_id"))
+                .and_then(json_id_string),
             media,
         }
         .into_message(),
@@ -14930,6 +15247,7 @@ fn run_discord_rest_polling_transport(
             transport_context.send_attempts,
             &stop,
             Some(&metadata_path),
+            transport_context.browser_host(),
             |message| send_discord_message(&agent, &config, message),
         );
         let DiscordChannelFilter::Only(channel_ids) = &config.channel_filter else {
@@ -15033,6 +15351,7 @@ fn run_discord_gateway_session(
             send_attempts,
             stop,
             Some(metadata_path),
+            runtime_context.browser_host(),
             |message| send_discord_message(agent, config, message),
         );
         if Instant::now() >= next_heartbeat {
@@ -15304,6 +15623,7 @@ fn discord_gateway_message_to_inbound(
                 .get("thread_id")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            reply_to_message_id: discord_reply_to_message_id(item),
             attachments,
         }
         .into_message(),
@@ -15396,6 +15716,14 @@ fn poll_discord_channel(
     Ok((messages, newest))
 }
 
+/// The id of the message a Discord message replies to, if any.
+fn discord_reply_to_message_id(item: &Value) -> Option<String> {
+    item.get("message_reference")
+        .and_then(|reference| reference.get("message_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
 fn discord_rest_message_to_inbound(
     agent: &ureq::Agent,
     config: &DiscordRuntimeConfig,
@@ -15434,6 +15762,7 @@ fn discord_rest_message_to_inbound(
                 .get("thread_id")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            reply_to_message_id: discord_reply_to_message_id(item),
             attachments: discord_attachment_data_urls(agent, item),
         }
         .into_message(),
@@ -15444,15 +15773,15 @@ fn send_discord_message(
     agent: &ureq::Agent,
     config: &DiscordRuntimeConfig,
     message: OutboundMessage,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     if message_is_typing_indicator(&message) {
         if let Err(error) = send_discord_typing_indicator(agent, config, &message.chat_id) {
             eprintln!("discord typing indicator failed: {error}");
         }
-        return Ok(());
+        return Ok(Vec::new());
     }
     if message_is_stream_delta(&message) || message_is_stream_end(&message) {
-        return Ok(());
+        return Ok(Vec::new());
     }
     discord_outbound::send_message(agent, &config.token, message)
 }
@@ -15548,7 +15877,8 @@ fn run_slack_socket_mode_session(
             send_attempts,
             stop,
             Some(&metadata_path),
-            |message| send_slack_message(agent, config, message),
+            runtime_context.browser_host(),
+            |message| send_slack_message(agent, config, message).map(|()| Vec::new()),
         );
         match socket.read() {
             Ok(message) => {
@@ -15978,6 +16308,7 @@ fn run_email_transport(
                 transport_context.send_attempts,
                 &stop,
                 Some(&metadata_path),
+                transport_context.browser_host(),
                 |message| {
                     use shacs_core::runtime::EntrustedNotificationTransportFact as Fact;
                     notification_delivery::record(
@@ -15995,7 +16326,7 @@ fn run_email_transport(
                             Fact::Failed
                         },
                     );
-                    result
+                    result.map(|()| Vec::new())
                 },
             );
         } else {
@@ -16455,7 +16786,8 @@ fn run_whatsapp_bridge_session(
             send_attempts,
             stop,
             Some(metadata_path),
-            |message| send_whatsapp_message(&mut socket, message),
+            runtime_context.browser_host(),
+            |message| send_whatsapp_message(&mut socket, message).map(|()| Vec::new()),
         );
         match socket.read() {
             Ok(message) => {
@@ -16549,12 +16881,16 @@ fn whatsapp_frame_text(frame: &WhatsAppOutboundFrame) -> Result<String, String> 
     serde_json::to_string(frame).map_err(|error| error.to_string())
 }
 
+/// Sends what waits in the transport's queue. `send` returns the ids the channel gave the
+/// parts of a delivered message, or none where the channel has no such ids. Only here, after
+/// the last retry succeeded, has the notice of a takeover episode reached its room.
 fn drain_outbound(
     outbound_rx: &mpsc::Receiver<OutboundMessage>,
     attempts: usize,
     stop: &Arc<AtomicBool>,
     delivery_metadata_path: Option<&Path>,
-    mut send: impl FnMut(OutboundMessage) -> Result<(), String>,
+    browser: Option<&dyn shacs_core::runtime::BrowserHost>,
+    mut send: impl FnMut(OutboundMessage) -> Result<Vec<String>, String>,
 ) {
     while let Ok(message) = outbound_rx.try_recv() {
         let typing_indicator = message_is_typing_indicator(&message);
@@ -16566,12 +16902,13 @@ fn drain_outbound(
             record_delivery_state(path, &message, "pending", None);
         }
         match send_with_transport_retries(message.clone(), attempts, stop, &mut send) {
-            Ok(()) => {
+            Ok(ids) => {
                 if let Some(path) =
                     delivery_metadata_path.filter(|_| !transport_marker_only && !typing_indicator)
                 {
                     record_delivery_state(path, &message, "sent", None);
                 }
+                report_episode_notice_delivered(browser, &message, &ids);
             }
             Err(error) => {
                 if let Some(path) =
@@ -16585,12 +16922,37 @@ fn drain_outbound(
     }
 }
 
+/// Tells the browser host that the notice of a takeover episode was delivered, with every
+/// id the channel gave it. A message that is no such notice reports nothing.
+fn report_episode_notice_delivered(
+    browser: Option<&dyn shacs_core::runtime::BrowserHost>,
+    message: &OutboundMessage,
+    ids: &[String],
+) {
+    let Some(host) = browser else {
+        return;
+    };
+    let Some(episode) = message
+        .metadata
+        .get(shacs_core::runtime::BROWSER_EPISODE_NOTICE_METADATA)
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    if ids.is_empty() {
+        host.episode_notice_delivered(episode, None);
+    }
+    for id in ids {
+        host.episode_notice_delivered(episode, Some(id));
+    }
+}
+
 fn send_with_transport_retries(
     message: OutboundMessage,
     attempts: usize,
     stop: &Arc<AtomicBool>,
-    send: &mut impl FnMut(OutboundMessage) -> Result<(), String>,
-) -> Result<(), String> {
+    send: &mut impl FnMut(OutboundMessage) -> Result<Vec<String>, String>,
+) -> Result<Vec<String>, String> {
     let attempts = attempts.clamp(1, 10);
     let mut last_error = None;
     for attempt in 0..attempts {
@@ -16598,7 +16960,7 @@ fn send_with_transport_retries(
             break;
         }
         match send(message.clone()) {
-            Ok(()) => return Ok(()),
+            Ok(ids) => return Ok(ids),
             Err(error) => {
                 last_error = Some(error);
                 if attempt + 1 < attempts {
@@ -16870,10 +17232,7 @@ pub fn serve_web_ui(options: WebOptions) -> Result<String, CliError> {
     let report = web_preset_from_bundle(&bundle, &options)?;
     let timeout_seconds = bundle.config.api.timeout.max(0.001);
     let websocket_path = web_ui_websocket_path(&report);
-    let adapter = Arc::new(
-        AgentLoopChatCompletionAdapter::from_bundle(bundle, false)?
-            .with_runtime_verbose(options.verbose),
-    );
+    let adapter = Arc::new(web_ui_adapter(bundle, options.verbose)?);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -16893,6 +17252,15 @@ pub fn serve_web_ui(options: WebOptions) -> Result<String, CliError> {
         "Web UI server stopped: http://{} (websocket_path={websocket_path})",
         report.gateway_addr
     ))
+}
+
+/// The adapter `web` serves. It registers no side-effect tool, so it has no browser tool
+/// and no browser host: no `handoff` can pause there, and nothing is there to go on.
+fn web_ui_adapter(
+    bundle: ConfigBundle,
+    verbose: bool,
+) -> Result<AgentLoopChatCompletionAdapter, CliError> {
+    Ok(AgentLoopChatCompletionAdapter::from_bundle(bundle, false)?.with_runtime_verbose(verbose))
 }
 
 fn web_ui_websocket_path(report: &WebPresetReport) -> String {
@@ -16965,6 +17333,8 @@ pub fn help_text() -> String {
         "  memory    Install the local memory search model, build the index, and search memory",
         "            Actions: model install [--model <id>], index, search <query> [--limit <1-20>] [--json]",
         "            Flags: --workspace/-w",
+        "  browser   Close the running browser and delete the saved browser login",
+        "            Actions: forget [--yes|-y]",
         "  runtime   Start, stop, restart, inspect trusted-runtime, migrate config/data, and inspect snapshot/activation diagnostics",
         "  session   Manage local session files",
         "  skills    List skills, inspect entries, and discover workflow recipes",
@@ -19276,6 +19646,9 @@ pub struct AgentLoopChatCompletionAdapter {
     message_tool: Option<MessageTool>,
     _mcp_runtime: Option<McpRuntime>,
     _mcp_reports: Vec<McpServerConnectionReport>,
+    browser_host: Option<Arc<dyn shacs_core::runtime::BrowserHost>>,
+    /// The WebSocket connections that can go on with a paused `handoff` call.
+    websocket_runtime_turns: Arc<shacs_api::WebSocketRuntimeTurns>,
     allow_side_effect_tools: bool,
     send_progress: bool,
     send_tool_hints: bool,
@@ -19414,6 +19787,8 @@ impl AgentLoopChatCompletionAdapter {
             message_tool: tooling.message_tool,
             _mcp_runtime: tooling.mcp_runtime,
             _mcp_reports: tooling.mcp_reports,
+            browser_host: tooling.browser_host,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools,
             send_progress: true,
             send_tool_hints: bundle.config.channels.send_tool_hints,
@@ -19464,7 +19839,8 @@ impl AgentLoopChatCompletionAdapter {
         }
         if self.allow_side_effect_tools {
             self.tools
-                .register(shacs_core::tools::BrowserTool::new(browser));
+                .register(shacs_core::tools::BrowserTool::new(browser.clone()));
+            self.browser_host = Some(browser);
         }
         self
     }
@@ -19540,6 +19916,7 @@ impl AgentLoopChatCompletionAdapter {
         config.browser_screenshots = bundle
             .as_ref()
             .and_then(|bundle| bundle.config.tools.browser.screenshots);
+        config.browser_host.clone_from(&self.browser_host);
         if let Some(media_root) = self.media_dir.parent() {
             config.media_roots.push(media_root.to_path_buf());
         }
@@ -19643,17 +20020,45 @@ impl AgentLoopChatCompletionAdapter {
         invocation: ChatCompletionInvocation,
         on_event: Option<ApiProviderEventCallback>,
     ) -> Result<LlmResponse, ApiError> {
-        self.run_agent_loop_with_origin(
+        self.run_agent_loop_reporting(invocation, on_event)
+            .map(|(response, _)| response)
+    }
+
+    /// Runs an API chat turn. The second value is for the server to run once the response
+    /// was written to the client: it marks the takeover notices in that response delivered.
+    fn run_agent_loop_reporting(
+        &self,
+        invocation: ChatCompletionInvocation,
+        on_event: Option<ApiProviderEventCallback>,
+    ) -> Result<(LlmResponse, Option<shacs_api::ChatResponseWritten>), ApiError> {
+        let (turn, outbound) = self.run_agent_loop_turn_outbound(
             ProviderTurnInvocation {
                 chat: invocation,
                 runtime_override: None,
             },
             on_event,
-            "api",
-            "user",
-            shacs_api::API_CHAT_ID,
+            ProviderTurnOrigin {
+                channel: "api",
+                sender_id: "user",
+                chat_id: shacs_api::API_CHAT_ID,
+            },
             &[],
-        )
+            None,
+        )?;
+        let response = llm_response_from_turn(turn);
+        let episodes = browser_notices_in(&outbound, response.content.as_deref().unwrap_or(""));
+        let written = self
+            .browser_host
+            .clone()
+            .filter(|_| !episodes.is_empty())
+            .map(|host| {
+                Box::new(move || {
+                    for episode in &episodes {
+                        host.episode_notice_delivered(episode, None);
+                    }
+                }) as shacs_api::ChatResponseWritten
+            });
+        Ok((response, written))
     }
 
     pub fn complete_chat_with_provider_runtime_override(
@@ -19757,6 +20162,24 @@ impl AgentLoopChatCompletionAdapter {
         observability_hooks: &[ShacsBotObservabilityHook],
         execution_control: Option<shacs_core::runtime::AutomationExecutionControl>,
     ) -> Result<AgentLoopTurnResult, ApiError> {
+        self.run_agent_loop_turn_outbound(
+            invocation,
+            on_event,
+            origin,
+            observability_hooks,
+            execution_control,
+        )
+        .map(|(turn, _)| turn)
+    }
+
+    fn run_agent_loop_turn_outbound(
+        &self,
+        invocation: ProviderTurnInvocation,
+        on_event: Option<ApiProviderEventCallback>,
+        origin: ProviderTurnOrigin<'_>,
+        observability_hooks: &[ShacsBotObservabilityHook],
+        execution_control: Option<shacs_core::runtime::AutomationExecutionControl>,
+    ) -> Result<(AgentLoopTurnResult, Vec<shacs_channels::OutboundMessage>), ApiError> {
         let ProviderTurnInvocation {
             chat: invocation,
             runtime_override,
@@ -19776,9 +20199,7 @@ impl AgentLoopChatCompletionAdapter {
         )
         .with_media(invocation.media_paths.clone())
         .with_session_key_override(invocation.session_key.clone());
-        let (result, _) =
-            self.process_inbound_with_outbound(message, config, on_event, observability_hooks)?;
-        Ok(result)
+        self.process_inbound_with_outbound(message, config, on_event, observability_hooks)
     }
 
     pub fn process_websocket_frame(
@@ -19790,6 +20211,7 @@ impl AgentLoopChatCompletionAdapter {
         let mut events = Vec::new();
         self.process_websocket_frame_events(frame, client_id, default_chat_id, &mut |event| {
             events.push(event);
+            true
         })?;
         Ok(events)
     }
@@ -19799,7 +20221,7 @@ impl AgentLoopChatCompletionAdapter {
         frame: Value,
         client_id: &str,
         default_chat_id: &str,
-        emit: &mut dyn FnMut(WebSocketServerEvent),
+        emit: &mut dyn FnMut(WebSocketServerEvent) -> bool,
     ) -> Result<(), ApiError> {
         let action = match normalize_websocket_frame(frame, client_id, default_chat_id) {
             Ok(action) => action,
@@ -19812,12 +20234,14 @@ impl AgentLoopChatCompletionAdapter {
             }
         };
         match action {
-            WebSocketInboundAction::NewChat => emit(WebSocketServerEvent::Ready {
-                chat_id: default_chat_id.to_owned(),
-                client_id: client_id.to_owned(),
-            }),
+            WebSocketInboundAction::NewChat => {
+                emit(WebSocketServerEvent::Ready {
+                    chat_id: default_chat_id.to_owned(),
+                    client_id: client_id.to_owned(),
+                });
+            }
             WebSocketInboundAction::Attach { chat_id } => {
-                emit(WebSocketServerEvent::Attached { chat_id })
+                emit(WebSocketServerEvent::Attached { chat_id });
             }
             WebSocketInboundAction::Message(mut inbound) => {
                 let session_key = inbound.session_key();
@@ -19855,28 +20279,95 @@ impl AgentLoopChatCompletionAdapter {
                     clear_pending_inbound_hint(data_dir, &pending_inbound);
                 }
                 let (_, outbound) = result?;
-                let sink = WebSocketEventSink::default();
-                let mut manager =
-                    websocket_event_channel_manager(self.send_max_retries, sink.clone());
-                for message in outbound
-                    .into_iter()
-                    .filter(|message| message.channel == WEBSOCKET_CHANNEL)
-                    .filter(should_dispatch_runtime_outbound)
-                {
-                    if let Err(error) = manager.dispatch_outbound(message) {
-                        emit(WebSocketServerEvent::Error {
-                            chat_id: Some(default_chat_id.to_owned()),
-                            detail: Some(error.to_string()),
-                        });
-                        return Ok(());
-                    }
-                }
-                for event in sink.take_events() {
-                    emit(event);
-                }
+                self.emit_websocket_turn_outbound(outbound, default_chat_id, emit);
             }
         }
         Ok(())
+    }
+
+    /// Writes what a WebSocket turn left to send to its connection.
+    fn emit_websocket_turn_outbound(
+        &self,
+        outbound: Vec<shacs_channels::OutboundMessage>,
+        error_chat_id: &str,
+        emit: &mut dyn FnMut(WebSocketServerEvent) -> bool,
+    ) {
+        let sink = WebSocketEventSink::default();
+        let mut manager = websocket_event_channel_manager(self.send_max_retries, sink.clone());
+        let mut deliveries = Vec::new();
+        for message in outbound
+            .into_iter()
+            .filter(|message| message.channel == WEBSOCKET_CHANNEL)
+            .filter(should_dispatch_runtime_outbound)
+        {
+            let notice = message
+                .metadata
+                .get(shacs_core::runtime::BROWSER_EPISODE_NOTICE_METADATA)
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if let Err(error) = manager.dispatch_outbound(message) {
+                emit(WebSocketServerEvent::Error {
+                    chat_id: Some(error_chat_id.to_owned()),
+                    detail: Some(error.to_string()),
+                });
+                return;
+            }
+            deliveries.push((notice, sink.take_events()));
+        }
+        for (notice, events) in deliveries {
+            // The sink only holds the events. The notice of a takeover episode is
+            // delivered when every event it became was written to the connection.
+            let mut written = !events.is_empty();
+            for event in events {
+                written &= emit(event);
+            }
+            if let (true, Some(host), Some(episode)) =
+                (written, self.browser_host.as_deref(), notice)
+            {
+                host.episode_notice_delivered(&episode, None);
+            }
+        }
+    }
+
+    /// Goes on with the `handoff` call that paused on a WebSocket chat, on the connection
+    /// the turn was handed to. What continues is the browser host's own record of the
+    /// ended episode, never what the turn says: a turn whose call no longer waits, or
+    /// waits somewhere else, does nothing.
+    fn process_websocket_browser_resume(
+        &self,
+        turn: &shacs_api::WebSocketRuntimeTurn,
+        emit: &mut dyn FnMut(WebSocketServerEvent) -> bool,
+    ) -> Result<shacs_api::WebSocketRuntimeTurnEnd, ApiError> {
+        let resume = self
+            .browser_host
+            .as_deref()
+            .and_then(|host| host.pending_resume(&turn.token))
+            .filter(|resume| resume.channel == WEBSOCKET_CHANNEL && resume.chat_id == turn.chat_id);
+        let Some(resume) = resume else {
+            return Ok(shacs_api::WebSocketRuntimeTurnEnd::Done);
+        };
+        if self.session_turn_lock.is_busy(&resume.session_id) {
+            return Ok(shacs_api::WebSocketRuntimeTurnEnd::Retry);
+        }
+        let stream_id = format!("{}:{}", turn.chat_id, now_millis());
+        let mut config = self.loop_config_for(run_permission_mode::RunKind::Interactive);
+        config.permission_interactive = true;
+        let outbound = match self.process_websocket_inbound_with_streaming(
+            browser_resume_inbound(&resume),
+            config,
+            &turn.chat_id,
+            &stream_id,
+            emit,
+        ) {
+            Ok((_, outbound)) => outbound,
+            // Another turn of the session runs. The call still waits, so it is offered again.
+            Err(error) if error.status == 409 && error.error_type == "session_busy" => {
+                return Ok(shacs_api::WebSocketRuntimeTurnEnd::Retry);
+            }
+            Err(error) => return Err(error),
+        };
+        self.emit_websocket_turn_outbound(outbound, &turn.chat_id, emit);
+        Ok(shacs_api::WebSocketRuntimeTurnEnd::Done)
     }
 
     fn process_websocket_inbound_with_streaming(
@@ -19885,7 +20376,7 @@ impl AgentLoopChatCompletionAdapter {
         config: AgentLoopConfig,
         chat_id: &str,
         stream_id: &str,
-        emit: &mut dyn FnMut(WebSocketServerEvent),
+        emit: &mut dyn FnMut(WebSocketServerEvent) -> bool,
     ) -> Result<(AgentLoopTurnResult, Vec<shacs_channels::OutboundMessage>), ApiError> {
         if !self.send_progress {
             return self.process_websocket_inbound_with_live_notifications(inbound, config, emit);
@@ -19930,7 +20421,7 @@ impl AgentLoopChatCompletionAdapter {
         &self,
         inbound: InboundMessage,
         config: AgentLoopConfig,
-        emit: &mut dyn FnMut(WebSocketServerEvent),
+        emit: &mut dyn FnMut(WebSocketServerEvent) -> bool,
     ) -> Result<(AgentLoopTurnResult, Vec<shacs_channels::OutboundMessage>), ApiError> {
         let (notification_tx, notification_rx) = mpsc::channel();
         let live_sink: RuntimeNotificationSink = Arc::new(move |message| {
@@ -19990,7 +20481,8 @@ impl AgentLoopChatCompletionAdapter {
         let chat_id = inbound.chat_id.clone();
         let session_key =
             effective_external_session_key(config.unified_session_key.as_deref(), &inbound);
-        let priority_command = is_external_priority_command(&inbound);
+        let unreserved_command =
+            is_external_priority_command(&inbound) || is_external_session_free_command(&inbound);
         let routing_metadata = stream_routing_metadata_from_inbound(&inbound);
         let reply_to = inbound_reply_to(&inbound);
         let mut subagent_runtime = SubagentRuntime::with_bus(runtime_bus.clone());
@@ -20008,7 +20500,7 @@ impl AgentLoopChatCompletionAdapter {
         });
         if !self.send_progress || !provider_streaming_channel(&channel) {
             let reservation =
-                (!priority_command).then(|| self.session_turn_lock.reserve(session_key.clone()));
+                (!unreserved_command).then(|| self.session_turn_lock.reserve(session_key.clone()));
             if let Some(reservation) = reservation.as_ref() {
                 reservation.bind_to_current_thread();
             }
@@ -20034,7 +20526,7 @@ impl AgentLoopChatCompletionAdapter {
             let reserved_session_key = session_key.clone();
             let handle = scope.spawn(move || {
                 let reservation =
-                    (!priority_command).then(|| turn_lock.reserve(reserved_session_key));
+                    (!unreserved_command).then(|| turn_lock.reserve(reserved_session_key));
                 if let Some(reservation) = reservation.as_ref() {
                     reservation.bind_to_current_thread();
                 }
@@ -20145,7 +20637,7 @@ impl AgentLoopChatCompletionAdapter {
         notification_rx: Option<mpsc::Receiver<OutboundMessage>>,
         chat_id: &str,
         stream_id: &str,
-        emit: &mut dyn FnMut(WebSocketServerEvent),
+        emit: &mut dyn FnMut(WebSocketServerEvent) -> bool,
     ) -> Result<(), ApiError> {
         let sink = WebSocketEventSink::default();
         let mut manager = websocket_event_channel_manager(self.send_max_retries, sink.clone());
@@ -20243,7 +20735,7 @@ impl AgentLoopChatCompletionAdapter {
         notification_rx: &mpsc::Receiver<OutboundMessage>,
         manager: &mut ChannelManager,
         sink: &WebSocketEventSink,
-        emit: &mut dyn FnMut(WebSocketServerEvent),
+        emit: &mut dyn FnMut(WebSocketServerEvent) -> bool,
     ) -> Result<(), ApiError> {
         while let Ok(message) = notification_rx.try_recv() {
             if message.channel != WEBSOCKET_CHANNEL || !is_visible_runtime_notification(&message) {
@@ -20268,7 +20760,7 @@ impl AgentLoopChatCompletionAdapter {
         stream_id: &str,
         content: String,
         end: bool,
-        emit: &mut dyn FnMut(WebSocketServerEvent),
+        emit: &mut dyn FnMut(WebSocketServerEvent) -> bool,
     ) -> Result<(), ApiError> {
         manager
             .dispatch_outbound(stream_outbound_message(
@@ -21123,13 +21615,30 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
         invocation: ChatCompletionInvocation,
         on_event: &mut dyn FnMut(shacs_providers::ProviderEvent),
     ) -> Result<LlmResponse, ApiError> {
+        self.stream_chat_reporting(invocation, on_event)
+            .map(|(response, _)| response)
+    }
+
+    fn complete_chat_reporting(
+        &self,
+        invocation: ChatCompletionInvocation,
+    ) -> Result<(LlmResponse, Option<shacs_api::ChatResponseWritten>), ApiError> {
+        self.run_agent_loop_reporting(invocation, None)
+    }
+
+    fn stream_chat_reporting(
+        &self,
+        invocation: ChatCompletionInvocation,
+        on_event: &mut dyn FnMut(shacs_providers::ProviderEvent),
+    ) -> Result<(LlmResponse, Option<shacs_api::ChatResponseWritten>), ApiError> {
         let (event_tx, event_rx) = mpsc::channel();
         let callback = Arc::new(move |event: &shacs_providers::ProviderEvent| {
             let _ = event_tx.send(event.clone());
         });
         let mut streamed_text = false;
         let result = thread::scope(|scope| {
-            let handle = scope.spawn(move || self.run_agent_loop(invocation, Some(callback)));
+            let handle =
+                scope.spawn(move || self.run_agent_loop_reporting(invocation, Some(callback)));
             for event in event_rx {
                 streamed_text |= matches!(event, shacs_providers::ProviderEvent::TextDelta { .. });
                 on_event(event);
@@ -21139,11 +21648,14 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
                 Err(_) => Err(ApiError::internal("agent loop stream task panicked")),
             }
         });
-        let response = result?;
-        for event in runtime_answer_events(&response, streamed_text) {
+        let (response, written) = result?;
+        let answer_events = runtime_answer_events(&response, streamed_text);
+        // A notice is delivered by this response only when its text went out on the stream.
+        let written = written.filter(|_| !answer_events.is_empty());
+        for event in answer_events {
             on_event(event);
         }
-        Ok(response)
+        Ok((response, written))
     }
 
     fn stream_spec035_tasks_events(
@@ -21335,9 +21847,23 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
         frame: Value,
         client_id: &str,
         default_chat_id: &str,
-        on_event: &mut dyn FnMut(WebSocketServerEvent),
+        on_event: &mut dyn FnMut(WebSocketServerEvent) -> bool,
     ) -> Result<(), ApiError> {
         self.process_websocket_frame_events(frame, client_id, default_chat_id, on_event)
+    }
+
+    fn websocket_runtime_turns(&self) -> Option<Arc<shacs_api::WebSocketRuntimeTurns>> {
+        self.browser_host
+            .is_some()
+            .then(|| self.websocket_runtime_turns.clone())
+    }
+
+    fn process_websocket_runtime_turn_streaming(
+        &self,
+        turn: &shacs_api::WebSocketRuntimeTurn,
+        on_event: &mut dyn FnMut(WebSocketServerEvent) -> bool,
+    ) -> Result<shacs_api::WebSocketRuntimeTurnEnd, ApiError> {
+        self.process_websocket_browser_resume(turn, on_event)
     }
 }
 
@@ -25227,6 +25753,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: false,
             send_tool_hints: false,
@@ -26236,9 +26764,9 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let mut sent = Vec::new();
 
-        drain_outbound(&rx, 1, &stop, Some(&path), |message| {
+        drain_outbound(&rx, 1, &stop, Some(&path), None, |message| {
             sent.push(message);
-            Ok(())
+            Ok(Vec::new())
         });
 
         assert_eq!(sent.len(), 1);
@@ -26704,7 +27232,7 @@ mod tests {
         let attempts = Arc::new(Mutex::new(0usize));
         let attempts_for_send = attempts.clone();
 
-        drain_outbound(&rx, 3, &stop, None, move |_message| {
+        drain_outbound(&rx, 3, &stop, None, None, move |_message| {
             let mut attempts = attempts_for_send
                 .lock()
                 .map_err(|_| "attempt lock poisoned".to_owned())?;
@@ -26712,7 +27240,7 @@ mod tests {
             if *attempts < 3 {
                 Err("temporary send failure".to_owned())
             } else {
-                Ok(())
+                Ok(Vec::new())
             }
         });
 
@@ -26729,7 +27257,9 @@ mod tests {
         drop(tx);
         let stop = Arc::new(AtomicBool::new(false));
 
-        drain_outbound(&rx, 1, &stop, Some(&metadata_path), |_message| Ok(()));
+        drain_outbound(&rx, 1, &stop, Some(&metadata_path), None, |_message| {
+            Ok(Vec::new())
+        });
 
         let metadata = load_metadata_json(&metadata_path);
         let deliveries = metadata
@@ -26770,7 +27300,9 @@ mod tests {
         drop(tx);
         let stop = Arc::new(AtomicBool::new(false));
 
-        drain_outbound(&rx, 1, &stop, Some(&metadata_path), |_message| Ok(()));
+        drain_outbound(&rx, 1, &stop, Some(&metadata_path), None, |_message| {
+            Ok(Vec::new())
+        });
 
         assert!(load_metadata_json(&metadata_path)
             .get("deliveries")
@@ -27018,7 +27550,10 @@ mod tests {
             &rx,
             &mut manager,
             &sink,
-            &mut |event| events.push(event),
+            &mut |event| {
+                events.push(event);
+                true
+            },
         )?;
 
         assert_eq!(events.len(), 1);
@@ -27668,6 +28203,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: true,
             send_progress: false,
             send_tool_hints: false,
@@ -27827,6 +28364,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: true,
             send_progress: false,
             send_tool_hints: false,
@@ -28065,6 +28604,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: true,
             send_progress: false,
             send_tool_hints: false,
@@ -28182,7 +28723,7 @@ mod tests {
         Ok(())
     }
 
-    fn public_adapter_test_bundle(
+    pub(crate) fn public_adapter_test_bundle(
         root: &Path,
         exec_enabled: bool,
     ) -> Result<ConfigBundle, Box<dyn Error>> {
@@ -29109,6 +29650,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: false,
             send_tool_hints: false,
@@ -29200,6 +29743,8 @@ mod tests {
                 message_tool: None,
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
+                browser_host: None,
+                websocket_runtime_turns: Arc::default(),
                 allow_side_effect_tools: false,
                 send_progress: false,
                 send_tool_hints: false,
@@ -30512,6 +31057,7 @@ mod tests {
                 turn_failed: true,
                 cancel_session_work: false,
                 priority_command: false,
+                session_free_command: false,
                 turn_cancelled: false,
             },
             &bus,
@@ -30635,6 +31181,7 @@ mod tests {
                 turn_failed: false,
                 cancel_session_work: false,
                 priority_command: false,
+                session_free_command: false,
                 turn_cancelled: true,
             },
             &bus,
@@ -31988,7 +32535,7 @@ mod tests {
             root.path().to_path_buf(),
             fence,
             "owner-test".to_owned(),
-            None,
+            Vec::new(),
         ));
         Ok(())
     }
@@ -32004,7 +32551,7 @@ mod tests {
             root.path().to_path_buf(),
             RuntimeOwnerFence::new(),
             "owner-current".to_owned(),
-            None,
+            Vec::new(),
             std::future::ready(RuntimeShutdownReason::Stop),
         ));
 
@@ -32078,7 +32625,7 @@ mod tests {
             root.path().to_path_buf(),
             fence,
             "owner-current".to_owned(),
-            None,
+            Vec::new(),
         ));
 
         assert_eq!(reason, RuntimeShutdownReason::OwnerLost);
@@ -32148,7 +32695,7 @@ mod tests {
             root.path().to_path_buf(),
             RuntimeOwnerFence::new(),
             "owner-current".to_owned(),
-            Some(exited),
+            vec![exited],
         ));
 
         assert_eq!(reason, RuntimeShutdownReason::StartupFailed);
@@ -33595,6 +34142,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: false,
             send_tool_hints: false,
@@ -34291,6 +34840,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -34353,6 +34904,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -34425,6 +34978,7 @@ mod tests {
             guild_id: Some("guild-1".to_owned()),
             parent_channel_id: Some("parent-channel".to_owned()),
             thread_id: Some("thread-channel".to_owned()),
+            reply_to_message_id: None,
             attachments: Vec::new(),
         }
         .into_message();
@@ -34625,6 +35179,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -34729,6 +35285,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -34856,6 +35414,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -34950,6 +35510,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -35028,6 +35590,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -35125,6 +35689,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -35212,6 +35778,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -35302,6 +35870,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -35416,6 +35986,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: true,
             send_progress: true,
             send_tool_hints: false,
@@ -35744,6 +36316,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -35911,6 +36485,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -35987,6 +36563,8 @@ mod tests {
                 message_tool: None,
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
+                browser_host: None,
+                websocket_runtime_turns: Arc::default(),
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_tool_hints: false,
@@ -36075,6 +36653,8 @@ mod tests {
                 message_tool: None,
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
+                browser_host: None,
+                websocket_runtime_turns: Arc::default(),
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_tool_hints: false,
@@ -36168,6 +36748,8 @@ mod tests {
                 message_tool: None,
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
+                browser_host: None,
+                websocket_runtime_turns: Arc::default(),
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_tool_hints: false,
@@ -36273,6 +36855,8 @@ mod tests {
                 message_tool: None,
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
+                browser_host: None,
+                websocket_runtime_turns: Arc::default(),
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_tool_hints: false,
@@ -36476,6 +37060,8 @@ mod tests {
                 message_tool: None,
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
+                browser_host: None,
+                websocket_runtime_turns: Arc::default(),
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_tool_hints: false,
@@ -36705,6 +37291,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -36791,6 +37379,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -36943,6 +37533,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -37039,6 +37631,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_tool_hints: false,
@@ -37628,6 +38222,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: true,
             send_progress: true,
             send_tool_hints: false,
@@ -37888,6 +38484,8 @@ mod tests {
             message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
+            browser_host: None,
+            websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: false,
             send_tool_hints: false,

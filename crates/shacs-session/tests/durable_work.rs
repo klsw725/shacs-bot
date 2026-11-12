@@ -13,7 +13,7 @@ use shacs_session::durable_work::{
     DurableWorkEnqueuer, DurableWorkPayloadStore, DurableWorkRecoveryIssueKind,
     DurableWorkRecoveryStatus, DurableWorkReplayState, ReplayWorkState, RuntimeControlRequested,
     WorkCancellation, WorkEnqueued, WorkLeased, WorkPayloadRef, WorkRequeued, WorkRetryScheduled,
-    WorkTerminal, WorkTerminalKind, MAX_DURABLE_WORK_EVENT_LOG_BYTES,
+    WorkTerminal, WorkTerminalKind, MAX_DURABLE_WORK_EVENT_LOG_BYTES, MAX_PROJECTED_WORK_IDS,
     MAX_RETAINED_RUNTIME_REQUESTS, MAX_RETAINED_TERMINAL_WORK_ITEMS,
 };
 use std::collections::BTreeMap;
@@ -172,6 +172,41 @@ fn durable_work_restores_retry_and_cancellation_without_inventing_outcomes(
     let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
     let state = replay.state.ok_or("missing cancelled replay state")?;
     assert_eq!(state.work.items["work-1"].state, ReplayWorkState::Cancelled);
+    Ok(())
+}
+
+#[test]
+fn due_work_past_the_report_cap_stays_runnable() -> Result<(), Box<dyn Error>> {
+    // Given: more due work than a report lists, under ids that sort against the enqueue order.
+    let root = tempfile::tempdir()?;
+    let event_root = root.path().join("events");
+    let mut events = DurableEventStore::open(&event_root)?;
+    let enqueue_order: Vec<String> = (0..MAX_PROJECTED_WORK_IDS + 3)
+        .rev()
+        .map(|index| format!("work-{index:04}"))
+        .collect();
+    for work_id in &enqueue_order {
+        append(&mut events, WORK_ENQUEUED, &enqueued(work_id, None)?)?;
+    }
+    let state = evaluate_durable_recovery(&event_root, root.path().join("checkpoints"))
+        .state
+        .ok_or("missing replay state")?;
+
+    // When
+    let admission = evaluate_durable_work_recovery(&state.work, root.path().join("payloads"), 100);
+
+    // Then: dispatchers get every due item, oldest first; the report keeps its cap.
+    assert_eq!(admission.runnable_work_ids, enqueue_order);
+    assert_eq!(
+        admission.due_work_ids,
+        enqueue_order[..MAX_PROJECTED_WORK_IDS]
+    );
+    let report = serde_json::to_value(&admission)?;
+    assert_eq!(
+        report["due_work_ids"].as_array().map(Vec::len),
+        Some(MAX_PROJECTED_WORK_IDS)
+    );
+    assert!(report.get("runnable_work_ids").is_none());
     Ok(())
 }
 

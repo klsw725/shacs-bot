@@ -226,11 +226,18 @@ def tcp_listeners(port):
 def viewer_facts():
     table = process_table()
     roots = sorted(str(path) for path in pathlib.Path("/tmp").glob("shacs-browser-*") if path.is_dir())
-    password_files = sorted(str(path) for path in pathlib.Path("/tmp").glob("shacs-browser-*/view-*"))
+    # Spec 050 keeps websockify's token file `view-routes` beside the password
+    # file's `view-<random>` name; it holds no secret.
+    password_files = sorted(str(path) for path in pathlib.Path("/tmp").glob("shacs-browser-*/view-*")
+                            if path.name != "view-routes")
+    routes = []
+    for path in pathlib.Path("/tmp").glob("shacs-browser-*/view-routes"):
+        routes.extend(path.read_text().splitlines())
     return {
         "processes": table,
         "roots": roots,
         "password_files": password_files,
+        "routes": routes,
         "vnc_listeners": tcp_listeners(5900),
         "web_listeners": tcp_listeners(6080),
         "allowlist": sorted(ALLOWLIST),

@@ -54,6 +54,14 @@ mod spec049_browser_runtime;
 #[cfg(unix)]
 mod spec049_browser_viewer;
 #[cfg(unix)]
+mod spec050_browser_paste;
+#[cfg(unix)]
+mod spec050_browser_reply_wait;
+#[cfg(unix)]
+mod spec050_browser_saved_login;
+#[cfg(unix)]
+mod spec050_browser_takeover;
+#[cfg(unix)]
 #[path = "spec052_data_folder_access.rs"]
 pub mod spec052_data_folder_access;
 #[path = "spec052_discord_connect.rs"]

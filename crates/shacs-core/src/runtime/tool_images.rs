@@ -57,26 +57,37 @@ fn keep_image(settings: Option<&ToolImageSettings>, part: &Value) -> Result<Stri
     let bytes = STANDARD
         .decode(data)
         .map_err(|_| "unsupported image type")?;
+    image_extension(&bytes)?;
+    let settings = settings.ok_or("no media folder")?;
+    store(&settings.media_root, &bytes)
+}
+
+/// The file extension of an image small enough to keep, told from its bytes.
+fn image_extension(bytes: &[u8]) -> Result<&'static str, &'static str> {
     if bytes.len() > 5 * 1024 * 1024 {
         return Err("image larger than 5 MiB");
     }
-    let mime = context::detect_image_mime(&bytes).ok_or("unsupported image type")?;
-    let extension = match mime {
-        "image/png" => "png",
-        "image/jpeg" => "jpg",
-        "image/gif" => "gif",
-        "image/webp" => "webp",
-        _ => return Err("unsupported image type"),
-    };
-    let settings = settings.ok_or("no media folder")?;
-    let digest = Sha256::digest(&bytes);
+    match context::detect_image_mime(bytes).ok_or("unsupported image type")? {
+        "image/png" => Ok("png"),
+        "image/jpeg" => Ok("jpg"),
+        "image/gif" => Ok("gif"),
+        "image/webp" => Ok("webp"),
+        _ => Err("unsupported image type"),
+    }
+}
+
+/// Writes one image under `media_root` and returns its `tool-results/` name.
+/// The same bytes are not written twice.
+pub(crate) fn store(media_root: &Path, bytes: &[u8]) -> Result<String, &'static str> {
+    let extension = image_extension(bytes)?;
+    let digest = Sha256::digest(bytes);
     let reference = format!("tool-results/{digest:x}.{extension}");
-    let destination = settings.media_root.join(&reference);
+    let destination = media_root.join(&reference);
     if !destination.exists() {
-        let directory = settings.media_root.join("tool-results");
+        let directory = media_root.join("tool-results");
         fs::create_dir_all(&directory).map_err(|_| "write failed")?;
         let mut temporary = NamedTempFile::new_in(directory).map_err(|_| "write failed")?;
-        temporary.write_all(&bytes).map_err(|_| "write failed")?;
+        temporary.write_all(bytes).map_err(|_| "write failed")?;
         temporary.persist(destination).map_err(|_| "write failed")?;
     }
     Ok(reference)

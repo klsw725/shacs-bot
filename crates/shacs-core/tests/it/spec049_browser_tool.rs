@@ -280,6 +280,7 @@ fn context(
         permission_interactive: interactive,
         browser_screenshots: screenshots,
         native_image_input_supported: native,
+        media_root: None,
     }))
 }
 

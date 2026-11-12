@@ -25,7 +25,8 @@ pub(crate) fn decide_auto_mode(
             PermissionPolicyReason::StaticDeny,
         );
     }
-    if capabilities.is_empty() {
+    let handoff = input.action.browser_handoff();
+    if capabilities.is_empty() && !handoff {
         return if input.action.tool_name == "ask_user" {
             decided(
                 PermissionPolicyDecisionKind::Allow,
@@ -55,6 +56,9 @@ pub(crate) fn decide_auto_mode(
     }
     if input.remembered_store_unavailable {
         return store_unavailable_decision(input);
+    }
+    if handoff {
+        return decide_browser_handoff(input, materials);
     }
     if let Some(denied) = unattended_browser_act_denial(input) {
         return denied;
@@ -125,6 +129,37 @@ pub(crate) fn decide_auto_mode(
         );
     }
     classifier_row(input, materials, interactive)
+}
+
+/// `handoff` in auto mode (Spec 050 PRD 010 scope 10): refused when nobody
+/// can answer, asked when the user's ask rule matches, otherwise allowed like
+/// a question to the user. It never reaches the classifier.
+fn decide_browser_handoff(
+    input: &PermissionPolicyInput,
+    materials: &PermissionMaterials,
+) -> PermissionPolicyDecision {
+    if !input.interactive {
+        return decided(
+            PermissionPolicyDecisionKind::Deny,
+            PermissionPolicyReason::ModeBaselineDeny,
+        );
+    }
+    if materials.ask_rule.is_some() {
+        return if materials.this_call_approved {
+            approved(
+                input
+                    .approval
+                    .as_ref()
+                    .and_then(|approval| approval.approval_ref.clone()),
+            )
+        } else {
+            ask_or_deny(input.interactive, PermissionPolicyReason::UserRuleAsk)
+        };
+    }
+    decided(
+        PermissionPolicyDecisionKind::Allow,
+        PermissionPolicyReason::LocalUserInteraction,
+    )
 }
 
 /// Row 16 (Spec 048 PRD 020 scope 1): the classifier's allow runs the call.
@@ -244,6 +279,12 @@ fn denied_by_user(
         return Some(decided(
             PermissionPolicyDecisionKind::Deny,
             PermissionPolicyReason::SecretFileWrite,
+        ));
+    }
+    if materials.browser_lock_write {
+        return Some(decided(
+            PermissionPolicyDecisionKind::Deny,
+            PermissionPolicyReason::BrowserLockWrite,
         ));
     }
     if materials.deny_rule.is_some() {

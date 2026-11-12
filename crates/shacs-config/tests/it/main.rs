@@ -21,3 +21,4 @@ pub mod spec048_env_file;
 #[path = "spec048_secrets_migration.rs"]
 pub mod spec048_secrets_migration;
 mod spec049_browser_config;
+mod spec050_browser_config;

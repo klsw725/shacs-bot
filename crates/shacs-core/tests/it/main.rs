@@ -10,6 +10,10 @@ mod spec049_browser_host;
 mod spec049_browser_permissions;
 mod spec049_browser_tool;
 mod spec049_tool_images;
+mod spec050_conversational_choice;
+mod spec050_handoff;
+mod spec050_login_profile_secret;
+mod spec050_runnable_work;
 
 #[path = "containment_external.rs"]
 pub mod containment_external;

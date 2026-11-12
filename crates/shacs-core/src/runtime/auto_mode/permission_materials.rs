@@ -42,6 +42,10 @@ pub struct PermissionMaterials {
     pub this_call_approved: bool,
     #[serde(default)]
     pub secret_write: bool,
+    /// Writes one of the browser's lock files, or replaces the folder that
+    /// holds them (Spec 050 PRD 020 scope 6).
+    #[serde(default)]
+    pub browser_lock_write: bool,
     /// Writes a marker file only the user changes in auto mode, or replaces
     /// the folder that holds them (Spec 048 PRD 050 scope 8).
     #[serde(default)]
@@ -190,6 +194,12 @@ pub(crate) fn permission_materials(input: MaterialsInput<'_>) -> PermissionMater
         secret_name: secret_path.or(text_name),
         this_call_approved: false,
         secret_write: writes.iter().any(|pair| secrets.contains(&pair.requested)),
+        browser_lock_write: browser_lock_write(
+            environment,
+            &writes,
+            &glob_writes,
+            subject.command.as_ref(),
+        ),
         user_only_write: user_only_write(
             environment,
             &writes,
@@ -256,6 +266,30 @@ fn pairs(words: &[PathWord]) -> Vec<PathPair> {
         .iter()
         .flat_map(|word| word.paths.iter().cloned().map(pair))
         .collect()
+}
+
+/// A write of a browser lock file or of the folder that holds them, by its
+/// path, by a glob that may match it, or by code text that names a lock
+/// file.
+fn browser_lock_write(
+    environment: &PermissionEnvironment,
+    writes: &[PathPair],
+    glob_writes: &[PathBuf],
+    command: Option<&CommandSubject>,
+) -> bool {
+    let locks = &environment.browser_lock_paths;
+    let working = std::slice::from_ref(&environment.workspace);
+    writes.iter().any(|pair| locks.written_by(&pair.requested))
+        || glob_writes
+            .iter()
+            .any(|pattern| locks.pattern_may_write(pattern))
+        || command.is_some_and(|command| {
+            command
+                .text_regions
+                .iter()
+                .chain(&command.unanalyzed_text)
+                .any(|text| locks.named_in(text, working))
+        })
 }
 
 /// A write of a marker only the user changes, by its path, by a glob that

@@ -50,6 +50,8 @@ pub(super) fn adapter(
         message_tool: None,
         _mcp_runtime: None,
         _mcp_reports: Vec::new(),
+        browser_host: None,
+        websocket_runtime_turns: Arc::default(),
         allow_side_effect_tools: true,
         send_progress: true,
         send_tool_hints: false,

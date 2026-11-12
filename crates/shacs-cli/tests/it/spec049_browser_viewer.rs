@@ -10,7 +10,7 @@ use shacs_cli::browser::{
     self, BrowserChild, BrowserChildKind, BrowserChildSpec, BrowserEnvironment,
     BrowserLifecycleFactory, BrowserOwnerBinding, BrowserProcessRunner, BrowserSnapshotDestination,
     BrowserState, BrowserStatus, BrowserViewPasswordProblem, BrowserViewState,
-    BrowserViewerFactory, DevToolsPeer, ManagedBrowserHost, ViewerListener,
+    BrowserViewerFactory, DevToolsPeer, ManagedBrowserHost, ViewerListenAddress, ViewerListener,
 };
 use shacs_cli::{
     RuntimeOwnerProcessEvidence, RuntimeOwnershipMarker, RuntimeOwnershipState,
@@ -78,6 +78,8 @@ struct ViewerFacts {
     foreign_after_spawn: bool,
     /// The fake pid of the spawned x11vnc while it listens.
     x11vnc_pid: Option<u32>,
+    /// The fake pid of the spawned websockify while it listens on 6080.
+    websockify_pid: Option<u32>,
     spawns: Vec<BrowserChildSpec>,
     /// What the fake x11vnc read: content, file mode, parent folder mode.
     read_files: Vec<(String, u32, u32)>,
@@ -113,6 +115,9 @@ impl BrowserChild for ViewerChild {
             if facts.x11vnc_pid == Some(self.pid) {
                 facts.x11vnc_pid = None;
             }
+            if facts.websockify_pid == Some(self.pid) {
+                facts.websockify_pid = None;
+            }
         }
     }
     fn take_devtools(&mut self) -> Result<Box<dyn DevToolsPeer>, BrowserError> {
@@ -133,9 +138,22 @@ impl BrowserProcessRunner for ViewerRunner {
     fn viewer_available(&self) -> bool {
         !self.facts.lock().expect("viewer facts").not_installed
     }
-    fn viewer_listener(&self, port: u16, owner: Option<u32>) -> ViewerListener {
+    fn viewer_listener(
+        &self,
+        address: ViewerListenAddress,
+        port: u16,
+        owner: Option<u32>,
+    ) -> ViewerListener {
         let facts = self.facts.lock().expect("viewer facts");
-        if port != browser::VNC_PORT {
+        if (address, port) == (ViewerListenAddress::Any, browser::VIEWER_PORT) {
+            // websockify listens on every address from its spawn to its stop.
+            return match facts.websockify_pid {
+                None => ViewerListener::Absent,
+                Some(pid) if owner == Some(pid) => ViewerListener::OwnedByChild,
+                Some(_) => ViewerListener::Foreign,
+            };
+        }
+        if (address, port) != (ViewerListenAddress::Loopback, browser::VNC_PORT) {
             return ViewerListener::Absent;
         }
         if facts.port_occupied {
@@ -173,6 +191,7 @@ impl BrowserProcessRunner for ViewerRunner {
             if facts.fail_websockify {
                 return Err(BrowserError::Unavailable);
             }
+            facts.websockify_pid = Some(pid);
             return Ok(Box::new(ViewerChild {
                 program: spec.program.clone(),
                 pid,
@@ -223,6 +242,7 @@ fn view(enable: bool, password: &str) -> BrowserViewConfig {
     BrowserViewConfig {
         enable,
         password: password.to_owned(),
+        url: String::new(),
     }
 }
 
@@ -325,7 +345,10 @@ fn password_files(root: &Path) -> Vec<PathBuf> {
                 .filter(|path| {
                     path.file_name()
                         .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with("view-"))
+                        // `view-routes` holds websockify's targets, not a password.
+                        .is_some_and(|name| {
+                            name.starts_with("view-") && name != browser::VIEW_ROUTES
+                        })
                 })
                 .collect()
         })
@@ -636,7 +659,7 @@ fn viewer_password_gate_does_not_block_browser() -> Result<(), Box<dyn Error>> {
     assert_eq!(status.view.state, BrowserViewState::Open);
     assert_eq!(
         status.view.url.as_deref(),
-        Some("http://127.0.0.1:6080/vnc.html")
+        Some("http://127.0.0.1:6080/shacs-view.html")
     );
     {
         let viewer = harness.viewer.lock().expect("viewer facts");
@@ -688,7 +711,10 @@ fn viewer_arguments_and_password_file_cleanup() -> Result<(), Box<dyn Error>> {
     let open = participant.view();
     assert_eq!(open.state, BrowserViewState::Open);
     assert_eq!(open.reason, None);
-    assert_eq!(open.url.as_deref(), Some("http://127.0.0.1:6081/vnc.html"));
+    assert_eq!(
+        open.url.as_deref(),
+        Some("http://127.0.0.1:6081/shacs-view.html")
+    );
     {
         let viewer = runner_ok.facts.lock().expect("viewer facts");
         assert_eq!(
@@ -736,10 +762,20 @@ fn viewer_arguments_and_password_file_cleanup() -> Result<(), Box<dyn Error>> {
                 || argument == "-http"
                 || argument == "-ac")
         );
+        // Spec 050 PRD 010: no fixed target; each connection's token is
+        // looked up in the generation's route file after the Origin check.
+        let routes = environment.root().join(browser::VIEW_ROUTES);
         assert_eq!(
             viewer.spawns[1].arguments,
-            ["--web=/usr/share/novnc", "0.0.0.0:6080", "127.0.0.1:5900"]
+            [
+                "--web=/usr/share/novnc",
+                "--token-plugin=TokenFile",
+                &format!("--token-source={}", routes.to_string_lossy()),
+                "--auth-plugin=shacs_view_auth.SameOrigin",
+                "0.0.0.0:6080",
+            ]
         );
+        assert_eq!(fs::read_to_string(&routes)?, "view: 127.0.0.1:5900\n");
         assert_eq!(viewer.read_files, [(format!("{SECRET}\n"), 0o600, 0o700)]);
         assert!(!Path::new(password_file).exists());
         assert!(password_files(environment.root()).is_empty());
@@ -1173,7 +1209,7 @@ fn viewer_lifecycle_and_owner_inspect() -> Result<(), Box<dyn Error>> {
     assert_eq!(written["status"]["view"]["state"], "open");
     assert_eq!(
         written["status"]["view"]["url"],
-        "http://127.0.0.1:6081/vnc.html"
+        "http://127.0.0.1:6081/shacs-view.html"
     );
     assert_no_secret("state file", &written.to_string());
     let read = |ownership: &RuntimeOwnershipStatus, now| {
@@ -1197,7 +1233,7 @@ fn viewer_lifecycle_and_owner_inspect() -> Result<(), Box<dyn Error>> {
     assert_eq!(observed.view.state, BrowserViewState::Open);
     assert_eq!(
         observed.view.url.as_deref(),
-        Some("http://127.0.0.1:6081/vnc.html")
+        Some("http://127.0.0.1:6081/shacs-view.html")
     );
     let mut previous = ownership.clone();
     previous.marker.as_mut().ok_or("marker")?.owner_id = "owner-b".to_owned();

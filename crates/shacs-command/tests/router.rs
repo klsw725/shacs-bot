@@ -1,8 +1,8 @@
 use shacs_command::{
     build_help_text, is_builtin_command, is_builtin_command_name, normalize_channel_command,
-    parse_loop_command, parse_loop_command_route, CommandId, CommandKind, CommandRouter,
-    GoalCommandArgs, HistoryCommandArgs, LoopCommand, PermissionCommandArgs, PluginCommandRouter,
-    PluginCommandSpec, SetupHintSwitch, WorkCommandArgs,
+    parse_loop_command, parse_loop_command_route, BrowserCommandArgs, CommandId, CommandKind,
+    CommandRouter, GoalCommandArgs, HistoryCommandArgs, LoopCommand, PermissionCommandArgs,
+    PluginCommandRouter, PluginCommandSpec, SetupHintSwitch, WorkCommandArgs,
 };
 use std::error::Error;
 
@@ -283,6 +283,97 @@ fn builtin_command_detection_and_help_cover_registered_commands() {
     }
     assert!(help.contains("subsequent turns"));
     assert!(!help.contains("requires restart"));
+}
+
+#[test]
+fn browser_command_routes_by_prefix_and_parses_arguments() -> Result<(), Box<dyn Error>> {
+    let router = CommandRouter::builtin();
+
+    let prefix = router
+        .dispatch("  /Browser Close  ")
+        .ok_or("missing browser prefix")?;
+    assert_eq!(prefix.id, CommandId::Browser);
+    assert_eq!(prefix.kind, CommandKind::Prefix);
+    assert_eq!(prefix.matched, "/browser");
+    assert_eq!(prefix.args, "Close");
+
+    let bare = router.dispatch("/browser").ok_or("missing bare browser")?;
+    assert_eq!(bare.id, CommandId::Browser);
+    assert_eq!(bare.kind, CommandKind::Exact);
+
+    for (content, args) in [
+        ("/browser close", BrowserCommandArgs::Close),
+        ("/browser status", BrowserCommandArgs::Status),
+        ("/BROWSER  STATUS ", BrowserCommandArgs::Status),
+        ("/browser", BrowserCommandArgs::Invalid),
+        ("/browser open", BrowserCommandArgs::Invalid),
+        ("/browser close now", BrowserCommandArgs::Invalid),
+        ("/browser takeover", BrowserCommandArgs::Takeover),
+        ("/Browser  TakeOver ", BrowserCommandArgs::Takeover),
+        ("/browser takeover now", BrowserCommandArgs::Invalid),
+        (
+            "/browser return",
+            BrowserCommandArgs::Return { label: None },
+        ),
+        (
+            "/browser RETURN ",
+            BrowserCommandArgs::Return { label: None },
+        ),
+        (
+            "/browser return 9f2c-3",
+            BrowserCommandArgs::Return {
+                label: Some("9f2c-3".to_owned()),
+            },
+        ),
+        (
+            "/browser return  9F2C-12",
+            BrowserCommandArgs::Return {
+                label: Some("9f2c-12".to_owned()),
+            },
+        ),
+        // A label is four hex digits, `-` and a number; anything else is
+        // answered with the usage text instead of guessing an episode.
+        ("/browser return 9f2c", BrowserCommandArgs::Invalid),
+        ("/browser return 9f2c-", BrowserCommandArgs::Invalid),
+        ("/browser return 9f2-3", BrowserCommandArgs::Invalid),
+        ("/browser return 9f2cc-3", BrowserCommandArgs::Invalid),
+        ("/browser return 9g2c-3", BrowserCommandArgs::Invalid),
+        ("/browser return 9f2c-x", BrowserCommandArgs::Invalid),
+        ("/browser return 9f2c-03", BrowserCommandArgs::Invalid),
+        ("/browser return 9f2c-3 now", BrowserCommandArgs::Invalid),
+        ("/browser returns", BrowserCommandArgs::Invalid),
+    ] {
+        assert_eq!(
+            parse_loop_command(content),
+            Some(LoopCommand::Browser(args)),
+            "{content}"
+        );
+    }
+    assert_eq!(parse_loop_command("/browsers"), None);
+    assert!(is_builtin_command("/browser close"));
+    assert!(build_help_text().contains("/browser status|takeover|return [label]|close"));
+    Ok(())
+}
+
+#[test]
+fn only_browser_command_is_session_free() {
+    let router = CommandRouter::builtin();
+
+    for content in [
+        "/browser",
+        "/browser close",
+        "  /BROWSER status  ",
+        "/browser takeover",
+        "/browser return",
+        "/browser return 9f2c-3",
+    ] {
+        assert!(router.is_session_free(content), "{content}");
+    }
+    for content in ["/browsers", "/stop", "/status", "/new", "브라우저 닫아", ""] {
+        assert!(!router.is_session_free(content), "{content}");
+    }
+    assert!(!router.is_priority("/browser"));
+    assert!(!router.is_priority("/browser close"));
 }
 
 #[test]

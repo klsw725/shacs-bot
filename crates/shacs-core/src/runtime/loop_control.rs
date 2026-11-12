@@ -51,23 +51,25 @@ impl SessionTurnLock {
         consume_pending_cancellation: bool,
     ) -> Result<SessionTurnGuard, SessionTurnAcquireError> {
         let mut state = lock(&self.state);
-        let pending_cancellation = if consume_pending_cancellation {
-            match state.reserved_sessions.get(&session_key) {
-                Some(reservation) if reservation.cancelled => {
-                    state.reserved_sessions.remove(&session_key);
-                    return Err(SessionTurnAcquireError::Cancelled { session_key });
-                }
-                Some(reservation) if reservation.owner == Some(std::thread::current().id()) => {
-                    state.reserved_sessions.remove(&session_key);
-                    false
-                }
-                Some(_) => {
-                    return Err(SessionTurnAcquireError::AlreadyActive { session_key });
-                }
-                None => state.pending_cancellations.remove(&session_key),
+        // A reservation belongs to the thread it is bound to. Any other caller is refused and
+        // leaves it, and its cancellation, for that thread to consume.
+        let reserved_cancelled = match state.reserved_sessions.get(&session_key) {
+            Some(reservation) if reservation.owner != Some(std::thread::current().id()) => {
+                return Err(SessionTurnAcquireError::AlreadyActive { session_key });
             }
-        } else {
+            Some(reservation) => Some(reservation.cancelled),
+            None => None,
+        };
+        let pending_cancellation = if !consume_pending_cancellation {
             false
+        } else if let Some(cancelled) = reserved_cancelled {
+            state.reserved_sessions.remove(&session_key);
+            if cancelled {
+                return Err(SessionTurnAcquireError::Cancelled { session_key });
+            }
+            false
+        } else {
+            state.pending_cancellations.remove(&session_key)
         };
         if state.active_sessions.contains_key(&session_key) {
             return Err(SessionTurnAcquireError::AlreadyActive { session_key });
@@ -110,24 +112,61 @@ impl SessionTurnLock {
             || state.reserved_sessions.contains_key(session_key)
     }
 
+    /// A turn another thread has claimed keeps its claim: the reservation returned here then
+    /// holds nothing, and its turn is refused at `acquire` like any second turn.
     pub fn reserve(&self, session_key: impl Into<String>) -> SessionTurnReservation {
         let session_key = session_key.into();
         let mut state = lock(&self.state);
+        state.next_reservation_id = state.next_reservation_id.wrapping_add(1);
+        let id = state.next_reservation_id;
+        let this_thread = std::thread::current().id();
+        let claimed_elsewhere = state
+            .reserved_sessions
+            .get(&session_key)
+            .is_some_and(|reservation| reservation.owner.is_some_and(|owner| owner != this_thread));
+        if !claimed_elsewhere {
+            state.reserved_sessions.insert(
+                session_key.clone(),
+                ReservedSessionTurn {
+                    id,
+                    owner: None,
+                    cancelled: false,
+                },
+            );
+        }
+        SessionTurnReservation {
+            state: self.state.clone(),
+            session_key,
+            id,
+        }
+    }
+
+    /// Claims the session for a turn this thread is about to start. `None` while a turn runs
+    /// there or another is already claimed, so the caller can come back later instead of
+    /// being refused at `acquire`.
+    pub fn try_reserve(&self, session_key: impl Into<String>) -> Option<SessionTurnReservation> {
+        let session_key = session_key.into();
+        let mut state = lock(&self.state);
+        if state.active_sessions.contains_key(&session_key)
+            || state.reserved_sessions.contains_key(&session_key)
+        {
+            return None;
+        }
         state.next_reservation_id = state.next_reservation_id.wrapping_add(1);
         let id = state.next_reservation_id;
         state.reserved_sessions.insert(
             session_key.clone(),
             ReservedSessionTurn {
                 id,
-                owner: None,
+                owner: Some(std::thread::current().id()),
                 cancelled: false,
             },
         );
-        SessionTurnReservation {
+        Some(SessionTurnReservation {
             state: self.state.clone(),
             session_key,
             id,
-        }
+        })
     }
 
     pub fn cancellation_token(&self, session_key: &str) -> Option<CancellationToken> {
@@ -176,7 +215,7 @@ impl SessionTurnReservation {
     pub fn bind_to_current_thread(&self) {
         let mut state = lock(&self.state);
         if let Some(reservation) = state.reserved_sessions.get_mut(&self.session_key) {
-            if reservation.id == self.id && !reservation.cancelled {
+            if reservation.id == self.id {
                 reservation.owner = Some(std::thread::current().id());
             }
         }

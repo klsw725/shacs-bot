@@ -22,6 +22,7 @@ pub enum CommandId {
     Dream,
     DreamLog,
     DreamRestore,
+    Browser,
     Help,
 }
 
@@ -41,6 +42,7 @@ impl CommandId {
             Self::Dream => "/dream",
             Self::DreamLog => "/dream-log",
             Self::DreamRestore => "/dream-restore",
+            Self::Browser => "/browser",
             Self::Help => "/help",
         }
     }
@@ -177,6 +179,7 @@ impl CommandRouter {
             CommandId::Dream,
             CommandId::DreamLog,
             CommandId::DreamRestore,
+            CommandId::Browser,
             CommandId::Help,
         ] {
             router.exact(command);
@@ -190,6 +193,7 @@ impl CommandRouter {
             CommandId::Permission,
             CommandId::DreamLog,
             CommandId::DreamRestore,
+            CommandId::Browser,
         ] {
             router.prefix(command);
         }
@@ -217,6 +221,18 @@ impl CommandRouter {
 
     pub fn is_priority(&self, text: &str) -> bool {
         self.dispatch_priority(text).is_some()
+    }
+
+    /// A command that reads and writes no session state, so it waits for no
+    /// session turn, queue or reservation and cancels nothing (Spec 050 PRD
+    /// 000 scope 8). Only `/browser` is one.
+    pub fn is_session_free(&self, text: &str) -> bool {
+        let match_key = text.trim().to_ascii_lowercase();
+        let canonical = CommandId::Browser.canonical();
+        match_key == canonical
+            || match_key
+                .strip_prefix(canonical)
+                .is_some_and(|rest| rest.starts_with(' '))
     }
 
     pub fn is_dispatchable_command(&self, text: &str) -> bool {
@@ -332,7 +348,23 @@ pub enum LoopCommand {
     Dream,
     DreamLog { sha: Option<String> },
     DreamRestore { sha: Option<String> },
+    Browser(BrowserCommandArgs),
     Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserCommandArgs {
+    Close,
+    Status,
+    /// Hand the browser to the user (Spec 050 PRD 010 scope 11).
+    Takeover,
+    /// Give the browser back. `label` is the episode label (`9f2c-3`) when
+    /// the user named one.
+    Return {
+        label: Option<String>,
+    },
+    Invalid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -427,9 +459,46 @@ fn loop_command_from_parsed(parsed: ParsedCommand) -> Option<RoutedLoopCommand> 
         CommandId::DreamRestore => Some(LoopCommand::DreamRestore {
             sha: parse_optional_sha(&parsed.args),
         }),
+        CommandId::Browser => Some(LoopCommand::Browser(parse_browser_args(&parsed.args))),
         CommandId::Help => Some(LoopCommand::Help),
     }?;
     Some(RoutedLoopCommand { command, parsed })
+}
+
+fn parse_browser_args(args: &str) -> BrowserCommandArgs {
+    let rest = args.trim();
+    if rest.eq_ignore_ascii_case("close") {
+        BrowserCommandArgs::Close
+    } else if rest.eq_ignore_ascii_case("status") {
+        BrowserCommandArgs::Status
+    } else if rest.eq_ignore_ascii_case("takeover") {
+        BrowserCommandArgs::Takeover
+    } else if rest.eq_ignore_ascii_case("return") {
+        BrowserCommandArgs::Return { label: None }
+    } else {
+        let mut words = rest.split_whitespace();
+        match (words.next(), words.next(), words.next()) {
+            (Some(verb), Some(label), None) if verb.eq_ignore_ascii_case("return") => {
+                browser_episode_label(label).map_or(BrowserCommandArgs::Invalid, |label| {
+                    BrowserCommandArgs::Return { label: Some(label) }
+                })
+            }
+            _ => BrowserCommandArgs::Invalid,
+        }
+    }
+}
+
+/// An episode label is four hex digits, `-` and a decimal number without a
+/// leading zero (`9f2c-3`). Returned in lower case.
+fn browser_episode_label(text: &str) -> Option<String> {
+    let (nonce, number) = text.split_once('-')?;
+    let shaped = nonce.len() == 4
+        && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !number.is_empty()
+        && number.len() <= 20
+        && number.bytes().all(|byte| byte.is_ascii_digit())
+        && !number.starts_with('0');
+    shaped.then(|| text.to_ascii_lowercase())
 }
 
 fn parse_goal_args(args: &str) -> GoalCommandArgs {
@@ -658,6 +727,7 @@ pub fn build_help_text() -> String {
         "/dream — Manually trigger Dream consolidation",
         "/dream-log — Show what the last Dream changed",
         "/dream-restore — Revert memory to a previous state",
+        "/browser status|takeover|return [label]|close — Show the browser's state, take it over to use it yourself, give it back, or close it now",
         "/help — Show available commands",
     ]
     .join("\n")
@@ -688,6 +758,7 @@ fn command_from_exact(raw: &str) -> Option<CommandId> {
         "/dream" => Some(CommandId::Dream),
         "/dream-log" => Some(CommandId::DreamLog),
         "/dream-restore" => Some(CommandId::DreamRestore),
+        "/browser" => Some(CommandId::Browser),
         "/help" => Some(CommandId::Help),
         _ => None,
     }

@@ -34,14 +34,27 @@ pub struct InboundMessage {
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub session_key_override: Option<String>,
     #[serde(skip)]
-    owner_accepted_automation_result: Option<OwnerAcceptedAutomationResult>,
+    owner_accepted_automation_result: Option<Box<OwnerAcceptedAutomationResult>>,
     #[serde(skip)]
     owner_accepted_notification: Option<Box<OwnerAcceptedNotification>>,
+    #[serde(skip)]
+    owner_accepted_browser_resume: Option<Box<OwnerAcceptedBrowserResume>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OwnerAcceptedNotification {
     correlation_id: String,
+}
+
+/// Runtime-only mark on the inbound that continues a paused browser
+/// `handoff` call after its takeover ended some other way than an answer
+/// (Spec 050 PRD 010 scope 9). It is never serialized, so a channel adapter,
+/// input from outside the bus and a stored payload cannot produce it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerAcceptedBrowserResume {
+    pub episode: String,
+    pub tool_call_id: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +80,7 @@ impl InboundMessage {
             session_key_override: None,
             owner_accepted_automation_result: None,
             owner_accepted_notification: None,
+            owner_accepted_browser_resume: None,
         }
     }
 
@@ -95,12 +109,12 @@ impl InboundMessage {
         mut self,
         result: OwnerAcceptedAutomationResult,
     ) -> Self {
-        self.owner_accepted_automation_result = Some(result);
+        self.owner_accepted_automation_result = Some(Box::new(result));
         self
     }
 
     pub fn owner_accepted_automation_result(&self) -> Option<&OwnerAcceptedAutomationResult> {
-        self.owner_accepted_automation_result.as_ref()
+        self.owner_accepted_automation_result.as_deref()
     }
 
     pub fn with_owner_accepted_notification(mut self, correlation_id: String) -> Self {
@@ -113,6 +127,18 @@ impl InboundMessage {
         self.owner_accepted_notification
             .as_ref()
             .map(|origin| origin.correlation_id.as_str())
+    }
+
+    pub fn with_owner_accepted_browser_resume(
+        mut self,
+        resume: OwnerAcceptedBrowserResume,
+    ) -> Self {
+        self.owner_accepted_browser_resume = Some(Box::new(resume));
+        self
+    }
+
+    pub fn owner_accepted_browser_resume(&self) -> Option<&OwnerAcceptedBrowserResume> {
+        self.owner_accepted_browser_resume.as_deref()
     }
 }
 
@@ -1193,6 +1219,9 @@ pub struct DiscordInbound {
     pub parent_channel_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+    /// The message this one replies to (`message_reference.message_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_message_id: Option<String>,
     #[serde(default)]
     pub attachments: Vec<String>,
 }
@@ -1208,6 +1237,11 @@ impl DiscordInbound {
             self.parent_channel_id.clone(),
         );
         insert_optional(&mut metadata, "thread_id", self.thread_id.clone());
+        insert_optional(
+            &mut metadata,
+            "reply_to_message_id",
+            self.reply_to_message_id,
+        );
         let mut message = InboundMessage::new(
             DISCORD_CHANNEL,
             self.sender_id,
@@ -1238,6 +1272,9 @@ pub struct TelegramInbound {
     pub username: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_thread_id: Option<String>,
+    /// The message this one replies to (`reply_to_message.message_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_message_id: Option<String>,
     #[serde(default)]
     pub media: Vec<String>,
 }
@@ -1251,6 +1288,11 @@ impl TelegramInbound {
             &mut metadata,
             "message_thread_id",
             self.message_thread_id.clone(),
+        );
+        insert_optional(
+            &mut metadata,
+            "reply_to_message_id",
+            self.reply_to_message_id,
         );
         let mut message = InboundMessage::new(
             TELEGRAM_CHANNEL,
@@ -1753,6 +1795,7 @@ pub fn route_channel_command(request: ChannelCommandRequest) -> ChannelCommandAc
         session_key_override: request.session_key_override,
         owner_accepted_automation_result: None,
         owner_accepted_notification: None,
+        owner_accepted_browser_resume: None,
     };
     ChannelCommandAction::Forward(inbound)
 }

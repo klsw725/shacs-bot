@@ -13,6 +13,15 @@ pub struct BrowserConfig {
     pub startup_timeout_seconds: u64,
     pub idle_timeout_seconds: u64,
     pub page_timeout_seconds: u64,
+    /// How long the browser stays open for the user's reply after their turn
+    /// ends (Spec 050 PRD 000 scope 5).
+    pub reply_wait_minutes: u64,
+    /// How long one takeover lasts before the browser is taken back
+    /// (Spec 050 PRD 010 scope 7).
+    pub takeover_minutes: u64,
+    /// Keep cookies and login state in `<data>/browser/profile` between
+    /// browser runs (Spec 050 PRD 020 scope 1).
+    pub persist_login: bool,
     pub view: BrowserViewConfig,
 }
 
@@ -24,6 +33,9 @@ impl Default for BrowserConfig {
             startup_timeout_seconds: 20,
             idle_timeout_seconds: 300,
             page_timeout_seconds: 30,
+            reply_wait_minutes: 30,
+            takeover_minutes: 15,
+            persist_login: false,
             view: BrowserViewConfig::default(),
         }
     }
@@ -45,6 +57,63 @@ pub struct BrowserViewConfig {
     pub enable: bool,
     #[serde(default)]
     pub password: String,
+    /// Base address shown to the user instead of the loopback default
+    /// (Spec 050 PRD 010 scope 12). Display only: it opens no port and is
+    /// never passed to a process. A value [`Self::base_url`] rejects is
+    /// ignored rather than a config error.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+}
+
+impl BrowserViewConfig {
+    /// The configured base address without a trailing `/`, when it has the
+    /// accepted shape: `http://` or `https://`, a host, an optional port and
+    /// an optional trailing `/`.
+    pub fn base_url(&self) -> Option<&str> {
+        let url = self.url.as_str();
+        if url.is_empty() || url.len() > 200 || !url.is_ascii() {
+            return None;
+        }
+        let trimmed = url.strip_suffix('/').unwrap_or(url);
+        let authority = trimmed
+            .strip_prefix("http://")
+            .or_else(|| trimmed.strip_prefix("https://"))?;
+        let (host, port) = match authority.strip_prefix('[') {
+            Some(bracketed) => {
+                let (address, rest) = bracketed.split_once(']')?;
+                let literal = !address.is_empty()
+                    && address
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() || byte == b':');
+                match (literal, rest.strip_prefix(':')) {
+                    (false, _) => return None,
+                    (true, Some(port)) => ("v6", Some(port)),
+                    (true, None) if rest.is_empty() => ("v6", None),
+                    (true, None) => return None,
+                }
+            }
+            None => match authority.rsplit_once(':') {
+                Some((host, port)) => (host, Some(port)),
+                None => (authority, None),
+            },
+        };
+        let host_ok = !host.is_empty()
+            && host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-');
+        let port_ok = port.is_none_or(|port| {
+            !port.is_empty()
+                && port.len() <= 5
+                && port.bytes().all(|byte| byte.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|port| port != 0)
+        });
+        (host_ok && port_ok).then_some(trimmed)
+    }
+
+    /// True when `url` is set but not usable, so the default address shows.
+    pub fn url_ignored(&self) -> bool {
+        !self.url.is_empty() && self.base_url().is_none()
+    }
 }
 
 impl std::fmt::Debug for BrowserViewConfig {
@@ -59,6 +128,7 @@ impl std::fmt::Debug for BrowserViewConfig {
                     "[REDACTED]"
                 },
             )
+            .field("url", &self.url)
             .finish()
     }
 }
@@ -75,6 +145,10 @@ impl<'de> Deserialize<'de> for BrowserConfig {
             startup_timeout_seconds: Option<u64>,
             idle_timeout_seconds: Option<u64>,
             page_timeout_seconds: Option<u64>,
+            reply_wait_minutes: Option<u64>,
+            takeover_minutes: Option<u64>,
+            #[serde(default)]
+            persist_login: bool,
             #[serde(default)]
             view: BrowserViewConfig,
         }
@@ -83,6 +157,7 @@ impl<'de> Deserialize<'de> for BrowserConfig {
         let config = Self {
             enable: fields.enable,
             screenshots: fields.screenshots,
+            persist_login: fields.persist_login,
             view: fields.view,
             startup_timeout_seconds: fields
                 .startup_timeout_seconds
@@ -93,10 +168,16 @@ impl<'de> Deserialize<'de> for BrowserConfig {
             page_timeout_seconds: fields
                 .page_timeout_seconds
                 .unwrap_or(defaults.page_timeout_seconds),
+            reply_wait_minutes: fields
+                .reply_wait_minutes
+                .unwrap_or(defaults.reply_wait_minutes),
+            takeover_minutes: fields.takeover_minutes.unwrap_or(defaults.takeover_minutes),
         };
         if !(5..=60).contains(&config.startup_timeout_seconds)
             || !(60..=1800).contains(&config.idle_timeout_seconds)
             || !(5..=120).contains(&config.page_timeout_seconds)
+            || !(5..=120).contains(&config.reply_wait_minutes)
+            || !(5..=60).contains(&config.takeover_minutes)
         {
             return Err(D::Error::custom(
                 "tools.browser timeout outside allowed range",

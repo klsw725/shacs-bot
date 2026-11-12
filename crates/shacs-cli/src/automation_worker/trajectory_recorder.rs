@@ -99,6 +99,13 @@ impl AutomationOwnerAdapters for RecordingAdapters<'_> {
         }
         receipt
     }
+
+    fn claim_session_turn(
+        &self,
+        session_key: &str,
+    ) -> Option<shacs_core::runtime::SessionTurnReservation> {
+        self.inner.claim_session_turn(session_key)
+    }
 }
 
 fn bounded_source(instruction: &str) -> String {

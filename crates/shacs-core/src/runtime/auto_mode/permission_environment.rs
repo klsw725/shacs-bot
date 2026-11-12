@@ -1,6 +1,7 @@
 //! What the permission decision needs to know about the user's folders and
 //! rules (Spec 048 PRD 000 scopes 4, 5, 7 and 8).
 
+use super::browser_lock_path::BrowserLockPaths;
 use super::classifier_slots::{AutoModeSlots, SlotOverrides};
 use super::critical_path::CriticalFolders;
 use super::path_pattern::PathBases;
@@ -39,6 +40,9 @@ pub struct PermissionEnvironment {
     pub user_rules: UserPermissionRules,
     pub(crate) secret_files: SecretFiles,
     pub(crate) user_only_files: UserOnlyFiles,
+    /// The browser's lock files, which no call changes in any mode (Spec
+    /// 050 PRD 020 scope 6).
+    pub(crate) browser_lock_paths: BrowserLockPaths,
     pub(crate) protected_paths: ProtectedPaths,
     pub(crate) critical_folders: CriticalFolders,
     pub(crate) home: PathBuf,
@@ -64,6 +68,7 @@ impl PermissionEnvironment {
             user_rules: UserPermissionRules::parse(input.rules, input.mcp_servers),
             secret_files: SecretFiles::new(input.data_folder, input.config_file),
             user_only_files: UserOnlyFiles::new(input.data_folder),
+            browser_lock_paths: BrowserLockPaths::new(input.data_folder),
             protected_paths: ProtectedPaths::new(ProtectedPathsInput {
                 workspace: input.workspace,
                 data_folder: input.data_folder,

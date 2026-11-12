@@ -65,7 +65,9 @@ impl DurableWorkDispatcher {
                 self.record_cancelled(item, reason)?;
                 continue;
             };
-            if !admission.due_work_ids.contains(&item.work_id) || wake.due_at_ms > runtime.now_ms {
+            if !admission.runnable_work_ids.contains(&item.work_id)
+                || wake.due_at_ms > runtime.now_ms
+            {
                 continue;
             }
             self.lease_work(item, runtime.now_ms)?;

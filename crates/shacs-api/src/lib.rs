@@ -1,6 +1,8 @@
 use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::ws::{Message as AxumWebSocketMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, RawQuery, Request, State};
+use axum::extract::{
+    ConnectInfo, DefaultBodyLimit, FromRequest, Multipart, RawQuery, Request, State,
+};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -41,6 +43,7 @@ use tokio::time::{timeout, Duration};
 
 // allow: SIZE_OK — preexisting API facade; new media behavior lives in focused media_api modules
 mod media_api;
+mod response_written;
 mod spec030_api;
 mod spec030_client;
 mod spec031_api;
@@ -52,7 +55,10 @@ mod spec035_transport;
 mod spec036_observation;
 mod spec036_work;
 mod spec042_web_watch;
+mod websocket_runtime_turns;
 pub use media_api::*;
+pub use response_written::ChatResponseWritten;
+use response_written::ConnectionWrites;
 pub use spec030_api::TRUSTED_RUNTIME_PATH;
 pub use spec030_client::{
     observe_trusted_runtime, TrustedRuntimeObservation, TrustedRuntimeProjectionSource,
@@ -65,6 +71,10 @@ pub use spec035_revised::{
 pub use spec035_tasks::{TASKS_ACTIONS_PATH, TASKS_PATH};
 pub use spec035_transport::{transport_hello_response, TRANSPORT_HELLO_PATH};
 pub use spec036_work::ENTRUSTED_WORK_SUFFIX;
+use websocket_runtime_turns::WebSocketRuntimeTurnSeat;
+pub use websocket_runtime_turns::{
+    WebSocketRuntimeTurn, WebSocketRuntimeTurnEnd, WebSocketRuntimeTurns,
+};
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const MODELS_PATH: &str = "/v1/models";
@@ -884,11 +894,11 @@ pub async fn serve_api_listener_with_timeout_and_websocket_path(
     websocket_path: &str,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    axum::serve(
+    response_written::serve_router(
         listener,
         api_router_with_timeout_and_websocket_path(adapter, timeout, websocket_path),
+        shutdown,
     )
-    .with_graceful_shutdown(shutdown)
     .await
 }
 
@@ -918,14 +928,14 @@ pub async fn serve_api_with_timeout_and_local_mutations(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(
+    response_written::serve_router(
         listener,
         api_router_with_state_and_websocket_path(
             ApiRouterState::with_timeout(adapter, timeout).with_local_mutations(),
             WEBSOCKET_PATH,
         ),
+        shutdown,
     )
-    .with_graceful_shutdown(shutdown)
     .await
 }
 
@@ -954,11 +964,11 @@ pub async fn serve_websocket_listener_with_timeout_and_path(
     websocket_path: &str,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    axum::serve(
+    response_written::serve_router(
         listener,
         websocket_router_with_timeout_and_path(adapter, timeout, websocket_path),
+        shutdown,
     )
-    .with_graceful_shutdown(shutdown)
     .await
 }
 
@@ -988,11 +998,11 @@ pub async fn serve_web_ui_listener_with_timeout_and_websocket_path(
     assets_dir: impl Into<PathBuf>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    axum::serve(
+    response_written::serve_router(
         listener,
         web_ui_router_with_timeout_and_websocket_path(adapter, timeout, websocket_path, assets_dir),
+        shutdown,
     )
-    .with_graceful_shutdown(shutdown)
     .await
 }
 
@@ -1430,6 +1440,10 @@ pub fn handle_chat_completions(
 }
 
 async fn axum_dispatch(State(state): State<ApiRouterState>, request: Request) -> Response {
+    let writes = request
+        .extensions()
+        .get::<ConnectInfo<ConnectionWrites>>()
+        .map(|ConnectInfo(writes)| writes.clone());
     let method = api_method_from_axum(request.method());
     let path = request.uri().path().to_owned();
     if let Err(error) = validate_local_http_headers(request.headers()) {
@@ -1444,7 +1458,7 @@ async fn axum_dispatch(State(state): State<ApiRouterState>, request: Request) ->
         && path == CHAT_COMPLETIONS_PATH
         && is_multipart_header_map(request.headers())
     {
-        return handle_multipart_chat_axum(state, request).await;
+        return handle_multipart_chat_axum(state, request, writes).await;
     }
     if method == ApiMethod::Post && path == CHAT_COMPLETIONS_PATH {
         if let Err(error) = validate_json_chat_content_type(request.headers()) {
@@ -1457,7 +1471,7 @@ async fn axum_dispatch(State(state): State<ApiRouterState>, request: Request) ->
         Err(error) => return axum_response_from_api(error_response(error)),
     };
     if api_request.method == ApiMethod::Post && api_request.path == CHAT_COMPLETIONS_PATH {
-        return handle_json_chat_axum(state, api_request).await;
+        return handle_json_chat_axum(state, api_request, writes).await;
     }
     let adapter = state.adapter.clone();
     let response =
@@ -1605,6 +1619,27 @@ fn spec035_websocket_identity(query: Option<&str>) -> Result<Option<(String, Str
     }
 }
 
+/// What a WebSocket connection does next.
+enum WebSocketWork {
+    Frame(Result<AxumWebSocketMessage, axum::Error>),
+    /// A turn the adapter starts by itself on this connection.
+    RuntimeTurn(WebSocketRuntimeTurn),
+}
+
+/// The next turn handed to the connection. A connection that takes none waits forever.
+async fn next_websocket_runtime_turn(
+    seat: Option<&mut WebSocketRuntimeTurnSeat>,
+) -> WebSocketRuntimeTurn {
+    let handed = match seat {
+        Some(seat) => seat.next().await,
+        None => None,
+    };
+    match handed {
+        Some(turn) => turn,
+        None => std::future::pending().await,
+    }
+}
+
 async fn handle_websocket_connection(
     state: ApiRouterState,
     mut socket: WebSocket,
@@ -1658,8 +1693,12 @@ async fn handle_websocket_connection(
     } else {
         None
     };
+    let mut runtime_turns = state
+        .adapter
+        .websocket_runtime_turns()
+        .map(|turns| turns.attach(&default_chat_id));
     loop {
-        let message = tokio::select! {
+        let work = tokio::select! {
             event = tasks_rx.recv(), if tasks_connection.is_some() => {
                 let Some(event) = event else {
                     tasks_connection = None;
@@ -1674,38 +1713,73 @@ async fn handle_websocket_connection(
                 }
                 continue;
             }
-            message = socket.recv() => message,
+            turn = next_websocket_runtime_turn(runtime_turns.as_mut()) => {
+                // What the client already sent goes first, its close above all: a turn
+                // must not start on a connection that is known to be gone. The turn goes
+                // back and is offered again.
+                tokio::select! {
+                    biased;
+                    message = socket.recv() => {
+                        if let Some(seat) = runtime_turns.as_ref() {
+                            seat.give_back(turn);
+                        }
+                        match message {
+                            Some(message) => WebSocketWork::Frame(message),
+                            None => return,
+                        }
+                    }
+                    () = std::future::ready(()) => WebSocketWork::RuntimeTurn(turn),
+                }
+            }
+            message = socket.recv() => match message {
+                Some(message) => WebSocketWork::Frame(message),
+                None => return,
+            },
         };
-        let Some(message) = message else {
-            return;
-        };
-        let result = match websocket_frame_from_axum(message) {
-            Ok(Some(frame)) => {
-                media_api::dispatch_websocket_frame(
+        let result = match work {
+            WebSocketWork::RuntimeTurn(turn) => {
+                let Some(seat) = runtime_turns.as_ref() else {
+                    continue;
+                };
+                media_api::dispatch_websocket_runtime_turn(
                     state.clone(),
-                    frame,
-                    client_id.clone(),
+                    turn,
                     default_chat_id.clone(),
                     &mut socket,
                     &mut reconnect_scope,
+                    seat,
                 )
                 .await
             }
-            Ok(None) => continue,
-            Err(error) => {
-                send_websocket_event(
-                    &mut socket,
-                    WebSocketServerEvent::Error {
-                        chat_id: Some(default_chat_id.clone()),
-                        detail: Some(error.message),
-                    },
-                    &default_chat_id,
-                    state.spec031_channel_observer.as_ref(),
-                    state.reconnect_tracker.clone(),
-                    &mut reconnect_scope,
-                )
-                .await
-            }
+            WebSocketWork::Frame(message) => match websocket_frame_from_axum(message) {
+                Ok(Some(frame)) => {
+                    media_api::dispatch_websocket_frame(
+                        state.clone(),
+                        frame,
+                        client_id.clone(),
+                        default_chat_id.clone(),
+                        &mut socket,
+                        &mut reconnect_scope,
+                        runtime_turns.as_ref(),
+                    )
+                    .await
+                }
+                Ok(None) => continue,
+                Err(error) => {
+                    send_websocket_event(
+                        &mut socket,
+                        WebSocketServerEvent::Error {
+                            chat_id: Some(default_chat_id.clone()),
+                            detail: Some(error.message),
+                        },
+                        &default_chat_id,
+                        state.spec031_channel_observer.as_ref(),
+                        state.reconnect_tracker.clone(),
+                        &mut reconnect_scope,
+                    )
+                    .await
+                }
+            },
         };
         if let Err(error) = result {
             let fallback = WebSocketServerEvent::Error {
@@ -2128,6 +2202,51 @@ fn axum_response_from_api(response: ApiHttpResponse) -> Response {
     axum_response
 }
 
+/// The same response as `axum_response_from_api`, and `written` runs once the connection
+/// behind `writes` flushed all of it. The body is handed over in one piece, and the wait
+/// starts at that moment.
+fn axum_response_reporting_write(
+    response: ApiHttpResponse,
+    writes: ConnectionWrites,
+    written: ChatResponseWritten,
+) -> Response {
+    let Ok(body) = serde_json::to_vec(&response.body) else {
+        return axum_response_from_api(response);
+    };
+    let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let content_type = HeaderValue::from_str(&response.content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static(JSON_CONTENT_TYPE));
+    let length = HeaderValue::from(body.len());
+    let body_stream = stream::once(async move {
+        writes.after_next_flush(written);
+        Ok::<Bytes, Infallible>(Bytes::from(body))
+    });
+    let mut axum_response = (status, Body::from_stream(body_stream)).into_response();
+    let headers = axum_response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, content_type);
+    headers.insert(header::CONTENT_LENGTH, length);
+    axum_response
+}
+
+/// Where a streamed response reports that it was written out: the worker leaves what to
+/// run in `written`, and the end of the stream hands it to the connection.
+struct SseWriteReport {
+    writes: ConnectionWrites,
+    written: Arc<StdMutex<Option<ChatResponseWritten>>>,
+}
+
+impl SseWriteReport {
+    fn stream_ended(&self) {
+        let written = match self.written.lock() {
+            Ok(mut written) => written.take(),
+            Err(_) => None,
+        };
+        if let Some(written) = written {
+            self.writes.after_next_flush(written);
+        }
+    }
+}
+
 enum SseFrame {
     OpenAi(String),
     Spec035(Value),
@@ -2187,10 +2306,11 @@ fn axum_sse_stream_response(
     rx: mpsc::Receiver<SseFrame>,
     spec031_stream: bool,
     guard: SseDropGuard,
+    report: Option<SseWriteReport>,
 ) -> Response {
     let body_stream = stream::unfold(
-        (rx, spec031_stream, guard),
-        |(mut rx, spec031_stream, mut guard)| async move {
+        (rx, spec031_stream, guard, report),
+        |(mut rx, spec031_stream, mut guard, report)| async move {
             while let Some(frame) = rx.recv().await {
                 let terminal = frame.is_terminal_openai_done();
                 if let Some(rendered) = frame.render(spec031_stream) {
@@ -2199,9 +2319,13 @@ fn axum_sse_stream_response(
                     }
                     return Some((
                         Ok::<Bytes, Infallible>(Bytes::from(rendered)),
-                        (rx, spec031_stream, guard),
+                        (rx, spec031_stream, guard, report),
                     ));
                 }
+            }
+            // Only a stream that got to its terminal frame is a whole response.
+            if let (false, Some(report)) = (guard.armed, report.as_ref()) {
+                report.stream_ended();
             }
             None
         },
@@ -2217,7 +2341,11 @@ fn axum_sse_stream_response(
     response
 }
 
-async fn handle_json_chat_axum(state: ApiRouterState, request: ApiHttpRequest) -> Response {
+async fn handle_json_chat_axum(
+    state: ApiRouterState,
+    request: ApiHttpRequest,
+    writes: Option<ConnectionWrites>,
+) -> Response {
     let Some(body) = request.body.as_ref() else {
         return axum_response_from_api(error_response(ApiError::invalid_request(
             "request body is required",
@@ -2227,10 +2355,14 @@ async fn handle_json_chat_axum(state: ApiRouterState, request: ApiHttpRequest) -
         Ok(request) => request,
         Err(error) => return axum_response_from_api(error_response(error)),
     };
-    handle_chat_request_axum(state, chat_request, Vec::new(), request.headers).await
+    handle_chat_request_axum(state, chat_request, Vec::new(), request.headers, writes).await
 }
 
-async fn handle_multipart_chat_axum(state: ApiRouterState, request: Request) -> Response {
+async fn handle_multipart_chat_axum(
+    state: ApiRouterState,
+    request: Request,
+    writes: Option<ConnectionWrites>,
+) -> Response {
     let mut multipart = match Multipart::from_request(request, &state).await {
         Ok(multipart) => multipart,
         Err(error) => {
@@ -2249,6 +2381,7 @@ async fn handle_multipart_chat_axum(state: ApiRouterState, request: Request) -> 
         chat_request,
         multipart_request.files,
         BTreeMap::new(),
+        writes,
     )
     .await
 }
@@ -2258,6 +2391,7 @@ async fn handle_chat_request_axum(
     chat_request: ChatCompletionRequest,
     uploaded_files: Vec<MultipartFile>,
     request_headers: BTreeMap<String, String>,
+    writes: Option<ConnectionWrites>,
 ) -> Response {
     let validated =
         match validate_chat_completion_request(&chat_request, state.adapter.configured_model()) {
@@ -2288,6 +2422,7 @@ async fn handle_chat_request_axum(
                     .map(str::to_owned),
                 spec035_client_id,
             },
+            writes,
         );
     }
     let session_guard = session_lock.lock_owned().await;
@@ -2309,8 +2444,8 @@ async fn handle_chat_request_axum(
             adapter.as_ref(),
         )?;
         adapter
-            .complete_chat(invocation)
-            .map(ChatOperationResult::Completion)
+            .complete_chat_reporting(invocation)
+            .map(|(response, written)| ChatOperationResult::Completion(response, written))
     });
 
     let result = match timeout(timeout_duration, operation).await {
@@ -2328,21 +2463,29 @@ async fn handle_chat_request_axum(
     };
 
     match result {
-        Ok(ChatOperationResult::Completion(response)) => axum_response_from_api(json_response(
-            200,
-            chat_completion_response(
-                &response,
-                state.adapter.configured_model(),
-                &request_id,
-                created,
-            ),
-        )),
+        Ok(ChatOperationResult::Completion(response, written)) => {
+            let body = json_response(
+                200,
+                chat_completion_response(
+                    &response,
+                    state.adapter.configured_model(),
+                    &request_id,
+                    created,
+                ),
+            );
+            match (writes, written) {
+                (Some(writes), Some(written)) => {
+                    axum_response_reporting_write(body, writes, written)
+                }
+                _ => axum_response_from_api(body),
+            }
+        }
         Err(error) => axum_response_from_api(error_response(error)),
     }
 }
 
 enum ChatOperationResult {
-    Completion(LlmResponse),
+    Completion(LlmResponse, Option<ChatResponseWritten>),
 }
 
 struct SseReconnectRequest {
@@ -2358,8 +2501,11 @@ fn stream_chat_request_axum(
     uploaded_files: Vec<MultipartFile>,
     session_key: String,
     reconnect: SseReconnectRequest,
+    writes: Option<ConnectionWrites>,
 ) -> Response {
     let adapter = state.adapter.clone();
+    let response_written = Arc::new(StdMutex::new(None::<ChatResponseWritten>));
+    let worker_response_written = response_written.clone();
     let timeout_duration = state.timeout;
     let request_id = chat_completion_id(&format!(
         "{}:{}:{}",
@@ -2429,29 +2575,37 @@ fn stream_chat_request_axum(
                     adapter.as_ref(),
                 )?;
                 let mut saw_finish = false;
-                let response = adapter.stream_chat(invocation, &mut |event| {
-                    if worker_cancelled.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    if matches!(event, ProviderEvent::Finish { .. }) {
-                        saw_finish = true;
-                    }
-                    let frame =
-                        SseFrame::OpenAi(stream_event_frame(&event, &model, &request_id, created));
-                    if tx.blocking_send(frame).is_err() {
-                        worker_cancelled.store(true, Ordering::SeqCst);
-                        observe_progress_delivery(
-                            worker_spec031_channel_observer.as_ref(),
-                            "sse",
-                            shacs_projection::Spec031ProgressDelivery::Dropped,
-                            ChannelDeliveryObservation {
-                                dropped: Some(1),
-                                slow_consumer: Some(1),
-                                ..ChannelDeliveryObservation::unavailable()
-                            },
-                        );
-                    }
-                })?;
+                let (response, written) =
+                    adapter.stream_chat_reporting(invocation, &mut |event| {
+                        if worker_cancelled.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        if matches!(event, ProviderEvent::Finish { .. }) {
+                            saw_finish = true;
+                        }
+                        let frame = SseFrame::OpenAi(stream_event_frame(
+                            &event,
+                            &model,
+                            &request_id,
+                            created,
+                        ));
+                        if tx.blocking_send(frame).is_err() {
+                            worker_cancelled.store(true, Ordering::SeqCst);
+                            observe_progress_delivery(
+                                worker_spec031_channel_observer.as_ref(),
+                                "sse",
+                                shacs_projection::Spec031ProgressDelivery::Dropped,
+                                ChannelDeliveryObservation {
+                                    dropped: Some(1),
+                                    slow_consumer: Some(1),
+                                    ..ChannelDeliveryObservation::unavailable()
+                                },
+                            );
+                        }
+                    })?;
+                if let (Some(written), Ok(mut slot)) = (written, worker_response_written.lock()) {
+                    *slot = Some(written);
+                }
                 if let Some(connection) = spec035_connection.as_mut() {
                     adapter.stream_spec035_tasks_events(&session_key, &mut |event| {
                         let frame = connection.observe_owner_projection(event);
@@ -2553,6 +2707,10 @@ fn stream_chat_request_axum(
             armed: true,
             observation: drop_observation,
         },
+        writes.map(|writes| SseWriteReport {
+            writes,
+            written: response_written,
+        }),
     )
 }
 
@@ -3223,7 +3381,7 @@ mod tests {
             frame: Value,
             _client_id: &str,
             default_chat_id: &str,
-            on_event: &mut dyn FnMut(WebSocketServerEvent),
+            on_event: &mut dyn FnMut(WebSocketServerEvent) -> bool,
         ) -> Result<(), ApiError> {
             let chat_id = frame
                 .get("chat_id")
@@ -5346,11 +5504,11 @@ mod tests {
     ) -> std::io::Result<()> {
         let state =
             ApiRouterState::with_timeout(adapter, timeout).with_spec031_channel_observer(observer);
-        axum::serve(
+        response_written::serve_router(
             listener,
             websocket_router_with_state_and_path(state, websocket_path),
+            shutdown,
         )
-        .with_graceful_shutdown(shutdown)
         .await
     }
 
@@ -5363,11 +5521,11 @@ mod tests {
     ) -> std::io::Result<()> {
         let state =
             ApiRouterState::with_timeout(adapter, timeout).with_spec031_channel_observer(observer);
-        axum::serve(
+        response_written::serve_router(
             listener,
             api_router_with_state_and_websocket_path(state, WEBSOCKET_PATH),
+            shutdown,
         )
-        .with_graceful_shutdown(shutdown)
         .await
     }
 

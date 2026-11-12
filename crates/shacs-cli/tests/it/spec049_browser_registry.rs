@@ -955,6 +955,7 @@ fn context() -> BrowserCallContext {
         permission_interactive: false,
         browser_screenshots: Some(true),
         native_image_input_supported: true,
+        media_root: None,
     }
 }
 

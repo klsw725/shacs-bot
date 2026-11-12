@@ -722,8 +722,13 @@ pub struct DurableWorkAdmission {
     pub terminal_evicted_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_wake_at_ms: Option<u64>,
+    /// The oldest `MAX_PROJECTED_WORK_IDS` of `runnable_work_ids`, for reports.
     #[serde(default)]
     pub due_work_ids: Vec<String>,
+    /// Every due item, oldest first. Dispatchers select from this list, so that due items
+    /// nobody can take yet do not hide the ones behind them.
+    #[serde(skip)]
+    pub runnable_work_ids: Vec<String>,
     #[serde(default)]
     pub stale_lease_work_ids: Vec<String>,
     #[serde(default)]
@@ -743,6 +748,7 @@ impl DurableWorkAdmission {
             terminal_evicted_count: 0,
             next_wake_at_ms: None,
             due_work_ids: Vec::new(),
+            runnable_work_ids: Vec::new(),
             stale_lease_work_ids: Vec::new(),
             issues: vec![DurableWorkRecoveryIssue {
                 kind: DurableWorkRecoveryIssueKind::ReplayUnavailable,
@@ -840,10 +846,11 @@ pub fn evaluate_durable_work_recovery_for_owner(
     }
     // Oldest first: a session takes one due item at a time, in the order it was enqueued.
     due.sort_by_key(|item| item.enqueued_sequence);
-    let due_work_ids = due
-        .into_iter()
+    let runnable_work_ids: Vec<String> = due.into_iter().map(|item| item.work_id.clone()).collect();
+    let due_work_ids = runnable_work_ids
+        .iter()
         .take(MAX_PROJECTED_WORK_IDS)
-        .map(|item| item.work_id.clone())
+        .cloned()
         .collect();
     let blocked = issues.iter().any(|issue| {
         matches!(
@@ -870,6 +877,7 @@ pub fn evaluate_durable_work_recovery_for_owner(
         terminal_evicted_count: state.terminal_evicted_count,
         next_wake_at_ms,
         due_work_ids,
+        runnable_work_ids,
         stale_lease_work_ids,
         issues,
     }

@@ -106,7 +106,7 @@ impl DurableWorkDispatcher {
             consumed_work_ids: Vec::new(),
             suppressed_work_ids: Vec::new(),
         };
-        for work_id in &admission.due_work_ids {
+        for work_id in &admission.runnable_work_ids {
             let item = state
                 .items
                 .get(work_id)

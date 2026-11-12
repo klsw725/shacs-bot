@@ -5,10 +5,12 @@ use shacs_core::runtime::{
     AutomationExecutionTerminalFact, AutomationExecutor, AutomationGateResolution,
     AutomationGateResolver, AutomationHookEvaluation, AutomationJobResult,
     AutomationProcessCleanupFact, DurableWorkDispatcher, ExecutionSnapshot,
-    PluginHookDispatchRecord, PluginRuntimeHookAgentHook, RuntimeToolCall,
+    PluginHookDispatchRecord, PluginRuntimeHookAgentHook, RuntimeToolCall, SessionTurnReservation,
+    AUTOMATION_WORK_KIND,
 };
 use shacs_eval::evaluator::AutomationExecutionMode;
 use shacs_providers::{GenerationSettings, ProviderRequest};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 mod trajectory_recorder;
@@ -29,6 +31,9 @@ pub(super) trait AutomationOwnerAdapters {
         request: AutomationDispatchRequest,
         control: AutomationExecutionControl,
     ) -> AutomationExecutionReceipt;
+    /// Claims the session's turn for a run this thread is about to start. `None` while the
+    /// session has a turn running or about to start.
+    fn claim_session_turn(&self, session_key: &str) -> Option<SessionTurnReservation>;
 }
 
 impl AutomationOwnerAdapters for AgentLoopChatCompletionAdapter {
@@ -190,6 +195,10 @@ impl AutomationOwnerAdapters for AgentLoopChatCompletionAdapter {
             task_outcome,
         }
     }
+
+    fn claim_session_turn(&self, session_key: &str) -> Option<SessionTurnReservation> {
+        self.session_turn_lock.try_reserve(session_key)
+    }
 }
 
 fn current_hook_denial(
@@ -215,16 +224,32 @@ pub(super) fn process_due_automation(
         .map_err(|error| error.to_string())?;
     let mut gates = ProductionGateResolver { adapters };
     let mut executor = ProductionAutomationExecutor { adapters };
-    dispatcher
-        .dispatch_due_automation(
-            &state.work,
-            &admission,
-            now_millis(),
-            &mut gates,
-            &mut executor,
-        )
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    let mut due = admission.clone();
+    // A session refused a turn in this pass keeps its later runs queued too: freed mid-pass,
+    // it would otherwise take them ahead of the refused one.
+    let mut waiting_sessions = BTreeSet::new();
+    for work_id in &admission.runnable_work_ids {
+        let Some(item) = state.work.items.get(work_id) else {
+            continue;
+        };
+        if item.work_kind != AUTOMATION_WORK_KIND
+            || waiting_sessions.contains(item.session_key.as_str())
+        {
+            continue;
+        }
+        // The run's turn is claimed before the run is leased. A session with a turn running or
+        // about to start keeps its run queued for a later pass: a leased run that is refused
+        // the turn ends as failed and is not run again.
+        let Some(_turn) = adapters.claim_session_turn(&item.session_key) else {
+            waiting_sessions.insert(item.session_key.as_str());
+            continue;
+        };
+        due.runnable_work_ids = vec![work_id.clone()];
+        dispatcher
+            .dispatch_due_automation(&state.work, &due, now_millis(), &mut gates, &mut executor)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 struct ProductionGateResolver<'a> {
@@ -320,22 +345,28 @@ impl AgentLoopChatCompletionAdapter {
             temperature: None,
             max_tokens: None,
         };
-        self.run_agent_loop_turn_with_origin_control(
-            super::ProviderTurnInvocation {
-                chat: invocation,
-                runtime_override: None,
-            },
-            None,
-            super::ProviderTurnOrigin {
-                channel: "automation",
-                sender_id: "system",
-                chat_id: "automation",
-            },
-            &[],
-            Some(control),
-        )
-        .map_err(|error| format!("automation:agent:{}", error.error_type))
-        .map(|_| format!("automation:agent:{}", request.work_id))
+        let turn = self
+            .run_agent_loop_turn_with_origin_control(
+                super::ProviderTurnInvocation {
+                    chat: invocation,
+                    runtime_override: None,
+                },
+                None,
+                super::ProviderTurnOrigin {
+                    channel: "automation",
+                    sender_id: "system",
+                    chat_id: "automation",
+                },
+                &[],
+                Some(control.clone()),
+            )
+            .map_err(|error| format!("automation:agent:{}", error.error_type))?;
+        // A stop that lands on the claimed turn ends it before it starts: the run is a
+        // cancelled one, not a finished one.
+        if super::external_turn_was_cancelled(&turn.stop_reason) {
+            control.cancel();
+        }
+        Ok(format!("automation:agent:{}", request.work_id))
     }
 }
 

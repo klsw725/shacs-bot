@@ -17,6 +17,9 @@ pub trait ReplTurnExecutor: Send + Sync + 'static {
     fn execute_priority(&self, input: &str) -> Result<ReplTurnOutcome, CliError> {
         self.execute(input)
     }
+
+    /// Called after the outcome was written to the terminal and flushed.
+    fn turn_written(&self, _outcome: &ReplTurnOutcome) {}
 }
 
 pub trait ReplTurnPermit: Send {
@@ -80,7 +83,7 @@ where
                     spawn_turn(input, executor.clone(), tx.clone(), writer)?
                 }
                 ReplAction::RunPriority(input) => {
-                    write_turn(writer, executor.execute_priority(&input))?
+                    write_turn(writer, &*executor, executor.execute_priority(&input))?
                 }
                 ReplAction::QueueFollowUp(message) => {
                     writeln!(writer, "{}", render::queued(&message))?
@@ -88,11 +91,15 @@ where
                 ReplAction::Malformed(raw) => writeln!(writer, "{}", render::malformed(&raw))?,
                 ReplAction::RequestStop | ReplAction::RequestStopAndExit => {
                     writeln!(writer, "{}", render::stop_requested())?;
-                    write_turn(writer, executor.execute_priority("/stop"))?;
+                    write_turn(writer, &*executor, executor.execute_priority("/stop"))?;
                 }
             },
             DriverEvent::Completed(result) => {
-                write_turn(writer, result.map_err(CliError::InvalidArguments))?;
+                write_turn(
+                    writer,
+                    &*executor,
+                    result.map_err(CliError::InvalidArguments),
+                )?;
                 if let Some(next) = state.finish_turn() {
                     spawn_turn(next, executor.clone(), tx.clone(), writer)?;
                 } else if state.should_exit_after_completion() {
@@ -127,12 +134,21 @@ where
     Ok(())
 }
 
-fn write_turn<W>(writer: &mut W, result: Result<ReplTurnOutcome, CliError>) -> Result<(), CliError>
+fn write_turn<W, E>(
+    writer: &mut W,
+    executor: &E,
+    result: Result<ReplTurnOutcome, CliError>,
+) -> Result<(), CliError>
 where
     W: Write,
+    E: ReplTurnExecutor,
 {
     match result {
-        Ok(outcome) => writeln!(writer, "{}", render::turn(&outcome))?,
+        Ok(outcome) => {
+            writeln!(writer, "{}", render::turn(&outcome))?;
+            writer.flush()?;
+            executor.turn_written(&outcome);
+        }
         Err(error) => writeln!(writer, "Projection: kind=error status=failed\n{error}")?,
     }
     Ok(())

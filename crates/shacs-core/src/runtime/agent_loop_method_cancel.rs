@@ -24,6 +24,8 @@ impl AgentLoop<'_> {
                 request.remaining_questions.push(preview(&question));
             }
             append_ask_user_resume(session, &id, "{\"decision\":\"cancelled\",\"reason\":\"method_changed\",\"permission_granted\":false}");
+            // A paused browser handoff closed this way no longer waits to continue.
+            super::super::browser::handoff_closed(&self.config, &session.key, &id);
             cancelled.push("question");
         }
         if let Some(approval) = pending_permission_approval(session) {

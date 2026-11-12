@@ -9,7 +9,12 @@ mod recovery;
 #[path = "spec036_observation/support.rs"]
 mod support;
 
+use serde_json::json;
 use shacs_core::runtime::*;
+use shacs_session::durable_event::{
+    DurableEventInput, DurableEventPayload, DurableEventStore, WORK_ENQUEUED,
+};
+use shacs_session::durable_work::{WorkPayloadRef, MAX_PROJECTED_WORK_IDS};
 use support::{Fixture, Reader, TestResult};
 
 #[test]
@@ -182,5 +187,43 @@ fn unreadable_local_source_records_read_failure() -> TestResult {
             reason: ObservationBlock::ReadFailed
         }
     );
+    Ok(())
+}
+
+#[test]
+fn due_observation_behind_a_full_report_of_waiting_work_is_still_read() -> TestResult {
+    // Given: as many due items nobody takes as the admission report lists, all queued before
+    // the observation wake.
+    let fixture = Fixture::new()?;
+    {
+        let mut events = DurableEventStore::open(fixture.data_dir.join("runtime/durable-events"))?;
+        for index in 0..MAX_PROJECTED_WORK_IDS {
+            events.append(DurableEventInput::new(
+                "cli:waiting",
+                WORK_ENQUEUED,
+                DurableEventPayload::inline(
+                    "durable_work",
+                    json!({
+                        "work_id": format!("waiting-{index}"),
+                        "work_kind": "test.waiting",
+                        "payload_ref": WorkPayloadRef::inline(
+                            "test.waiting.v1",
+                            json!({"index": index}),
+                        )?,
+                    }),
+                ),
+            ))?;
+        }
+    }
+    let reader = Reader::new(&fixture.workspace);
+    let mut dispatcher = fixture.dispatcher()?;
+    dispatcher.enqueue_entrusted_observations(&fixture.runtime(500))?;
+
+    // When
+    dispatcher.process_entrusted_observations(&fixture.runtime(1000), &reader)?;
+
+    // Then
+    assert_eq!(reader.reads.get(), 1);
+    assert_eq!(fixture.read()?.history.len(), 1);
     Ok(())
 }

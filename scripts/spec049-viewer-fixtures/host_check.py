@@ -136,7 +136,10 @@ def self_test():
 class WebSocketRfb:
     def __init__(self, port):
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=20)
-        request = (f"GET /websockify HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\n"
+        # Spec 050: the screen is the `view` token, and websockify passes a
+        # WebSocket only when its Origin is the Host it was sent to.
+        request = (f"GET /websockify?token=view HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+                   f"Origin: http://127.0.0.1:{port}\r\nUpgrade: websocket\r\n"
                    "Connection: Upgrade\r\nSec-WebSocket-Key: c2hhY3Mtdmlld2VyLWNoZWNrAA==\r\n"
                    "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary\r\n\r\n")
         self.sock.sendall(request.encode())
@@ -350,7 +353,13 @@ def check_viewer_facts(service, facts, password):
     assert "-passwd" not in argv and "-env" not in argv
     websockify = next(entry for entry in facts["processes"] if entry["name"] == "websockify")
     assert "--web=/usr/share/novnc" in websockify["argv"] and "0.0.0.0:6080" in websockify["argv"]
-    assert "127.0.0.1:5900" in websockify["argv"], websockify["argv"]
+    # Spec 050: no fixed target. The token file of the browser's folder names it.
+    assert "--token-plugin=TokenFile" in websockify["argv"], websockify["argv"]
+    assert "--auth-plugin=shacs_view_auth.SameOrigin" in websockify["argv"], websockify["argv"]
+    assert "127.0.0.1:5900" not in websockify["argv"], websockify["argv"]
+    source = next(arg for arg in websockify["argv"] if arg.startswith("--token-source="))
+    assert source.startswith("--token-source=/tmp/shacs-browser-") and source.endswith("/view-routes"), source
+    assert facts["routes"] == ["view: 127.0.0.1:5900"], facts["routes"]
     for entry in facts["processes"]:
         if entry["name"] in ("x11vnc", "websockify"):
             assert entry["env_keys"] is not None and set(entry["env_keys"]) <= ALLOWLIST, entry["env_keys"]
@@ -465,7 +474,7 @@ def checks(project, password):
         assert password not in json.dumps(inspected)
         # The gateway role runs `shacs-bot run` and advertises 6080; the api
         # role runs `shacs-bot serve` and advertises 6081.
-        expected_url = f"http://127.0.0.1:{host_port}/vnc.html"
+        expected_url = f"http://127.0.0.1:{host_port}/shacs-view.html"
         assert inspected["view"]["state"] == "open" and inspected["view"]["url"] == expected_url, inspected
         print(f"[{service}] separate runtime inspect view: {json.dumps(inspected['view'])}", flush=True)
 
@@ -475,6 +484,9 @@ def checks(project, password):
         with urllib.request.urlopen(f"http://127.0.0.1:{host_port}/vnc.html", timeout=20) as response:
             body = response.read().decode(errors="replace")
             assert response.status == 200 and "noVNC" in body
+        with urllib.request.urlopen(f"http://127.0.0.1:{host_port}/shacs-view.html", timeout=20) as response:
+            body = response.read().decode(errors="replace")
+            assert response.status == 200 and "vnc.html?path=websockify%3Ftoken%3Dview" in body
         rfb, ok = rfb_authenticate(host_port, password)
         assert ok, f"{service}: correct password rejected"
         width, height, name, rectangles = framebuffer(rfb)

@@ -97,7 +97,10 @@ const PENDING_USER_TURN_KEY: &str = "pending_user_turn";
 mod action;
 #[path = "agent_loop_auto_mode.rs"]
 mod auto_mode_turn;
+#[path = "agent_loop_browser.rs"]
+mod browser;
 pub use auto_mode_turn::{is_auto_mode_setup_hint, AUTO_MODE_SETUP_HINT_EVENT};
+pub use browser::stamp_browser_arrival;
 #[path = "agent_loop_learn.rs"]
 mod learn;
 #[path = "agent_loop_learn_sources.rs"]
@@ -271,6 +274,9 @@ enum PermissionApprovalReply {
 #[derive(Clone)]
 pub struct AgentLoopConfig {
     pub browser_screenshots: Option<bool>,
+    /// The host behind the `browser` tool, told when the owner's turns start
+    /// and end and asked by `/new`, `/stop` and `/browser` (Spec 050 PRD 000).
+    pub browser_host: Option<Arc<dyn crate::runtime::BrowserHost>>,
     pub workspace: PathBuf,
     pub tool_images: Option<ToolImageSettings>,
     pub media_roots: Vec<PathBuf>,
@@ -331,6 +337,7 @@ impl AgentLoopConfig {
             media_roots: Vec::new(),
             tool_images: None,
             browser_screenshots: None,
+            browser_host: None,
             model: model.into(),
             settings: GenerationSettings::default(),
             retry_mode: ProviderRetryMode::Standard,
@@ -389,6 +396,7 @@ pub enum AgentLoopCommandResult {
     DreamRestore,
     Permission,
     Work,
+    Browser,
     Help,
     PluginCommand,
 }
@@ -822,8 +830,17 @@ impl<'a> AgentLoop<'a> {
 
     pub fn process_message(
         &mut self,
-        message: InboundMessage,
+        mut message: InboundMessage,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
+        // A message that came off the durable queue was stamped when it first
+        // arrived. One handed straight to the loop (a direct CLI run) arrives
+        // now (Spec 050 PRD 010 scope 8).
+        if !message
+            .metadata
+            .contains_key(super::durable_dispatch::DURABLE_WORK_ID_METADATA)
+        {
+            browser::stamp_browser_arrival(self.config.browser_host.as_deref(), &mut message);
+        }
         let session_key = self.effective_session_key(&message);
         if let Some(correlation) = message.owner_accepted_notification() {
             let _turn_guard = self.turn_lock.acquire(session_key.clone())?;
@@ -833,6 +850,14 @@ impl<'a> AgentLoop<'a> {
             return self.process_entrusted_notification(&message, &session_key);
         }
         let routed_command = parse_loop_command_route(&message.content);
+
+        // `/browser` touches no session state, so it waits for no turn and
+        // cancels none (Spec 050 PRD 000 scope 8).
+        if let Some(LoopCommand::Browser(args)) =
+            routed_command.as_ref().map(|route| &route.command)
+        {
+            return Ok(self.answer_browser_command(args.clone(), &message, &session_key));
+        }
 
         if let Some(route) = routed_command
             .as_ref()
@@ -908,6 +933,15 @@ impl<'a> AgentLoop<'a> {
         routed_command: Option<shacs_command::RoutedLoopCommand>,
         _turn_guard: SessionTurnGuard,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
+        // A continuation of a paused browser handoff counts as the owner's
+        // turn only once it is verified below, so a forged one starts none.
+        let handoff_resume_claimed =
+            routed_command.is_none() && browser::resume_candidate(&message);
+        let mut _browser_turn = if routed_command.is_none() && !handoff_resume_claimed {
+            browser::OwnerTurn::start(&self.config, &message, &session_key)
+        } else {
+            None
+        };
         let _mutation_guard =
             shacs_session::SessionMutationGuard::acquire(&self.config.workspace, &session_key)?;
         self.sessions.invalidate(&session_key);
@@ -930,6 +964,32 @@ impl<'a> AgentLoop<'a> {
 
         if let Some(route) = routed_command {
             return self.handle_loop_command(route.command, &message, session, true, None);
+        }
+
+        let handoff_resume =
+            match browser::handoff_gate(&self.config, &message, &session_key, &session.messages) {
+                browser::HandoffGate::Pass => None,
+                browser::HandoffGate::Resume(resume) => Some(resume),
+                browser::HandoffGate::Reply(notice) => {
+                    return Ok(self.answer_outside_turn(
+                        &message,
+                        &session_key,
+                        Some(notice),
+                        "browser_handoff_waiting",
+                    ));
+                }
+                browser::HandoffGate::Discard => {
+                    return Ok(self.answer_outside_turn(
+                        &message,
+                        &session_key,
+                        None,
+                        "browser_resume_discarded",
+                    ));
+                }
+            };
+        let message = browser::resumed_inbound(message, handoff_resume.as_ref());
+        if handoff_resume_claimed {
+            _browser_turn = browser::OwnerTurn::start(&self.config, &message, &session_key);
         }
 
         if web_watch::is_web_watch_command(&message.content) {
@@ -998,7 +1058,11 @@ impl<'a> AgentLoop<'a> {
             ),
         ));
         let pending_permission_approval = pending_permission_approval(&session);
-        let pending_ask_id = pending_ask_user_id(&session.messages);
+        let pending_paused = crate::tools::pending_paused_call(&session.messages);
+        let pending_handoff = pending_paused
+            .as_ref()
+            .is_some_and(|call| call.kind == crate::tools::PausedCallKind::BrowserHandoff);
+        let pending_ask_id = pending_paused.map(|call| call.id);
         let method_tracked = method::user_turn(&message)
             || (pending_ask_id.is_some() && method::request_in_progress(&session)?);
         let execution_ledger = Arc::new(Mutex::new(execution_ledger_for_turn(&message, &session)));
@@ -1637,11 +1701,26 @@ impl<'a> AgentLoop<'a> {
                 method_finish::record_decision(&mut session, &message.content)?;
             }
             call_start = session.messages.len();
+            let handoff_result = handoff_resume.as_ref().map(|resume| {
+                browser::handoff_result(&self.config, &session_key, resume, &message.content)
+            });
+            if handoff_result.is_none() && pending_handoff {
+                browser::handoff_closed(&self.config, &session_key, &tool_call_id);
+            }
             append_ask_user_resume(
                 &mut session,
                 &tool_call_id,
-                action_resume.as_deref().unwrap_or(&message.content),
+                handoff_result
+                    .as_deref()
+                    .or(action_resume.as_deref())
+                    .unwrap_or(&message.content),
             );
+            if let Some(resume) = &handoff_resume {
+                // The host forgets the ended episode only after its result
+                // is on disk, so a crash in between leaves the call closable.
+                self.sessions.save(&session)?;
+                browser::resume_settled(&self.config, resume);
+            }
             let history = session.get_history_with_options(self.config.history_options);
             let mut messages = vec![json!({
                 "role": "system",
@@ -1721,7 +1800,6 @@ impl<'a> AgentLoop<'a> {
             method::image::restore_results(&mut session, &mut initial_messages)?;
         }
         learn_use::guide(&session, &mut initial_messages);
-        auto_mode_turn::guide(&self.config, &mut initial_messages);
         let turn_id = turn_id_for_message(&message, &session);
         let session_context_digest =
             session_remembered_context_digest_for_input(&PermissionedActionInput {
@@ -1765,6 +1843,11 @@ impl<'a> AgentLoop<'a> {
                     .tool_images
                     .as_ref()
                     .is_some_and(|images| images.attach),
+                media_root: self
+                    .config
+                    .tool_images
+                    .as_ref()
+                    .map(|images| images.media_root.clone()),
             }),
             channel: message.channel.clone(),
             chat_id: message.chat_id.clone(),
@@ -1810,6 +1893,7 @@ impl<'a> AgentLoop<'a> {
             None
         };
         let offered_tools = method_tools.as_ref().unwrap_or(self.tools);
+        auto_mode_turn::guide(&self.config, offered_tools, &mut initial_messages);
         let mut spec = AgentRunSpec::new(
             initial_messages.clone(),
             offered_tools,
@@ -3173,6 +3257,7 @@ impl<'a> AgentLoop<'a> {
                 )
             }
             LoopCommand::New => {
+                browser::close_for_session(&self.config, &session.key);
                 method::close_request(&mut session, false)?;
                 action::cancel(&mut session);
                 self.stopped = false;
@@ -3216,6 +3301,10 @@ impl<'a> AgentLoop<'a> {
                 save_session,
             ),
             LoopCommand::Stop => {
+                browser::close_for_session(&self.config, &session.key);
+                if save_session {
+                    browser::close_paused_handoff(&mut session);
+                }
                 action::cancel(&mut session);
                 if save_session {
                     method::close_request(&mut session, true)?;
@@ -3416,6 +3505,9 @@ impl<'a> AgentLoop<'a> {
                 "permission_usage",
                 save_session,
             ),
+            LoopCommand::Browser(args) => {
+                Ok(self.answer_browser_command(args, message, &session.key))
+            }
             LoopCommand::Help => self.publish_command_response(
                 message,
                 session,
@@ -3424,6 +3516,69 @@ impl<'a> AgentLoop<'a> {
                 "help",
                 save_session,
             ),
+        }
+    }
+
+    /// Answers `/browser` without reading or saving the session and without
+    /// a model turn.
+    fn answer_browser_command(
+        &self,
+        args: shacs_command::BrowserCommandArgs,
+        message: &InboundMessage,
+        session_key: &str,
+    ) -> AgentLoopTurnResult {
+        let answer = browser::command_reply(&self.config, args, message, session_key);
+        let mut outbound = outbound_for(
+            message,
+            session_key,
+            answer.content.clone(),
+            Vec::new(),
+            "browser",
+        );
+        browser::mark_episode_notice(&mut outbound, answer.episode_notice);
+        self.bus.publish_outbound(outbound);
+        AgentLoopTurnResult {
+            session_key: session_key.to_owned(),
+            final_content: Some(answer.content),
+            stop_reason: "browser".to_owned(),
+            tools_used: Vec::new(),
+            outbound_count: 1,
+            had_injections: false,
+            command: Some(AgentLoopCommandResult::Browser),
+            ask_user_options: Vec::new(),
+            message_tool_delivery_configured: self.context_tools.message.is_some(),
+        }
+    }
+
+    /// Ends an inbound that a paused browser handoff keeps out of the
+    /// session: nothing is read into or saved to the session and no model
+    /// turn runs. `notice` is said in the inbound's room when there is one.
+    fn answer_outside_turn(
+        &self,
+        message: &InboundMessage,
+        session_key: &str,
+        notice: Option<&str>,
+        stop_reason: &str,
+    ) -> AgentLoopTurnResult {
+        if let Some(notice) = notice {
+            self.bus.publish_outbound(outbound_for(
+                message,
+                session_key,
+                notice.to_owned(),
+                Vec::new(),
+                stop_reason,
+            ));
+        }
+        AgentLoopTurnResult {
+            session_key: session_key.to_owned(),
+            final_content: notice.map(str::to_owned),
+            stop_reason: stop_reason.to_owned(),
+            tools_used: Vec::new(),
+            outbound_count: usize::from(notice.is_some()),
+            had_injections: false,
+            command: None,
+            ask_user_options: Vec::new(),
+            message_tool_delivery_configured: self.context_tools.message.is_some(),
         }
     }
 
@@ -4149,7 +4304,10 @@ impl<'a> AgentLoop<'a> {
             .as_ref()
             .is_some_and(MessageTool::sent_in_turn);
         if let Some(RuntimeInterrupt::AskUser {
-            question, options, ..
+            tool_call_id,
+            question,
+            options,
+            ..
         }) = &result.interrupt
         {
             let options = if options.is_empty() {
@@ -4158,13 +4316,19 @@ impl<'a> AgentLoop<'a> {
                 options.clone()
             };
             let (content, buttons) = ask_user_outbound(Some(question), &options, &message.channel);
-            self.bus.publish_outbound(outbound_for(
+            let mut outbound = outbound_for(
                 message,
                 session_key,
                 content.unwrap_or_else(|| question.clone()),
                 buttons,
                 "ask_user",
-            ));
+            );
+            // A browser handoff's question is the notice of its episode.
+            browser::mark_episode_notice(
+                &mut outbound,
+                browser::handoff_notice(&self.config, session_key, tool_call_id),
+            );
+            self.bus.publish_outbound(outbound);
             count += 1;
             ask_options = options;
         } else if let Some(RuntimeInterrupt::PermissionApproval {
@@ -5536,13 +5700,17 @@ fn effective_message_session_key(
     }
 }
 
+/// Closes the paused call with its result. The result carries the call's own
+/// name: `ask_user`, or `browser` for a `handoff`.
 fn append_ask_user_resume(session: &mut Session, tool_call_id: &str, content: &str) {
+    let name = crate::tools::tool_call_name_by_id(&session.messages, tool_call_id)
+        .unwrap_or_else(|| "ask_user".to_owned());
     append_session_message(
         session,
         json!({
             "role": "tool",
             "tool_call_id": tool_call_id,
-            "name": "ask_user",
+            "name": name,
             "content": content,
             "timestamp": now_iso(),
         }),

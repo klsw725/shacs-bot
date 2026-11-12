@@ -5,6 +5,9 @@ pub struct ReplTurnOutcome {
     pub content: String,
     pub stop_reason: String,
     pub command: Option<AgentLoopCommandResult>,
+    /// The takeover episodes whose notice is part of `content`. They count as delivered
+    /// only once the content was written out.
+    pub browser_notices: Vec<String>,
 }
 
 pub fn welcome() -> &'static str {
@@ -68,6 +71,7 @@ mod tests {
             content: "hello".to_owned(),
             stop_reason: "completed".to_owned(),
             command: None,
+            browser_notices: Vec::new(),
         });
         assert!(output.contains("kind=turn"));
         assert!(output.contains("status=completed"));

@@ -46,7 +46,7 @@ impl ChatCompletionAdapter for SlowAdapter {
         _: Value,
         _: &str,
         default_chat_id: &str,
-        on_event: &mut dyn FnMut(WebSocketServerEvent),
+        on_event: &mut dyn FnMut(WebSocketServerEvent) -> bool,
     ) -> Result<(), ApiError> {
         on_event(WebSocketServerEvent::Delta {
             chat_id: default_chat_id.to_owned(),

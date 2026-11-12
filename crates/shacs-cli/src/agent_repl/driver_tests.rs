@@ -33,6 +33,7 @@ impl ReplTurnExecutor for BlockingExecutor {
         Ok(ReplTurnOutcome {
             content: format!("outcome:{input}"),
             stop_reason: "completed".to_owned(),
+            browser_notices: Vec::new(),
             command: match input {
                 "/status" => Some(AgentLoopCommandResult::Status),
                 "/stop" => Some(AgentLoopCommandResult::StopRequested),
@@ -87,6 +88,7 @@ fn outcome_for(input: &str) -> ReplTurnOutcome {
     ReplTurnOutcome {
         content: format!("outcome:{input}"),
         stop_reason: "completed".to_owned(),
+        browser_notices: Vec::new(),
         command: match input {
             "/status" => Some(AgentLoopCommandResult::Status),
             "/stop" => Some(AgentLoopCommandResult::StopRequested),

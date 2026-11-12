@@ -22,12 +22,14 @@ mod spawn;
 mod tool_search;
 mod web;
 
+pub(crate) use ask::tool_call_name_by_id;
 pub use ask::{
     ask_user_options_from_messages, ask_user_outbound, ask_user_tool_result_messages,
-    pending_ask_user_id, AskUserTool,
+    pending_ask_user_id, pending_paused_call, AskUserTool, PausedCall, PausedCallKind,
 };
 pub use base::{
-    JsonMap, Tool, ToolCallExecutionContext, ToolDefinition, ToolResult, ValidationError,
+    BrowserHandoffOrigin, JsonMap, Tool, ToolCallExecutionContext, ToolDefinition, ToolResult,
+    ValidationError,
 };
 pub use browser_tool::BrowserTool;
 pub use cron::CronTool;

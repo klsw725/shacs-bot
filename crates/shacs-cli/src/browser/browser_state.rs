@@ -42,6 +42,10 @@ pub struct BrowserViewStatus {
     pub state: BrowserViewState,
     pub reason: Option<String>,
     pub url: Option<String>,
+    /// `tools.browser.view.url` is set but unusable, so the default address
+    /// is shown (Spec 050 PRD 010 scope 12).
+    #[serde(default)]
+    pub url_ignored: bool,
 }
 
 impl BrowserViewStatus {
@@ -51,6 +55,7 @@ impl BrowserViewStatus {
             state: BrowserViewState::Disabled,
             reason: Some("disabled".to_owned()),
             url: None,
+            url_ignored: false,
         }
     }
 
@@ -61,6 +66,7 @@ impl BrowserViewStatus {
             state: BrowserViewState::Unavailable,
             reason: Some(reason.to_owned()),
             url: None,
+            url_ignored: false,
         }
     }
 
@@ -71,7 +77,13 @@ impl BrowserViewStatus {
             state: BrowserViewState::Closed,
             reason: None,
             url: None,
+            url_ignored: false,
         }
+    }
+
+    pub fn with_url_ignored(mut self, ignored: bool) -> Self {
+        self.url_ignored = ignored;
+        self
     }
 
     /// A live state that cannot be trusted keeps only the configuration facts.
@@ -79,6 +91,47 @@ impl BrowserViewStatus {
         self.state = BrowserViewState::Unknown;
         self.url = None;
     }
+}
+
+/// Who may act on the browser (Spec 050 PRD 010 scope 1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserControl {
+    #[default]
+    Assistant,
+    User,
+}
+
+/// Whether a browser could start on the saved login profile right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserProfileState {
+    Ready,
+    Absent,
+    InUse,
+    Locked,
+    Unreadable,
+}
+
+/// Where the saved login profile is and how much it holds. Nothing inside
+/// it is named: no file, no site, no content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserLoginProfile {
+    pub exists: bool,
+    pub path: String,
+    pub size_bytes: u64,
+    /// The profile has more than 20,000 files; the size covers that many.
+    #[serde(default)]
+    pub size_truncated: bool,
+    pub state: BrowserProfileState,
+}
+
+/// The saved login inside the browser status (Spec 050 PRD 020 scope 7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserLoginStatus {
+    /// `tools.browser.persistLogin` as configured.
+    pub persist: bool,
+    pub profile: BrowserLoginProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +144,27 @@ pub struct BrowserStatus {
     pub owner_observed: bool,
     pub updated_at_ms: u64,
     pub view: BrowserViewStatus,
+    /// `tools.browser.replyWaitMinutes` as configured.
+    #[serde(default)]
+    pub reply_wait_minutes: u64,
+    /// When the browser closes unless the session's user replies. Set only
+    /// while it waits for that reply.
+    #[serde(default)]
+    pub reply_wait_deadline_ms: Option<u64>,
+    /// Who controls the browser. Which session took it over, the episode
+    /// and anything pasted are never recorded here.
+    #[serde(default)]
+    pub control: BrowserControl,
+    /// `tools.browser.takeoverMinutes` as configured.
+    #[serde(default)]
+    pub takeover_minutes: u64,
+    /// When the browser is taken back. Set only while the user controls it.
+    #[serde(default)]
+    pub takeover_deadline_ms: Option<u64>,
+    /// Read from the data folder by `runtime inspect`; the browser's owner
+    /// never writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<BrowserLoginStatus>,
 }
 
 impl BrowserStatus {
@@ -115,7 +189,23 @@ impl BrowserStatus {
             owner_observed: false,
             updated_at_ms: now,
             view: BrowserViewStatus::disabled(),
+            reply_wait_minutes: 0,
+            reply_wait_deadline_ms: None,
+            control: BrowserControl::Assistant,
+            takeover_minutes: 0,
+            takeover_deadline_ms: None,
+            login: None,
         }
+    }
+
+    pub fn with_takeover(mut self, minutes: u64) -> Self {
+        self.takeover_minutes = minutes;
+        self
+    }
+
+    pub fn with_reply_wait(mut self, minutes: u64) -> Self {
+        self.reply_wait_minutes = minutes;
+        self
     }
 
     pub fn with_view(mut self, view: BrowserViewStatus) -> Self {
@@ -192,6 +282,9 @@ pub fn read_browser_snapshot(
     status.state = BrowserState::Unknown;
     status.owner_observed = false;
     status.view.unknown();
+    status.reply_wait_deadline_ms = None;
+    status.control = BrowserControl::Assistant;
+    status.takeover_deadline_ms = None;
     if status.reason.is_none() {
         status.reason = Some("owner_snapshot_unavailable".to_owned());
     }
@@ -239,15 +332,36 @@ pub(crate) fn inspect(bundle: &ConfigBundle, ownership: &RuntimeOwnershipStatus)
         available,
         crate::now_millis(),
     )
-    .with_view(view);
-    read_browser_snapshot(
+    .with_view(view)
+    .with_reply_wait(bundle.config.tools.browser.reply_wait_minutes)
+    .with_takeover(bundle.config.tools.browser.takeover_minutes);
+    let mut status = read_browser_snapshot(
         &bundle.context.data_dir,
         ownership,
         &bundle.context.config_path,
         &bundle.context.workspace,
         status,
         crate::now_millis(),
-    )
+    );
+    status.login = Some(super::browser_lock::login_status(
+        &bundle.context.data_dir,
+        bundle.config.tools.browser.persist_login,
+        &runner,
+    ));
+    status
+}
+
+/// The status as a diagnostics bundle carries it: of the login profile only
+/// whether it is kept, whether it exists and its state.
+pub(crate) fn diagnostics(status: &BrowserStatus) -> serde_json::Value {
+    let mut value = serde_json::json!(status);
+    if let Some(profile) = value
+        .pointer_mut("/login/profile")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        profile.retain(|key, _| matches!(key.as_str(), "exists" | "state"));
+    }
+    value
 }
 
 pub(crate) fn current_owner(data_dir: &Path) -> Option<BrowserOwnerBinding> {

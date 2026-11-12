@@ -122,6 +122,7 @@ fn precedence_for_decision(decision: &PermissionPolicyDecision) -> StaticPolicyP
         | PermissionPolicyReason::ProtectedTarget
         | PermissionPolicyReason::UserRuleDeny
         | PermissionPolicyReason::SecretFileWrite
+        | PermissionPolicyReason::BrowserLockWrite
         | PermissionPolicyReason::UserOnlyFileWrite
         | PermissionPolicyReason::ToolRefusal => StaticPolicyPrecedence::StaticDenyWins,
         PermissionPolicyReason::StaticAskRequired
@@ -182,6 +183,7 @@ fn success_disposition(decision: &PermissionPolicyDecision) -> ClassifierDisposi
         | PermissionPolicyReason::ProtectedTarget
         | PermissionPolicyReason::UserRuleDeny
         | PermissionPolicyReason::SecretFileWrite
+        | PermissionPolicyReason::BrowserLockWrite
         | PermissionPolicyReason::UserOnlyFileWrite
         | PermissionPolicyReason::ToolRefusal => ClassifierDisposition::NotInvokedStaticPolicy,
         PermissionPolicyReason::StaticAskRequired

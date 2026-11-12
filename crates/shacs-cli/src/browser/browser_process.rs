@@ -1,6 +1,6 @@
 #[cfg(unix)]
 use super::CdpConnection;
-use super::{BrowserProxy, BrowserViewStatus, DevToolsPeer};
+use super::{BrowserClock, BrowserProxy, BrowserViewStatus, DevToolsPeer};
 use shacs_core::runtime::{BrowserError, NetworkGuard};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -41,9 +41,31 @@ pub trait BrowserChild: Send {
     fn process_id(&self) -> Option<u32> {
         None
     }
+    /// Whether any live, non-zombie process remains in this child's process
+    /// group. An answer that cannot be established counts as alive.
+    fn group_alive(&mut self) -> bool {
+        !self.exited().unwrap_or(false)
+    }
 }
 
-/// Who holds the IPv4 loopback listener on a viewer port.
+/// Which IPv4 bind address a listener check counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerListenAddress {
+    /// `127.0.0.1` only: where x11vnc listens.
+    Loopback,
+    /// Every address on the port: websockify listens on `0.0.0.0`.
+    Any,
+}
+
+/// What `view-routes` offers websockify's token lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerRoutes {
+    Empty,
+    View,
+    ViewAndPaste,
+}
+
+/// Who holds the IPv4 listener on a viewer port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewerListener {
     Absent,
@@ -63,10 +85,90 @@ pub trait BrowserProcessRunner: Send + Sync {
         deadline: Instant,
     ) -> Result<Box<dyn BrowserChild>, BrowserError>;
     fn display_ready(&self, display: u16, deadline: Instant) -> Result<(), BrowserError>;
-    /// One non-blocking look at the `127.0.0.1:<port>` LISTEN socket and, when
-    /// `owner` is given, whether that process holds it. Without an owner any
-    /// listener is `Foreign`.
-    fn viewer_listener(&self, port: u16, owner: Option<u32>) -> ViewerListener;
+    /// One non-blocking look at the LISTEN sockets on `<port>` that `address`
+    /// counts and, when `owner` is given, whether that process holds them.
+    /// Without an owner any listener is `Foreign`.
+    fn viewer_listener(
+        &self,
+        address: ViewerListenAddress,
+        port: u16,
+        owner: Option<u32>,
+    ) -> ViewerListener;
+    /// This container's hostname, as Chromium writes it into a profile's
+    /// `SingletonLock`. Unknown means no such lock can be called this host's.
+    fn hostname(&self) -> Option<String> {
+        None
+    }
+    /// Whether process `pid` here is a running Chromium. An answer that
+    /// cannot be established counts as running.
+    fn chromium_running(&self, _pid: u32) -> bool {
+        true
+    }
+}
+
+/// Decides a listener check from `/proc/net/tcp` text and the owner's file
+/// descriptor links. `Loopback` counts only `127.0.0.1` rows; `Any` counts
+/// every row on the port and is owned only when a `0.0.0.0` row exists and
+/// every counted socket is the owner's.
+pub fn viewer_listener_from(
+    address: ViewerListenAddress,
+    port: u16,
+    table: &str,
+    owner_links: Option<&[String]>,
+) -> ViewerListener {
+    let port = format!("{port:04X}");
+    let loopback = format!("0100007F:{port}");
+    let any = format!("00000000:{port}");
+    let rows: Vec<(&str, Option<&str>)> = table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let local = *fields.get(1)?;
+            let counted = match address {
+                ViewerListenAddress::Loopback => local == loopback,
+                ViewerListenAddress::Any => local
+                    .rsplit_once(':')
+                    .is_some_and(|(_, row_port)| row_port == port),
+            };
+            (counted && fields.get(3) == Some(&"0A")).then(|| (local, fields.get(9).copied()))
+        })
+        .collect();
+    if rows.is_empty() {
+        return ViewerListener::Absent;
+    }
+    let Some(links) = owner_links else {
+        return ViewerListener::Foreign;
+    };
+    let held = |inode: &Option<&str>| {
+        inode.is_some_and(|inode| {
+            let link = format!("socket:[{inode}]");
+            links.contains(&link)
+        })
+    };
+    let owned = match address {
+        ViewerListenAddress::Loopback => rows.iter().any(|(_, inode)| held(inode)),
+        ViewerListenAddress::Any => {
+            rows.iter().any(|(local, _)| *local == any) && rows.iter().all(|(_, inode)| held(inode))
+        }
+    };
+    if owned {
+        ViewerListener::OwnedByChild
+    } else {
+        ViewerListener::Foreign
+    }
+}
+
+/// The clock a viewer switch step waits against and when it gives up.
+pub struct ViewerWait<'a> {
+    pub clock: &'a dyn BrowserClock,
+    pub until_ms: u64,
+}
+
+impl ViewerWait<'_> {
+    pub fn expired(&self) -> bool {
+        self.clock.now_ms() >= self.until_ms
+    }
 }
 
 /// Viewer implementations receive only this sanitized generation environment.
@@ -82,6 +184,50 @@ pub trait BrowserLifecycleParticipant: Send {
     fn failed(&mut self) -> bool;
     fn stop(&mut self);
     fn view(&self) -> BrowserViewStatus;
+    /// Replaces `view-routes` in one rename.
+    fn routes(
+        &mut self,
+        _environment: &BrowserEnvironment,
+        _routes: ViewerRoutes,
+    ) -> Result<(), BrowserError> {
+        Err(BrowserError::Unavailable)
+    }
+    /// Ends websockify and confirms it was reaped, that its process group has
+    /// no live process and that the viewer port has no listener.
+    fn stop_websockify(&mut self, _runner: &dyn BrowserProcessRunner, _wait: &ViewerWait) -> bool {
+        false
+    }
+    /// Ends the running x11vnc and confirms it was reaped and that `5900` has
+    /// no listener. The listener is checked even when none was running.
+    fn stop_screen(&mut self, _runner: &dyn BrowserProcessRunner, _wait: &ViewerWait) -> bool {
+        false
+    }
+    /// Starts x11vnc, with input when `input`, and confirms its own listener
+    /// and that the password file was consumed. `Err` is the reason line.
+    fn start_screen(
+        &mut self,
+        _environment: &BrowserEnvironment,
+        _runner: &dyn BrowserProcessRunner,
+        _input: bool,
+        _clock: &dyn BrowserClock,
+    ) -> Result<(), String> {
+        Err("unavailable".to_owned())
+    }
+    /// Starts websockify and confirms its own listener on the viewer port.
+    fn start_websockify(
+        &mut self,
+        _environment: &BrowserEnvironment,
+        _runner: &dyn BrowserProcessRunner,
+        _clock: &dyn BrowserClock,
+    ) -> Result<(), String> {
+        Err("unavailable".to_owned())
+    }
+    /// Stops both viewer processes, empties the routes and reports `failed`.
+    fn fail(&mut self, _environment: &BrowserEnvironment, _reason: &str) {}
+    /// The validated view password, kept for the generation.
+    fn password(&self) -> Option<&str> {
+        None
+    }
 }
 
 pub trait BrowserLifecycleFactory: Send + Sync {
@@ -213,6 +359,27 @@ impl BrowserEnvironment {
             ],
         )
     }
+
+    /// Chromium on the saved login profile (Spec 050 PRD 020 scope 2). Only
+    /// the profile moves out of this folder: the HTTP cache stays inside it
+    /// and goes away with it, and passwords are not handed to a keyring.
+    pub fn chromium_on(&self, proxy_port: u16, profile: &Path) -> BrowserChildSpec {
+        let mut spec = self.chromium(proxy_port);
+        for argument in &mut spec.arguments {
+            if argument.starts_with("--user-data-dir=") {
+                *argument = format!("--user-data-dir={}", profile.display());
+            }
+        }
+        let page = spec.arguments.len().saturating_sub(1);
+        spec.arguments.splice(
+            page..page,
+            [
+                format!("--disk-cache-dir={}", self.root.join("cache").display()),
+                "--password-store=basic".to_owned(),
+            ],
+        );
+        spec
+    }
 }
 
 impl Drop for BrowserEnvironment {
@@ -237,6 +404,16 @@ impl BrowserProcesses {
     pub fn start(
         runner: &dyn BrowserProcessRunner,
         guard: NetworkGuard,
+        deadline: Instant,
+    ) -> Result<(Self, Box<dyn DevToolsPeer>), BrowserError> {
+        Self::start_on(runner, guard, None, deadline)
+    }
+
+    /// `start`, with Chromium on the saved login `profile` when one is given.
+    pub fn start_on(
+        runner: &dyn BrowserProcessRunner,
+        guard: NetworkGuard,
+        profile: Option<&Path>,
         deadline: Instant,
     ) -> Result<(Self, Box<dyn DevToolsPeer>), BrowserError> {
         let proxy = BrowserProxy::start(guard).map_err(|_| BrowserError::Unavailable)?;
@@ -301,7 +478,10 @@ impl BrowserProcesses {
             .ok_or(BrowserError::Unavailable)?
             .address()
             .port();
-        let chromium = processes.environment.chromium(proxy_port);
+        let chromium = match profile {
+            Some(profile) => processes.environment.chromium_on(proxy_port, profile),
+            None => processes.environment.chromium(proxy_port),
+        };
         processes.children.push(runner.spawn(&chromium, deadline)?);
         let peer = processes
             .children
@@ -343,12 +523,43 @@ impl BrowserProcesses {
                 self.viewer_failed = true;
             }
         }
+        self.core_alive()
+    }
+
+    /// Whether the browser's own processes run, leaving the viewer alone.
+    pub fn core_alive(&mut self) -> Result<bool, BrowserError> {
         for child in &mut self.children {
             if child.exited()? {
                 return Ok(false);
             }
         }
         Ok(true)
+    }
+
+    /// Whether Chromium itself has ended. An answer that cannot be
+    /// established counts as ended: the caller stops waiting and kills.
+    pub fn browser_exited(&mut self) -> bool {
+        self.children
+            .last_mut()
+            .is_none_or(|chromium| chromium.exited().unwrap_or(true))
+    }
+
+    /// Whether a viewer process died that shacs-bot did not end.
+    pub fn viewer_exited(&mut self) -> bool {
+        !self.viewer_failed && self.viewer.as_mut().is_some_and(|viewer| viewer.failed())
+    }
+
+    /// The viewer together with the environment its steps run in.
+    pub fn viewer_parts(
+        &mut self,
+    ) -> Option<(
+        &mut (dyn BrowserLifecycleParticipant + 'static),
+        &BrowserEnvironment,
+    )> {
+        let environment = &self.environment;
+        self.viewer
+            .as_mut()
+            .map(|viewer| (viewer.as_mut(), environment))
     }
 
     pub fn view(&self) -> Option<BrowserViewStatus> {
@@ -409,6 +620,17 @@ impl BrowserChild for LinuxBrowserChild {
     fn process_id(&self) -> Option<u32> {
         Some(self.child.id())
     }
+    fn group_alive(&mut self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            linux_group_alive(self.child.id())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // The group cannot be inspected here; the viewer never starts.
+            true
+        }
+    }
 }
 
 impl Drop for LinuxBrowserChild {
@@ -436,15 +658,20 @@ impl BrowserProcessRunner for LinuxBrowserProcessRunner {
             .all(|path| Path::new(path).is_file())
     }
 
-    fn viewer_listener(&self, port: u16, owner: Option<u32>) -> ViewerListener {
+    fn viewer_listener(
+        &self,
+        address: ViewerListenAddress,
+        port: u16,
+        owner: Option<u32>,
+    ) -> ViewerListener {
         #[cfg(target_os = "linux")]
         {
-            return linux_loopback_listener(port, owner);
+            return linux_listener(address, port, owner);
         }
         #[cfg(not(target_os = "linux"))]
         {
             // Ownership cannot be proven here; the viewer must not start.
-            let _ = (port, owner);
+            let _ = (address, port, owner);
             ViewerListener::Foreign
         }
     }
@@ -541,6 +768,61 @@ impl BrowserProcessRunner for LinuxBrowserProcessRunner {
         }
         Err(BrowserError::StartupTimeout)
     }
+
+    fn hostname(&self) -> Option<String> {
+        #[cfg(unix)]
+        {
+            let mut name = [0_u8; 256];
+            // SAFETY: `name` is a writable buffer of exactly the length given.
+            let failed = unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } != 0;
+            let length = name.iter().position(|byte| *byte == 0)?;
+            if failed || length == 0 {
+                return None;
+            }
+            String::from_utf8(name[..length].to_vec()).ok()
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
+    fn chromium_running(&self, pid: u32) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            linux_chromium_running(pid)
+        }
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            // What the process is cannot be read here; only whether it exists.
+            let Ok(pid) = libc::pid_t::try_from(pid) else {
+                return true;
+            };
+            // SAFETY: signal 0 delivers nothing; it only asks whether `pid` exists.
+            let missing = unsafe { libc::kill(pid, 0) } != 0;
+            !(missing && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            true
+        }
+    }
+}
+
+/// Whether `/proc/<pid>` is a Chromium. A process whose name cannot be read
+/// counts as one.
+#[cfg(target_os = "linux")]
+fn linux_chromium_running(pid: u32) -> bool {
+    let process = PathBuf::from(format!("/proc/{pid}"));
+    if matches!(fs::symlink_metadata(&process), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return false;
+    }
+    match fs::read_to_string(process.join("comm")) {
+        Ok(name) => name.contains("chrom"),
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 /// Spawns on one thread that lives as long as the process. `PR_SET_PDEATHSIG`
@@ -582,46 +864,54 @@ fn spawn_from_persistent_thread(mut command: Command) -> std::io::Result<Child> 
         .map_err(|_| std::io::Error::other("browser spawner thread gone"))?
 }
 
-/// Reads `/proc/net/tcp` for a LISTEN socket on `127.0.0.1:<port>` and maps
-/// its inode to the file descriptors of `owner`.
+/// Reads `/proc/net/tcp` and the file descriptor links of `owner` and lets
+/// `viewer_listener_from` decide.
 #[cfg(target_os = "linux")]
-fn linux_loopback_listener(port: u16, owner: Option<u32>) -> ViewerListener {
+fn linux_listener(address: ViewerListenAddress, port: u16, owner: Option<u32>) -> ViewerListener {
     let Ok(table) = fs::read_to_string("/proc/net/tcp") else {
         return ViewerListener::Foreign;
     };
-    let local = format!("0100007F:{port:04X}");
-    let inodes: Vec<&str> = table
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            (fields.get(1) == Some(&local.as_str()) && fields.get(3) == Some(&"0A"))
-                .then(|| fields.get(9).copied())
-                .flatten()
-        })
-        .collect();
-    if inodes.is_empty() {
-        return ViewerListener::Absent;
-    }
-    let Some(owner) = owner else {
-        return ViewerListener::Foreign;
-    };
-    let Ok(descriptors) = fs::read_dir(format!("/proc/{owner}/fd")) else {
-        return ViewerListener::Foreign;
-    };
-    let owned = descriptors
-        .filter_map(Result::ok)
-        .filter_map(|entry| fs::read_link(entry.path()).ok())
-        .any(|target| {
-            inodes
-                .iter()
-                .any(|inode| target.to_string_lossy() == format!("socket:[{inode}]"))
+    let links = owner
+        .and_then(|owner| fs::read_dir(format!("/proc/{owner}/fd")).ok())
+        .map(|descriptors| {
+            descriptors
+                .filter_map(Result::ok)
+                .filter_map(|entry| fs::read_link(entry.path()).ok())
+                .map(|target| target.to_string_lossy().into_owned())
+                .collect::<Vec<String>>()
         });
-    if owned {
-        ViewerListener::OwnedByChild
-    } else {
-        ViewerListener::Foreign
-    }
+    viewer_listener_from(address, port, &table, links.as_deref())
+}
+
+/// Looks through `/proc` for a process that is not a zombie and whose process
+/// group is `group`. An unreadable `/proc` counts as alive.
+#[cfg(target_os = "linux")]
+fn linux_group_alive(group: u32) -> bool {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return true;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+        {
+            return false;
+        }
+        // A process that vanished between the listing and the read is gone.
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+            return false;
+        };
+        // The command name may hold spaces; fields resume after its `)`.
+        let Some((_, rest)) = stat.rsplit_once(')') else {
+            return true;
+        };
+        let mut fields = rest.split_whitespace();
+        let state = fields.next();
+        let process_group = fields.nth(1);
+        process_group == Some(group.to_string().as_str()) && state != Some("Z")
+    })
 }
 
 pub fn child_environment_is_confined(spec: &BrowserChildSpec) -> bool {

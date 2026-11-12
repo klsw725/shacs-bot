@@ -10,6 +10,8 @@ pub(crate) mod auto_decision;
 pub(crate) mod block_counts;
 #[path = "auto_mode/blocked_call.rs"]
 pub(crate) mod blocked_call;
+#[path = "auto_mode/browser_lock_path.rs"]
+mod browser_lock_path;
 #[path = "auto_mode/classifier_request.rs"]
 mod classifier_request;
 #[path = "auto_mode/classifier_review.rs"]

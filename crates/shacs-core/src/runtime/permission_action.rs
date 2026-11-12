@@ -198,6 +198,19 @@ pub struct PermissionedAction {
 }
 
 impl PermissionedAction {
+    /// The `browser` tool's `handoff`: a known action without a capability.
+    pub(crate) fn browser_handoff(&self) -> bool {
+        self.tool_name == "browser"
+            && self.capabilities.is_empty()
+            && self
+                .redacted_arguments
+                .get("action")
+                .and_then(Value::as_str)
+                == Some("handoff")
+    }
+}
+
+impl PermissionedAction {
     /// The arguments permission decisions read (Spec 048 PRD 010 scope 9).
     pub(crate) fn decision_arguments(&self) -> &Value {
         self.decision
@@ -323,10 +336,13 @@ fn normalize_tool_candidate(
     let mut decision_arguments = arguments.clone();
     let capabilities = if tool_name == "browser" {
         let capabilities = match arguments.get("action").and_then(Value::as_str) {
-            Some("open" | "look" | "scroll" | "back" | "wait" | "close") => {
+            Some("open" | "look" | "capture" | "scroll" | "back" | "wait" | "close") => {
                 vec![SafetyCapability::NetOutbound]
             }
             Some("click" | "type" | "press") => vec![SafetyCapability::BrowserAct],
+            // A known action that touches no page: the permission decision
+            // has its own branch for it (Spec 050 PRD 010 scope 10).
+            Some("handoff") => Vec::new(),
             _ => {
                 normalization_errors.push(ActionNormalizationError::InvalidArguments {
                     tool_name: tool_name.to_owned(),

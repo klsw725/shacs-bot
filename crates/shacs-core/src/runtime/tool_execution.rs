@@ -460,15 +460,20 @@ impl<'a> RuntimeToolExecutor<'a> {
                     };
                 }
                 messages.push(evaluation.block_message(&call.id, &call.name));
+                if let Some(recorded) = messages.last() {
+                    acknowledge_browser_closure(self.registry, &action, &recorded.content);
+                }
                 update_project_remembered_rule_metadata(context, &decision);
                 continue;
             }
             update_project_remembered_rule_metadata(context, &decision);
 
+            let execution =
+                tool_call_execution_context(self.registry, &call.id, &action, evaluation, context);
             let entry = IndexedToolCall {
                 original_index,
                 call,
-                context: tool_call_execution_context(self.registry, &action, evaluation, context),
+                context: execution,
             };
             if concurrent_tools && can_batch_concurrently(self.registry, &entry.call) {
                 pending_batch.push(entry);
@@ -546,6 +551,7 @@ impl<'a> RuntimeToolExecutor<'a> {
                 original_index,
                 context: tool_call_execution_context(
                     self.registry,
+                    &decided.call.id,
                     &decided.action,
                     decided.evaluation,
                     &decided.context,
@@ -702,7 +708,7 @@ impl PermissionEvaluation {
             None if classifier_row => blocked_call::tool_result(self.evaluator.as_ref()),
             None => match &self.browser_refusal {
                 Some(detail) if self.decision.kind == PermissionPolicyDecisionKind::Deny => {
-                    format!("Permission denied: tool call was not executed ({detail}).")
+                    browser_refusal_text(detail)
                 }
                 _ => return permission_block_message(tool_call_id, name, &self.decision),
             },
@@ -721,6 +727,36 @@ impl PermissionEvaluation {
             self.policy_materials.materials.as_ref(),
             self.evaluator.as_ref(),
         )
+    }
+}
+
+fn browser_refusal_text(detail: &str) -> String {
+    format!("Permission denied: tool call was not executed ({detail}).")
+}
+
+/// Removes the session's browser closure notice once its text is the recorded
+/// result of a refused `browser` call. Only this execution path does so: the
+/// classifier's and the diagnostic prepare see the notice and leave it (Spec
+/// 050 PRD 000 scope 6).
+fn acknowledge_browser_closure(
+    registry: &ToolRegistry,
+    action: &PermissionedAction,
+    recorded: &str,
+) {
+    if action.tool_name != "browser" {
+        return;
+    }
+    let Some(tool) = registry.get("browser") else {
+        return;
+    };
+    let Some(host) = tool.browser_host() else {
+        return;
+    };
+    let Some(notice) = host.closure_notice(&action.session_id) else {
+        return;
+    };
+    if recorded == browser_refusal_text(&notice.error.to_string()) {
+        host.acknowledge_closure_notice(&action.session_id, &notice.token);
     }
 }
 
@@ -1454,16 +1490,24 @@ pub(crate) fn permission_block_message(
         PermissionPolicyDecisionKind::Ask => "Permission approval required",
         PermissionPolicyDecisionKind::Deny => "Permission denied",
     };
+    let content = if decision.reason == PermissionPolicyReason::BrowserLockWrite {
+        // Spec 050 PRD 020 scope 6: a fixed text with the reason's code.
+        format!("{label}: {BROWSER_LOCK_WRITE_TEXT} (browser_lock_write)")
+    } else {
+        format!(
+            "{label}: tool call was not executed (reason: {:?}).",
+            decision.reason
+        )
+    };
     RuntimeToolMessage {
         images: Vec::new(),
         tool_call_id: tool_call_id.to_owned(),
         name: name.to_owned(),
-        content: format!(
-            "{label}: tool call was not executed (reason: {:?}).",
-            decision.reason
-        ),
+        content,
     }
 }
+
+const BROWSER_LOCK_WRITE_TEXT: &str = "브라우저 lock 파일은 바꿀 수 없습니다.";
 
 fn non_empty_or(value: &str, fallback: &str) -> String {
     let trimmed = value.trim();

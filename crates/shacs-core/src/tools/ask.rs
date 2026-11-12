@@ -80,8 +80,27 @@ impl Tool for AskUserTool {
     }
 }
 
-pub fn pending_ask_user_id(history: &[Value]) -> Option<String> {
-    let mut pending = Vec::<(String, String)>::new();
+/// What kind of call paused a turn to wait for the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PausedCallKind {
+    AskUser,
+    /// The `browser` tool's `handoff` (Spec 050 PRD 010 scope 8).
+    BrowserHandoff,
+}
+
+/// A call that paused its turn and has no result yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PausedCall {
+    pub id: String,
+    /// The name the call carries in the history; its result carries the same.
+    pub name: String,
+    pub kind: PausedCallKind,
+}
+
+/// The newest unanswered call that pauses a turn: `ask_user`, or `browser`
+/// with action `handoff`.
+pub fn pending_paused_call(history: &[Value]) -> Option<PausedCall> {
+    let mut pending = Vec::<(String, String, Option<PausedCallKind>)>::new();
     for message in history {
         let Some(role) = message.get("role").and_then(Value::as_str) else {
             continue;
@@ -94,26 +113,78 @@ pub fn pending_ask_user_id(history: &[Value]) -> Option<String> {
                 .flatten()
             {
                 if let Some(id) = tool_call.get("id").and_then(Value::as_str) {
-                    if let Some((_, name)) = pending
+                    let name = tool_call_name(tool_call).to_owned();
+                    let kind = paused_call_kind(tool_call);
+                    if let Some(entry) = pending
                         .iter_mut()
-                        .find(|(existing_id, _)| existing_id == id)
+                        .find(|(existing_id, _, _)| existing_id == id)
                     {
-                        *name = tool_call_name(tool_call).to_owned();
+                        entry.1 = name;
+                        entry.2 = kind;
                     } else {
-                        pending.push((id.to_owned(), tool_call_name(tool_call).to_owned()));
+                        pending.push((id.to_owned(), name, kind));
                     }
                 }
             }
         } else if role == "tool" {
             if let Some(tool_call_id) = message.get("tool_call_id").and_then(Value::as_str) {
-                pending.retain(|(id, _)| id != tool_call_id);
+                pending.retain(|(id, _, _)| id != tool_call_id);
             }
         }
     }
     pending
-        .iter()
+        .into_iter()
         .rev()
-        .find_map(|(tool_call_id, name)| (name == "ask_user").then(|| tool_call_id.clone()))
+        .find_map(|(id, name, kind)| kind.map(|kind| PausedCall { id, name, kind }))
+}
+
+pub fn pending_ask_user_id(history: &[Value]) -> Option<String> {
+    pending_paused_call(history).map(|call| call.id)
+}
+
+/// The name of the call `id` in the history.
+pub(crate) fn tool_call_name_by_id(history: &[Value], id: &str) -> Option<String> {
+    history.iter().rev().find_map(|message| {
+        message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|call| call.get("id").and_then(Value::as_str) == Some(id))
+            .map(|call| tool_call_name(call).to_owned())
+    })
+}
+
+fn paused_call_kind(tool_call: &Value) -> Option<PausedCallKind> {
+    let name = tool_call_name(tool_call);
+    if name == "ask_user" {
+        return Some(PausedCallKind::AskUser);
+    }
+    let arguments = tool_call_arguments(tool_call);
+    // A call made through the `tool_call` bridge names its tool inside.
+    let handoff = match name {
+        "browser" => arguments.get("action").and_then(Value::as_str) == Some("handoff"),
+        "tool_call" => {
+            arguments.get("name").and_then(Value::as_str) == Some("browser")
+                && bridged_arguments(&arguments)
+                    .get("action")
+                    .and_then(Value::as_str)
+                    == Some("handoff")
+        }
+        _ => false,
+    };
+    handoff.then_some(PausedCallKind::BrowserHandoff)
+}
+
+fn bridged_arguments(arguments: &Map<String, Value>) -> Map<String, Value> {
+    match arguments.get("arguments") {
+        Some(Value::Object(map)) => map.clone(),
+        Some(Value::String(text)) => serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default(),
+        _ => Map::new(),
+    }
 }
 
 pub fn ask_user_tool_result_messages(

@@ -30,6 +30,7 @@ pub(super) mod image;
 pub(super) fn user_turn(message: &InboundMessage) -> bool {
     message.owner_accepted_notification().is_none()
         && message.owner_accepted_automation_result().is_none()
+        && message.owner_accepted_browser_resume().is_none()
         && !matches!(
             message.channel.as_str(),
             "system" | "heartbeat" | "cron" | "automation"

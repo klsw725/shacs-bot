@@ -9,7 +9,14 @@ use std::path::{Component, Path, PathBuf};
 
 const AUTH_FILE: &str = "auth.json";
 const AUTH_FOLDER: &str = "auth";
+/// `<data>/browser/profile`: the login profile of Spec 050 PRD 020. The lock
+/// files beside it are not secret.
+const BROWSER_FOLDER: &str = "browser";
+const PROFILE_FOLDER: &str = "profile";
 const MAX_SCANNED_FILES: usize = 4_096;
+/// The login profile is counted on its own: it is far larger than the auth
+/// store.
+const MAX_PROFILE_FILES: usize = 20_000;
 const MAX_SCAN_DEPTH: usize = 16;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -83,11 +90,10 @@ impl SecretFiles {
             names.push(temp_prefix(file));
         }
         for folder in &self.folders {
-            let targets = self
-                .files
-                .iter()
-                .map(|file| folder.join(file))
-                .chain([folder.join(AUTH_FOLDER)]);
+            let targets = self.files.iter().map(|file| folder.join(file)).chain([
+                folder.join(AUTH_FOLDER),
+                folder.join(BROWSER_FOLDER).join(PROFILE_FOLDER),
+            ]);
             for target in targets {
                 names.push(target.display().to_string());
                 for working in working_folders {
@@ -146,6 +152,7 @@ impl SecretFiles {
             });
         match parts.next() {
             Some(AUTH_FOLDER) => true,
+            Some(BROWSER_FOLDER) => parts.next() == Some(PROFILE_FOLDER),
             Some(name) if self.is_secret_name(name) => parts.next().is_none(),
             _ => false,
         }
@@ -174,8 +181,27 @@ impl SecretFiles {
                 return Some(true);
             }
         }
-        Some(false)
+        profile_holds(folder, identity)
     }
+}
+
+/// Whether the login profile in `folder` holds a file with `identity`. A
+/// file on another device cannot be a hard link to anything in it, so the
+/// profile is not walked for one.
+#[cfg(unix)]
+fn profile_holds(folder: &Path, identity: (u64, u64)) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let profile = folder.join(BROWSER_FOLDER).join(PROFILE_FOLDER);
+    let metadata = match fs::metadata(&profile) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(false),
+        Err(_) => return None,
+    };
+    if !metadata.is_dir() || metadata.dev() != identity.0 {
+        return Some(false);
+    }
+    let mut budget = MAX_PROFILE_FILES;
+    tree_holds(&profile, identity, 0, &mut budget)
 }
 
 fn temp_prefix(file: &str) -> String {

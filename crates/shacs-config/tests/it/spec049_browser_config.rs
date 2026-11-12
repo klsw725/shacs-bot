@@ -39,7 +39,7 @@ fn browser_defaults_and_limits() -> Result<(), Box<dyn Error>> {
     }
     assert_eq!(
         serialized,
-        json!({"enable":false,"startupTimeoutSeconds":20,"idleTimeoutSeconds":300,"pageTimeoutSeconds":30,"view":{"enable":false,"password":""}})
+        json!({"enable":false,"persistLogin":false,"startupTimeoutSeconds":20,"idleTimeoutSeconds":300,"pageTimeoutSeconds":30,"replyWaitMinutes":30,"takeoverMinutes":15,"view":{"enable":false,"password":""}})
     );
     for (key, low, high) in [
         ("startupTimeoutSeconds", 5, 60),

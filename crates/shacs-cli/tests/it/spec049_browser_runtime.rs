@@ -6,7 +6,8 @@ use shacs_cli::browser::{
     BrowserConnector, BrowserEnvironment, BrowserLifecycleFactory, BrowserLifecycleParticipant,
     BrowserOwnerBinding, BrowserProcessRunner, BrowserResolver, BrowserSnapshotDestination,
     BrowserStartup, BrowserState, BrowserStateSnapshot, BrowserStatus, BrowserViewStatus,
-    CdpDocument, CdpReply, DevToolsPeer, ManagedBrowserHost, PausedTargetAdmission, ViewerListener,
+    CdpDocument, CdpReply, DevToolsPeer, ManagedBrowserHost, PausedTargetAdmission,
+    ViewerListenAddress, ViewerListener,
 };
 use shacs_cli::{
     RuntimeOwnerProcessEvidence, RuntimeOwnershipMarker, RuntimeOwnershipState,
@@ -61,7 +62,7 @@ pub(super) struct Facts {
     change: Change,
     fail_spawn: Option<BrowserChildKind>,
     pub(super) roots: Vec<PathBuf>,
-    devtools: Option<Box<dyn DevToolsPeer>>,
+    pub(super) devtools: Option<Box<dyn DevToolsPeer>>,
     /// Events the browser sent between commands, handed out by the next poll.
     late_events: Vec<Value>,
 }
@@ -206,7 +207,12 @@ impl BrowserProcessRunner for Runner {
     fn viewer_available(&self) -> bool {
         true
     }
-    fn viewer_listener(&self, _port: u16, _owner: Option<u32>) -> ViewerListener {
+    fn viewer_listener(
+        &self,
+        _address: ViewerListenAddress,
+        _port: u16,
+        _owner: Option<u32>,
+    ) -> ViewerListener {
         ViewerListener::Absent
     }
     fn spawn(
@@ -438,6 +444,7 @@ pub(super) fn context(input: &ProcessGateInput, owner: &str) -> BrowserCallConte
         permission_interactive: true,
         browser_screenshots: Some(true),
         native_image_input_supported: true,
+        media_root: None,
     }
 }
 
@@ -1389,8 +1396,13 @@ impl BrowserProcessRunner for StalledRunner {
         self.runner.viewer_available()
     }
 
-    fn viewer_listener(&self, port: u16, owner: Option<u32>) -> ViewerListener {
-        self.runner.viewer_listener(port, owner)
+    fn viewer_listener(
+        &self,
+        address: ViewerListenAddress,
+        port: u16,
+        owner: Option<u32>,
+    ) -> ViewerListener {
+        self.runner.viewer_listener(address, port, owner)
     }
 
     fn spawn(
@@ -1933,6 +1945,7 @@ fn pipe_admission_nesting_is_bounded_and_fatal() -> Result<(), Box<dyn Error>> {
         permission_interactive: true,
         browser_screenshots: Some(false),
         native_image_input_supported: false,
+        media_root: None,
     };
     let session = host.acquire(&context)?;
     let started = Instant::now();

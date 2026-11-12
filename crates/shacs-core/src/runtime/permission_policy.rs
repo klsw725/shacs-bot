@@ -41,6 +41,9 @@ pub enum PermissionPolicyReason {
     UserRuleDeny,
     SecretFileRead,
     SecretFileWrite,
+    /// A write to the browser's lock files or their folder (Spec 050 PRD
+    /// 020 scope 6).
+    BrowserLockWrite,
     UserOnlyFileWrite,
     CriticalPathRemoval,
     ProtectedPathThroughSymlink,
@@ -168,6 +171,39 @@ pub fn decide_permission(input: PermissionPolicyInput) -> PermissionPolicyDecisi
     auto_decision::after_mode_rules(&input, &materials, decided)
 }
 
+/// `handoff` only gives the browser to the user who is present, so it is
+/// allowed like a question to them and refused when nobody can answer. The
+/// mode does not change the result (Spec 050 PRD 010 scope 10).
+fn decide_browser_handoff(input: &PermissionPolicyInput) -> PermissionPolicyDecision {
+    if let Some(rule) =
+        strongest_remembered_match(&input.remembered_rules, RememberedPermissionEffect::Deny)
+    {
+        return remembered_decision(
+            PermissionPolicyDecisionKind::Deny,
+            PermissionPolicyReason::RememberedDeny,
+            rule,
+        );
+    }
+    if input.remembered_store_unavailable {
+        return store_unavailable_decision(input);
+    }
+    if !input.interactive {
+        return decision(
+            PermissionPolicyDecisionKind::Deny,
+            PermissionPolicyReason::ModeBaselineDeny,
+            DecisionRefs::default(),
+        );
+    }
+    if static_ask_blocks_approval(input) {
+        return ask_or_deny(input.interactive, PermissionPolicyReason::StaticAskRequired);
+    }
+    decision(
+        PermissionPolicyDecisionKind::Allow,
+        PermissionPolicyReason::LocalUserInteraction,
+        DecisionRefs::default(),
+    )
+}
+
 fn decide_without_user_rules(input: PermissionPolicyInput) -> PermissionPolicyDecision {
     if input.static_rule_decision.kind == StaticRuleDecisionKind::Deny {
         return static_deny_decision(&input);
@@ -179,6 +215,9 @@ fn decide_without_user_rules(input: PermissionPolicyInput) -> PermissionPolicyDe
             PermissionPolicyReason::LocalUserInteraction,
             DecisionRefs::default(),
         );
+    }
+    if input.action.browser_handoff() {
+        return decide_browser_handoff(&input);
     }
     if input.action.capabilities.is_empty() {
         return decision(
@@ -386,7 +425,7 @@ fn browser_mode_action(input: &PermissionPolicyInput) -> bool {
             .get("action")
             .and_then(serde_json::Value::as_str)
         {
-            Some("open" | "look" | "scroll" | "back" | "wait" | "close") => {
+            Some("open" | "look" | "capture" | "scroll" | "back" | "wait" | "close") => {
                 input.action.capabilities == [SafetyCapability::NetOutbound]
             }
             Some("click" | "type" | "press") => {

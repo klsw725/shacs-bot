@@ -63,12 +63,14 @@ impl ReplTurnExecutor for ProductionLockExecutor {
                 Ok(ReplTurnOutcome {
                     content: "completed".to_owned(),
                     stop_reason: "completed".to_owned(),
+                    browser_notices: Vec::new(),
                     command: None,
                 })
             }
             Err(SessionTurnAcquireError::Cancelled { .. }) => Ok(ReplTurnOutcome {
                 content: "cancelled".to_owned(),
                 stop_reason: "cancelled".to_owned(),
+                browser_notices: Vec::new(),
                 command: None,
             }),
             Err(SessionTurnAcquireError::AlreadyActive { session_key }) => {
@@ -105,6 +107,7 @@ fn outcome_for(input: &str) -> ReplTurnOutcome {
     ReplTurnOutcome {
         content: format!("outcome:{input}"),
         stop_reason: "completed".to_owned(),
+        browser_notices: Vec::new(),
         command: match input {
             "/status" => Some(AgentLoopCommandResult::Status),
             "/stop" => Some(AgentLoopCommandResult::StopRequested),

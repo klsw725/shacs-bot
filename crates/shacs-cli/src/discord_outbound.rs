@@ -1,8 +1,8 @@
 use super::{
-    discord_message_body, discord_message_chunks, post_json, read_json_response,
+    discord_message_body, discord_message_chunks, json_id_string, post_json, read_json_response,
     redact_sensitive_url_text,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use shacs_channels::OutboundMessage;
 use shacs_utils::attachments::{detect_attachment_mime, sanitize_attachment_filename};
@@ -38,7 +38,8 @@ impl<'a> DiscordClient<'a> {
         }
     }
 
-    fn send(&self, message: OutboundMessage) -> Result<(), String> {
+    /// Sends the message and returns the id Discord gave each part of it.
+    fn send(&self, message: OutboundMessage) -> Result<Vec<String>, String> {
         let url = format!(
             "{}/channels/{}/messages",
             self.api_base.trim_end_matches('/'),
@@ -46,15 +47,21 @@ impl<'a> DiscordClient<'a> {
         );
         let authorization = format!("Bot {}", self.token);
         let chunks = discord_message_chunks(&message.content);
+        let mut ids = Vec::new();
         if message.media.is_empty() {
             for (index, chunk) in chunks.into_iter().enumerate() {
                 let reply_to = (index == 0)
                     .then_some(message.reply_to.as_deref())
                     .flatten();
                 let body = discord_message_body(&message.chat_id, &chunk, reply_to);
-                post_json(self.agent, &url, Some(authorization.clone()), body)?;
+                ids.push(sent_message_id(&post_json(
+                    self.agent,
+                    &url,
+                    Some(authorization.clone()),
+                    body,
+                )?)?);
             }
-            return Ok(());
+            return Ok(ids);
         }
 
         let first_chunk = chunks.first().map(String::as_str).unwrap_or_default();
@@ -64,27 +71,43 @@ impl<'a> DiscordClient<'a> {
             .post(&url)
             .header("Authorization", &authorization)
             .header("Content-Type", &multipart.content_type);
-        read_json_response(request.send(multipart.bytes).map_err(|error| {
-            format!(
-                "request to {} failed: {}",
-                redact_sensitive_url_text(&url),
-                redact_sensitive_url_text(&error.to_string())
-            )
-        })?)?;
+        ids.push(sent_message_id(&read_json_response(
+            request.send(multipart.bytes).map_err(|error| {
+                format!(
+                    "request to {} failed: {}",
+                    redact_sensitive_url_text(&url),
+                    redact_sensitive_url_text(&error.to_string())
+                )
+            })?,
+        )?)?);
 
         for chunk in chunks.into_iter().skip(1) {
             let body = discord_message_body(&message.chat_id, &chunk, None);
-            post_json(self.agent, &url, Some(authorization.clone()), body)?;
+            ids.push(sent_message_id(&post_json(
+                self.agent,
+                &url,
+                Some(authorization.clone()),
+                body,
+            )?)?);
         }
-        Ok(())
+        Ok(ids)
     }
+}
+
+/// A send Discord accepted names the message it made. One that does not is a failed send:
+/// a reply to it could not be told from a reply to another message.
+fn sent_message_id(response: &Value) -> Result<String, String> {
+    response
+        .get("id")
+        .and_then(json_id_string)
+        .ok_or_else(|| "Discord create message response missing id".to_owned())
 }
 
 pub(super) fn send_message(
     agent: &ureq::Agent,
     token: &str,
     message: OutboundMessage,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     DiscordClient::new(agent, token, DISCORD_API_BASE).send(message)
 }
 

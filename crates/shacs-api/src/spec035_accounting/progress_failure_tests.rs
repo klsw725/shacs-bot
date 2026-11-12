@@ -46,7 +46,7 @@ impl ChatCompletionAdapter for ProgressAfterDisconnectAdapter {
         _: Value,
         _: &str,
         default_chat_id: &str,
-        on_event: &mut dyn FnMut(WebSocketServerEvent),
+        on_event: &mut dyn FnMut(WebSocketServerEvent) -> bool,
     ) -> Result<(), ApiError> {
         self.reached.wait();
         self.release.wait();

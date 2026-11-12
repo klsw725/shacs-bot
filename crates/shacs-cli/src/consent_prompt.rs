@@ -4,14 +4,14 @@
 
 use std::io::{self, BufRead, IsTerminal, Write};
 
-pub(crate) trait Prompt {
+pub trait Prompt {
     /// Shows what the command would write, before the question.
     fn show(&mut self, text: &str);
     /// The answer, or `None` when standard input is not a terminal.
     fn answer(&mut self, question: &str) -> Option<String>;
 }
 
-pub(crate) struct StdPrompt;
+pub struct StdPrompt;
 
 impl Prompt for StdPrompt {
     fn show(&mut self, text: &str) {
@@ -31,16 +31,16 @@ impl Prompt for StdPrompt {
     }
 }
 
-#[cfg(test)]
-pub(crate) struct ScriptedPrompt {
-    pub(crate) shown: Vec<String>,
-    pub(crate) answer: Option<String>,
-    pub(crate) before_answer: Option<Box<dyn FnOnce()>>,
+/// A prompt with its answer written beforehand, for tests inside and
+/// outside this crate.
+pub struct ScriptedPrompt {
+    pub shown: Vec<String>,
+    pub answer: Option<String>,
+    pub before_answer: Option<Box<dyn FnOnce()>>,
 }
 
-#[cfg(test)]
 impl ScriptedPrompt {
-    pub(crate) fn answering(answer: Option<&str>) -> Self {
+    pub fn answering(answer: Option<&str>) -> Self {
         Self {
             shown: Vec::new(),
             answer: answer.map(str::to_owned),
@@ -49,7 +49,6 @@ impl ScriptedPrompt {
     }
 }
 
-#[cfg(test)]
 impl Prompt for ScriptedPrompt {
     fn show(&mut self, text: &str) {
         self.shown.push(text.to_owned());

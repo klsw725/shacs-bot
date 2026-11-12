@@ -1,11 +1,12 @@
 use super::tool_execution::{
     process_gate_input_for_action, PermissionEvaluation, ToolExecutionContext,
 };
-use crate::runtime::{PermissionedAction, SafetyCapability};
-use crate::tools::{ToolCallExecutionContext, ToolRegistry};
+use crate::runtime::{reply_route, PermissionedAction, SafetyCapability};
+use crate::tools::{BrowserHandoffOrigin, ToolCallExecutionContext, ToolRegistry};
 
 pub(super) fn tool_call_execution_context(
     registry: &ToolRegistry,
+    call_id: &str,
     action: &PermissionedAction,
     evaluation: PermissionEvaluation,
     context: &ToolExecutionContext,
@@ -45,6 +46,19 @@ pub(super) fn tool_call_execution_context(
             })
             .cloned(),
     )
+    // The raw call id: it is the one the paused call keeps in the history.
+    .with_browser_handoff_origin((!call_id.is_empty()).then(|| {
+        BrowserHandoffOrigin {
+            tool_call_id: call_id.to_owned(),
+            channel: context.channel.clone(),
+            chat_id: context.chat_id.clone(),
+            reply_route: context
+                .metadata
+                .as_object()
+                .map(reply_route)
+                .unwrap_or_default(),
+        }
+    }))
     .with_hidden_paths(context.permission_environment.clone());
     match (
         action.capabilities.contains(&SafetyCapability::ProcExec),

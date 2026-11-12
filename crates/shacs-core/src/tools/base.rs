@@ -1,6 +1,6 @@
 use crate::controlled_child::ControlledChildAbort;
 use crate::runtime::{
-    BrowserCallContext, BrowserError, BrowserPreparedAction, PermissionEnvironment,
+    BrowserCallContext, BrowserError, BrowserHost, BrowserPreparedAction, PermissionEnvironment,
     ProcessAdapterKind, ProcessGateInput,
 };
 use serde_json::{json, Map, Value};
@@ -84,10 +84,21 @@ pub struct ToolDefinition {
     pub parameters: Value,
 }
 
+/// The call and the room a `handoff` comes from (Spec 050 PRD 010 scope 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserHandoffOrigin {
+    pub tool_call_id: String,
+    pub channel: String,
+    pub chat_id: String,
+    /// Where in the room the turn answers, such as a topic or a thread.
+    pub reply_route: Map<String, Value>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ToolCallExecutionContext {
     pub browser_context: Option<BrowserCallContext>,
     pub browser_binding_digest: Option<String>,
+    pub browser_handoff_origin: Option<BrowserHandoffOrigin>,
     pub(crate) process_gate_input: Option<ProcessGateInput>,
     pub(crate) process_abort: Option<ControlledChildAbort>,
     provider_invocation: Option<ProviderInvocation>,
@@ -99,6 +110,7 @@ impl ToolCallExecutionContext {
         Self {
             browser_context: None,
             browser_binding_digest: None,
+            browser_handoff_origin: None,
             process_gate_input,
             process_abort: None,
             provider_invocation: None,
@@ -118,6 +130,11 @@ impl ToolCallExecutionContext {
 
     pub fn with_browser_binding(mut self, digest: Option<String>) -> Self {
         self.browser_binding_digest = digest;
+        self
+    }
+
+    pub fn with_browser_handoff_origin(mut self, origin: Option<BrowserHandoffOrigin>) -> Self {
+        self.browser_handoff_origin = origin;
         self
     }
 
@@ -190,6 +207,13 @@ pub trait Tool: Send + Sync {
         _arguments: &Value,
     ) -> Result<BrowserPreparedAction, BrowserError> {
         Err(BrowserError::ContextUnavailable)
+    }
+
+    /// The browser host behind this tool, so the execution path can
+    /// acknowledge a closure notice it has delivered (Spec 050 PRD 000 scope
+    /// 6). Only the `browser` tool has one.
+    fn browser_host(&self) -> Option<&dyn BrowserHost> {
+        None
     }
 
     /// Why `execute` would refuse these arguments before acting, found with

@@ -1,7 +1,13 @@
 mod browser_action_binding;
+mod browser_forget;
+mod browser_lock;
 mod browser_manager;
+mod browser_notices;
+mod browser_paste;
 mod browser_process;
+mod browser_profile_directory;
 mod browser_proxy;
+mod browser_session_marker;
 mod browser_snapshot;
 mod browser_state;
 mod browser_viewer;
@@ -9,7 +15,10 @@ mod cdp_connection;
 mod cdp_document;
 mod startup;
 
+pub use browser_forget::*;
+pub use browser_lock::*;
 pub use browser_manager::*;
+pub use browser_paste::*;
 pub use browser_process::*;
 pub use browser_proxy::*;
 pub use browser_state::*;

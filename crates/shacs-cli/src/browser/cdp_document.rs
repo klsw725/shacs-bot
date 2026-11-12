@@ -1,7 +1,7 @@
 use super::browser_snapshot::{self, BrowserNode, BrowserSnapshot};
 use super::{
-    browser_action_binding, changes_document, event_admitted, recoverable, with_cleanup, CdpReply,
-    DevToolsPeer,
+    browser_action_binding, changes_document, event_admitted, recoverable, with_cleanup,
+    BrowserCancellation, CdpReply, DevToolsPeer,
 };
 use serde_json::{json, Value};
 use shacs_core::runtime::{
@@ -33,6 +33,9 @@ pub struct CdpDocument {
     /// checks of an input step ran on. A step records it before its checks and
     /// dispatches only while it is unchanged.
     epoch: u64,
+    /// The slot's control revision, part of every binding this document
+    /// prepares. The manager raises it at each takeover and each return.
+    control: u64,
     notice: Option<String>,
 }
 
@@ -130,19 +133,61 @@ fn admit_paused_target(
 impl CdpDocument {
     pub fn prepare(&self, arguments: &Value) -> Result<BrowserPreparedAction, BrowserError> {
         if arguments["action"] == "open" {
-            return browser_action_binding::empty(arguments);
+            return browser_action_binding::empty(arguments, self.control);
         }
         if targeted(arguments) {
             return self
                 .snapshot
                 .as_ref()
                 .ok_or(BrowserError::StaleRevision)?
-                .prepare(arguments);
+                .prepare(arguments, self.control);
         }
         match &self.verified {
-            Some(document) => browser_action_binding::observation(arguments, document),
-            None => browser_action_binding::empty(arguments),
+            Some(document) => {
+                browser_action_binding::observation(arguments, document, self.control)
+            }
+            None => browser_action_binding::empty(arguments, self.control),
         }
+    }
+
+    /// Binds what is prepared from now on to `control`.
+    pub fn set_control(&mut self, control: u64) {
+        self.control = control;
+    }
+
+    /// Control came back from the user: every number and every earlier
+    /// binding is void, and the verified document is matched to what the tab
+    /// shows now. A tab that went nowhere (`about:blank`) has no verified
+    /// document. Nothing here keeps control from coming back.
+    pub fn resume_control(&mut self, control: u64, deadline: Instant) {
+        self.control = control;
+        self.epoch += 1;
+        self.snapshot = None;
+        if self.closed {
+            return;
+        }
+        let read = self.poll(deadline).and_then(|()| self.main_frame(deadline));
+        match read {
+            Ok((document, _)) if http_document(&document.url) => self.verified = Some(document),
+            Ok(_) => self.verified = None,
+            Err(error) => {
+                if !recoverable(&error) {
+                    self.close(deadline);
+                }
+            }
+        }
+    }
+
+    /// Text the user pasted while in control: one `Input.insertText` into
+    /// whatever has focus now. A tab that is gone takes none, and that is
+    /// not a fault of the browser.
+    pub fn insert_pasted(&mut self, text: &str, deadline: Instant) -> Result<(), BrowserError> {
+        if self.closed {
+            return Err(BrowserError::NotOpen);
+        }
+        let epoch = self.epoch;
+        self.dispatch_input(epoch, "Input.insertText", json!({"text":text}), deadline)
+            .map(|_| ())
     }
 
     pub fn execute_prepared(
@@ -174,7 +219,7 @@ impl CdpDocument {
         // numbered scroll is one too.
         let observation = matches!(
             arguments["action"].as_str(),
-            Some("look" | "scroll" | "back" | "wait")
+            Some("look" | "capture" | "scroll" | "back" | "wait")
         );
         if targeted(arguments) {
             if let Some(snapshot) = self.snapshot.clone() {
@@ -203,6 +248,13 @@ impl CdpDocument {
             Some("look") => {
                 return self
                     .read_verified(approved.as_ref(), capture, deadline)
+                    .map(Some)
+            }
+            // The user asked for the screen: the settings that decide whether a
+            // `look` carries an image play no part.
+            Some("capture") => {
+                return self
+                    .read_verified(approved.as_ref(), true, deadline)
                     .map(Some)
             }
             Some("close") => {
@@ -298,7 +350,7 @@ impl CdpDocument {
             current_node.facts = browser_action_binding::facts(self, node.backend_id, deadline)?;
         }
         snapshot.confirm_document(self, deadline)?;
-        if current.prepare(arguments)?.digest != digest {
+        if current.prepare(arguments, self.control)?.digest != digest {
             return Err(BrowserError::StaleRevision);
         }
         Ok(())
@@ -358,6 +410,7 @@ impl CdpDocument {
             inbox: VecDeque::new(),
             applying: false,
             epoch: 0,
+            control: 0,
             notice: None,
         };
         document.configure_session(deadline)?;
@@ -716,6 +769,18 @@ impl CdpDocument {
         &mut self,
         deadline: Instant,
     ) -> Result<(BrowserDocument, CdpReply), BrowserError> {
+        let (document, reply) = self.main_frame(deadline)?;
+        if !http_document(&document.url) {
+            return Err(BrowserError::DocumentChanged);
+        }
+        Ok((document, reply))
+    }
+
+    /// The main frame as DevTools reports it, whatever its address.
+    fn main_frame(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<(BrowserDocument, CdpReply), BrowserError> {
         let target = self.target.clone();
         let session = self.session.clone();
         let reply = self.request("Page.getFrameTree", json!({}), deadline)?;
@@ -741,9 +806,6 @@ impl CdpDocument {
                 .ok_or(BrowserError::Protocol)?
                 .to_owned(),
         };
-        if !http_document(&document.url) {
-            return Err(BrowserError::DocumentChanged);
-        }
         Ok((document, reply))
     }
 
@@ -1472,6 +1534,23 @@ impl CdpDocument {
             );
             self.closed = true;
         }
+    }
+
+    /// Asks Chromium to end by itself, so that it writes its profile out
+    /// before it goes (Spec 050 PRD 020 scope 4). It is sent even after the
+    /// manager cancelled every other request, which a shutdown does. An error
+    /// means the connection is gone and only a kill is left.
+    pub fn quit(&mut self, deadline: Instant) -> Result<(), BrowserError> {
+        self.peer.set_cancellation(BrowserCancellation::default());
+        self.peer
+            .request(
+                "Browser.close",
+                json!({}),
+                None,
+                deadline,
+                &mut admit_paused_target,
+            )
+            .map(|_| ())
     }
 }
 

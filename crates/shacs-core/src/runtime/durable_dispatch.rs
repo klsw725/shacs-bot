@@ -1,4 +1,7 @@
-use shacs_bus::{InboundMessage, MessageBus, MessageBusError, OwnerAcceptedAutomationResult};
+use shacs_bus::{
+    InboundMessage, MessageBus, MessageBusError, OwnerAcceptedAutomationResult,
+    OwnerAcceptedBrowserResume,
+};
 use shacs_session::durable_event::{
     DurableEventError, DurableEventFilter, DurableEventInput, DurableEventPayload,
     DurableEventRecord, DurableEventStore, DurableEventVisitSummary, DurableWorkStateError,
@@ -22,9 +25,9 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-const INBOUND_WORK_KIND: &str = "agent.inbound_turn";
+pub const INBOUND_WORK_KIND: &str = "agent.inbound_turn";
 const INBOUND_PAYLOAD_TYPE: &str = "shacs.inbound_message.v1";
-const DURABLE_WORK_ID_METADATA: &str = "durable_work_id";
+pub(super) const DURABLE_WORK_ID_METADATA: &str = "durable_work_id";
 const PROCESS_LOCAL_BUS_RETRY_MS: u64 = 250;
 
 #[derive(Debug)]
@@ -253,7 +256,7 @@ impl DurableWorkDispatcher {
                 .or_insert(item.enqueued_sequence);
             *oldest = (*oldest).min(item.enqueued_sequence);
         }
-        for work_id in &admission.due_work_ids {
+        for work_id in &admission.runnable_work_ids {
             let item = state
                 .items
                 .get(work_id)
@@ -628,6 +631,9 @@ impl DurableWorkDispatcher {
                 OwnerAcceptedAutomationResult::SubagentTerminal { result_ref },
             );
         }
+        if let Some(resume) = browser_resume_marker(item, &message) {
+            message = message.with_owner_accepted_browser_resume(resume);
+        }
         message.session_key_override = Some(item.session_key.clone());
         if (item
             .work_id
@@ -800,6 +806,35 @@ pub(super) fn visit_durable_events(
         Some(filters) => store.visit_matching(filters, visitor),
         None => store.visit_from_sequence(0, visitor),
     }
+}
+
+/// The resume marker lives only in memory, so a durable browser resume gets it back here
+/// and nowhere else: the work id and dedupe hint must both name the episode in the payload.
+fn browser_resume_marker(
+    item: &ReplayWorkItem,
+    message: &InboundMessage,
+) -> Option<OwnerAcceptedBrowserResume> {
+    let episode = item
+        .work_id
+        .strip_prefix(super::BROWSER_RESUME_WORK_PREFIX)?;
+    let hinted = item
+        .dedupe_hint
+        .as_deref()?
+        .strip_prefix(super::BROWSER_RESUME_HINT_PREFIX)?;
+    let text = |key: &str| {
+        message
+            .metadata
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+    };
+    if episode.is_empty() || hinted != episode || text("episode") != Some(episode) {
+        return None;
+    }
+    Some(OwnerAcceptedBrowserResume {
+        episode: episode.to_owned(),
+        tool_call_id: text("tool_call_id")?.to_owned(),
+        reason: text("reason")?.to_owned(),
+    })
 }
 
 fn default_trace_root(event_root: &Path) -> PathBuf {

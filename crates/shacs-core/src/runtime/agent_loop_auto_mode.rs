@@ -9,6 +9,7 @@ use crate::runtime::{
     AutoModeBlockCounts, AutoModeBlocks, PermissionMode, PermissionedAction, ToolEvent,
     ToolEventCallback, ToolStatus,
 };
+use crate::tools::ToolRegistry;
 use serde_json::{json, Map, Value};
 use shacs_session::Session;
 
@@ -22,6 +23,10 @@ const SETUP_HINT_TEXT: &str = "Auto mode has stopped several calls in this conve
 /// reach the classifier whole (Spec 048 PRD 020 scope 6).
 pub(super) const MAX_RETRY_ARGUMENT_CHARS: usize = 3_000;
 const GUIDANCE: &str = "\n\n---\n\n# Auto Mode\n\nAuto mode is on: a classifier checks your tool calls instead of the user approving each one. Go ahead with routine steps without asking the user to confirm them. Ask only when the user's request or a skill you are following says to confirm first.";
+
+/// Follows `GUIDANCE` only when the run offers the `browser` tool (Spec 050
+/// PRD 000 scope 2, PRD 010 scope 13).
+const BROWSER_GUIDANCE: &str = "\n\nIn the browser, when a step is the user's to decide, tell them the progress and the choices in text, end the turn, and wait for their reply.\nFor login, passwords, CAPTCHAs or identity checks in the browser, use the browser tool's handoff action; use it too when the user asks in words to take over the browser. If they postpone, do not hand off again: do what you can and tell them what remains.";
 
 /// A turn that decides by the auto mode table: auto mode with a permission
 /// environment.
@@ -93,7 +98,7 @@ pub(super) fn clear_consecutive(session: &mut Session) {
 }
 
 /// Adds the auto mode guidance to the end of the run's system prompt.
-pub(super) fn guide(config: &AgentLoopConfig, messages: &mut [Value]) {
+pub(super) fn guide(config: &AgentLoopConfig, tools: &ToolRegistry, messages: &mut [Value]) {
     if !active(config) {
         return;
     }
@@ -105,7 +110,12 @@ pub(super) fn guide(config: &AgentLoopConfig, messages: &mut [Value]) {
             .get("content")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        system["content"] = Value::String(format!("{content}{GUIDANCE}"));
+        let browser = if tools.has("browser") {
+            BROWSER_GUIDANCE
+        } else {
+            ""
+        };
+        system["content"] = Value::String(format!("{content}{GUIDANCE}{browser}"));
     }
 }
 

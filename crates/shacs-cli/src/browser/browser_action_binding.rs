@@ -74,7 +74,12 @@ pub(super) fn prepared(arguments: &Value, binding: &Value) -> BrowserPreparedAct
 }
 
 /// Preparation without a page: only `open` and `close` are possible.
-pub(super) fn empty(arguments: &Value) -> Result<BrowserPreparedAction, BrowserError> {
+/// Every binding carries the slot's control revision, so one prepared before
+/// a takeover or a return no longer matches afterwards.
+pub(super) fn empty(
+    arguments: &Value,
+    control: u64,
+) -> Result<BrowserPreparedAction, BrowserError> {
     let origin = if arguments["action"] == "open" {
         let url = arguments["url"].as_str().ok_or(BrowserError::Protocol)?;
         Some(origin(url)?)
@@ -86,23 +91,25 @@ pub(super) fn empty(arguments: &Value) -> Result<BrowserPreparedAction, BrowserE
     Ok(prepared(
         arguments,
         &json!({"origin":origin,"role":null,"name":null,
-        "form":null,"focus":null,"revision":null}),
+        "form":null,"focus":null,"revision":null,"control":control}),
     ))
 }
 
-/// Preparation of an observation (`look`, `scroll`, `back`, `wait`, `close`)
-/// on the verified current document. It needs no numbered element, so it
-/// stays possible after an act binding was invalidated.
+/// Preparation of an observation (`look`, `capture`, `scroll`, `back`, `wait`,
+/// `close`) on the verified current document. It needs no numbered element,
+/// so it stays possible after an act binding was invalidated.
 pub(super) fn observation(
     arguments: &Value,
     document: &BrowserDocument,
+    control: u64,
 ) -> Result<BrowserPreparedAction, BrowserError> {
     Ok(prepared(
         arguments,
         &json!({"origin":origin(&document.url)?,"target":document.target_id,
         "session":document.session_id,"frame":document.frame_id,
         "loader":document.loader_id,"url":document.url,
-        "role":null,"name":null,"form":null,"focus":null,"revision":null}),
+        "role":null,"name":null,"form":null,"focus":null,"revision":null,
+        "control":control}),
     ))
 }
 

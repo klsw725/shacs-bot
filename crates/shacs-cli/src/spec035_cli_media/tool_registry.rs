@@ -6,8 +6,9 @@ use shacs_config::{ConfigBundle, ConfigError, ProcessEnv};
 use shacs_core::generated_media::ArtifactStore;
 use shacs_core::memory_search::{MemorySearch, MemorySearchPaths, MemorySearchSettings};
 use shacs_core::runtime::{
-    discover_plugins, register_plugin_runtime_tools, CredentialResolvingImageGenerationClient,
-    ProviderCredentialClientConfig, ProviderCredentialRuntime,
+    discover_plugins, register_plugin_runtime_tools, BrowserHost,
+    CredentialResolvingImageGenerationClient, ProviderCredentialClientConfig,
+    ProviderCredentialRuntime,
 };
 use shacs_core::tools::{
     AskUserTool, BrowserTool, CronTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool,
@@ -29,6 +30,7 @@ pub(crate) struct ProductionTooling {
     pub(crate) message_tool: Option<MessageTool>,
     pub(crate) mcp_runtime: Option<McpRuntime>,
     pub(crate) mcp_reports: Vec<McpServerConnectionReport>,
+    pub(crate) browser_host: Option<Arc<dyn BrowserHost>>,
 }
 
 pub(crate) fn production_tool_registry(
@@ -48,10 +50,12 @@ pub(crate) fn production_tool_registry(
     };
     let file_state = Arc::new(Mutex::new(FileState::new()));
     let mut registry = ToolRegistry::new();
-    if allow_side_effect_tools {
-        registry.register(BrowserTool::new(Arc::new(
-            crate::browser::process_browser_host(bundle),
-        )));
+    let browser_host = allow_side_effect_tools.then(|| {
+        let host: Arc<dyn BrowserHost> = Arc::new(crate::browser::process_browser_host(bundle));
+        host
+    });
+    if let Some(host) = &browser_host {
+        registry.register(BrowserTool::new(host.clone()));
     }
     let cron_service = Arc::new(
         PersistentCronService::new(bundle.context.runtime_subdir("cron").join("jobs.json"))
@@ -250,5 +254,6 @@ pub(crate) fn production_tool_registry(
         message_tool,
         mcp_runtime,
         mcp_reports,
+        browser_host,
     })
 }

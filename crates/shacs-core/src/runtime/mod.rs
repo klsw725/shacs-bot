@@ -156,7 +156,7 @@ mod task_method_store;
 mod tool_before;
 mod tool_execution;
 mod tool_execution_provider;
-mod tool_images;
+pub(crate) mod tool_images;
 mod tool_search;
 mod trajectory_store;
 mod trusted_javascript_tool_before;
@@ -206,9 +206,10 @@ pub use activation_store::{
     ActivationStoreError,
 };
 pub use agent_loop::{
-    is_auto_mode_setup_hint, AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError,
-    AgentLoopOutcome, AgentLoopRunSummary, AgentLoopTurnResult, AutoModeSetupHintSetter, ClockMs,
-    PermissionModeSetter, ProjectPermissionStoreConfig, AUTO_MODE_SETUP_HINT_EVENT,
+    is_auto_mode_setup_hint, stamp_browser_arrival, AgentLoop, AgentLoopCommandResult,
+    AgentLoopConfig, AgentLoopError, AgentLoopOutcome, AgentLoopRunSummary, AgentLoopTurnResult,
+    AutoModeSetupHintSetter, ClockMs, PermissionModeSetter, ProjectPermissionStoreConfig,
+    AUTO_MODE_SETUP_HINT_EVENT,
 };
 pub use auto_mode::{
     auto_mode_marker_path, ApprovalExplanation, AutoAllow, AutoModeBlockCounts, AutoModeBlocks,
@@ -309,7 +310,7 @@ pub use diagnostics::{
 };
 pub use durable_dispatch::{
     inline_control_payload, runtime_control_payload, DurableDispatchError, DurableDispatchSummary,
-    DurableStaleRecoverySummary, DurableWorkDispatcher, DurableWorkEnqueueInput,
+    DurableStaleRecoverySummary, DurableWorkDispatcher, DurableWorkEnqueueInput, INBOUND_WORK_KIND,
 };
 pub use entrusted_comparison::{
     IntegerObservationSummary, ObservationComparisonEvidence, ObservationComparisonLimit,
@@ -565,6 +566,7 @@ pub use self_improvement_live::{
 };
 pub use shacs_bus::{
     InboundMessage, MessageBus, MessageBusError, OutboundMessage, OwnerAcceptedAutomationResult,
+    OwnerAcceptedBrowserResume,
 };
 pub use shacs_heartbeat::{
     build_decision_request, current_time_str, heartbeat_tool_schema, is_deliverable,

@@ -50,6 +50,14 @@ impl ReplTurnExecutor for CliReplExecutor {
         self.adapter
             .process_cli_repl_priority_turn(&self.options, input)
     }
+
+    fn turn_written(&self, outcome: &ReplTurnOutcome) {
+        if let Some(host) = self.adapter.browser_host.as_deref() {
+            for episode in &outcome.browser_notices {
+                host.episode_notice_delivered(episode, None);
+            }
+        }
+    }
 }
 
 pub fn run_agent_repl(options: AgentReplOptions) -> Result<String, CliError> {
@@ -98,11 +106,14 @@ pub(crate) fn execute_repl_turn(
         .with_media(invocation.media_paths.clone())
         .with_session_key_override(invocation.session_key.clone());
     let (turn, outbound) = adapter.process_inbound_with_outbound(message, config, None, &[])?;
+    let notices = outbound.clone();
     let content = render_direct_turn_content(turn.final_content.unwrap_or_default(), outbound);
+    let browser_notices = crate::browser_notices_in(&notices, &content);
     Ok(ReplTurnOutcome {
         content,
         stop_reason: turn.stop_reason,
         command: turn.command,
+        browser_notices,
     })
 }
 

@@ -64,6 +64,18 @@ fn multipart_rejects_missing_media_file() {
 }
 
 #[test]
+fn accepted_send_without_message_id_is_a_failed_send() {
+    assert_eq!(
+        sent_message_id(&serde_json::json!({ "id": "1300000000000000001" })),
+        Ok("1300000000000000001".to_owned())
+    );
+    assert_eq!(
+        sent_message_id(&serde_json::json!({})),
+        Err("Discord create message response missing id".to_owned())
+    );
+}
+
+#[test]
 fn discord_client_posts_attachment_multipart_to_messages_endpoint() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
@@ -106,7 +118,7 @@ fn discord_client_posts_attachment_multipart_to_messages_endpoint() -> Result<()
             .map_err(|error| error.to_string())?;
         stream
             .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"id\":\"42\"}",
             )
             .map_err(|error| error.to_string())
     });
@@ -121,7 +133,8 @@ fn discord_client_posts_attachment_multipart_to_messages_endpoint() -> Result<()
         .new_agent();
     let api_base = format!("http://{address}");
 
-    DiscordClient::new(&agent, "discord-token", &api_base).send(message)?;
+    let ids = DiscordClient::new(&agent, "discord-token", &api_base).send(message)?;
+    assert_eq!(ids, ["42"]);
 
     let request = request_rx.recv()?;
     server

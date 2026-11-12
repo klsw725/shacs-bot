@@ -357,6 +357,7 @@ fn platform_normalizers_preserve_session_metadata_and_content_contracts() {
         guild_id: Some("guild".to_owned()),
         parent_channel_id: Some("parent".to_owned()),
         thread_id: Some("thread".to_owned()),
+        reply_to_message_id: Some("replied".to_owned()),
         attachments: vec!["/tmp/a.png".to_owned()],
     }
     .into_message();
@@ -365,6 +366,7 @@ fn platform_normalizers_preserve_session_metadata_and_content_contracts() {
         discord_thread_session_key("parent", "thread")
     );
     assert_eq!(discord.metadata["guild_id"], "guild");
+    assert_eq!(discord.metadata["reply_to_message_id"], "replied");
 
     let telegram = TelegramInbound {
         sender_id: "user".to_owned(),
@@ -373,6 +375,7 @@ fn platform_normalizers_preserve_session_metadata_and_content_contracts() {
         message_id: Some("msg".to_owned()),
         username: Some("alice".to_owned()),
         message_thread_id: Some("topic".to_owned()),
+        reply_to_message_id: None,
         media: Vec::new(),
     }
     .into_message();
@@ -381,6 +384,7 @@ fn platform_normalizers_preserve_session_metadata_and_content_contracts() {
         telegram_topic_session_key("chat", "topic")
     );
     assert_eq!(telegram.metadata["username"], "alice");
+    assert!(!telegram.metadata.contains_key("reply_to_message_id"));
 
     let email = EmailInbound {
         sender_email: "me@example.com".to_owned(),

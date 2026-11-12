@@ -41,6 +41,7 @@ fn result_source(message: &InboundMessage) -> Result<Option<AutomationSourceEven
                 result_ref: result_ref.clone(),
             }))
         }
+        None if message.owner_accepted_browser_resume().is_some() => Ok(None),
         None if message.metadata.get("injected_event").is_none() => Ok(None),
         None => Err("automation result lacks an owner-accepted terminal boundary".to_owned()),
     }
@@ -316,6 +317,30 @@ mod tests {
 
         assert!(message.owner_accepted_automation_result().is_none());
         assert!(result_source(&message).is_err());
+    }
+
+    #[test]
+    fn browser_resume_passes_only_with_its_owner_marker() {
+        let resume = shacs_channels::OwnerAcceptedBrowserResume {
+            episode: "00112233aabbccdd-1".to_owned(),
+            tool_call_id: "call-1".to_owned(),
+            reason: "returned".to_owned(),
+        };
+        let unmarked = result_message("browser_takeover_end");
+        assert_eq!(
+            result_source(&unmarked),
+            Err("automation result lacks an owner-accepted terminal boundary".to_owned())
+        );
+
+        let marked = unmarked.clone().with_owner_accepted_browser_resume(resume);
+        assert_eq!(result_source(&marked), Ok(None));
+
+        let stored: InboundMessage = serde_json::from_value(
+            serde_json::to_value(&marked).expect("inbound fixture should serialize"),
+        )
+        .expect("inbound fixture should deserialize");
+        assert!(stored.owner_accepted_browser_resume().is_none());
+        assert!(result_source(&stored).is_err());
     }
 
     #[test]

@@ -48,6 +48,10 @@ COPY --from=builder /app/crates/target/release/shacs-bot /usr/local/bin/shacs-bo
 # The directory above is made first: COPY --chmod would give new parents 0644,
 # which the non-root runtime user cannot traverse.
 COPY --chown=root:root --chmod=0644 docker/shacs-browser.json /etc/chromium/policies/managed/shacs-browser.json
+# Both parents come from the apt packages. The Debian websockify runs on
+# /usr/bin/python3, so its module path is dist-packages, not the image's own Python.
+COPY --chown=root:root --chmod=0644 docker/shacs-view.html /usr/share/novnc/shacs-view.html
+COPY --chown=root:root --chmod=0644 docker/shacs_view_auth.py /usr/lib/python3/dist-packages/shacs_view_auth.py
 
 USER shacs
 ENV HOME=/home/shacs

@@ -47,7 +47,7 @@ impl ChatCompletionAdapter for QueueBurstAdapter {
         _: Value,
         _: &str,
         default_chat_id: &str,
-        on_event: &mut dyn FnMut(WebSocketServerEvent),
+        on_event: &mut dyn FnMut(WebSocketServerEvent) -> bool,
     ) -> Result<(), ApiError> {
         for _ in 0..BURST_EVENTS {
             on_event(WebSocketServerEvent::Delta {

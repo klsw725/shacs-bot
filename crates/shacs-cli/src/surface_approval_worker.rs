@@ -3,7 +3,7 @@ use super::{
     durable_work_state_for_owner, now_millis, read_runtime_ownership_marker,
     runtime_durable_event_root, runtime_durable_work_payload_root, runtime_ownership_marker_path,
     sleep_with_stop, AgentLoopChatCompletionAdapter, CliError, RuntimeOwnershipMutationLock,
-    RuntimeOwnershipState, SessionManager, DURABLE_WORK_LEASE_DURATION_MS,
+    RuntimeOwnershipState, SessionManager, ThreadEndSignal, DURABLE_WORK_LEASE_DURATION_MS,
 };
 use shacs_api::ApiError;
 use shacs_core::runtime::{
@@ -20,10 +20,37 @@ use std::time::Duration;
 
 pub(crate) struct SurfaceApprovalWorker {
     stop: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<Result<(), CliError>>>,
 }
 
 impl SurfaceApprovalWorker {
+    fn spawn(work: impl FnOnce(&AtomicBool) -> Result<(), CliError> + Send + 'static) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let failed = Arc::new(AtomicBool::new(false));
+        let (worker_stop, worker_failed) = (stop.clone(), failed.clone());
+        let handle = thread::spawn(move || {
+            let failure = ThreadEndSignal::armed(worker_failed);
+            let result = work(&worker_stop);
+            if result.is_ok() {
+                failure.disarm();
+            }
+            result
+        });
+        Self {
+            stop,
+            failed,
+            handle: Some(handle),
+        }
+    }
+
+    /// Set once the worker thread ended on an error or a panic. Nothing else
+    /// runs the approval and automation passes, so the runtime that owns the
+    /// worker stops on it; `stop` returns the error.
+    pub(crate) fn failure_signal(&self) -> Arc<AtomicBool> {
+        self.failed.clone()
+    }
+
     pub(crate) fn stop(mut self) -> Result<(), CliError> {
         self.stop.store(true, Ordering::SeqCst);
         self.join()
@@ -64,23 +91,17 @@ pub(crate) fn start_surface_approval_worker(
             redact_string(&error.to_string())
         ))
     })?;
-    let stop = Arc::new(AtomicBool::new(false));
-    let worker_stop = stop.clone();
-    let handle = thread::spawn(move || {
-        while !worker_stop.load(Ordering::SeqCst) {
+    Ok(SurfaceApprovalWorker::spawn(move |stop| {
+        while !stop.load(Ordering::SeqCst) {
             process_due_surface_approvals(&adapter, &mut dispatcher, &data_dir)?;
             automation_worker::process_due_automation(&mut dispatcher, &data_dir, adapter.as_ref())
                 .map_err(CliError::Runtime)?;
-            sleep_with_stop(&worker_stop, Duration::from_millis(50));
+            sleep_with_stop(stop, Duration::from_millis(50));
         }
         process_due_surface_approvals(&adapter, &mut dispatcher, &data_dir)?;
         automation_worker::process_due_automation(&mut dispatcher, &data_dir, adapter.as_ref())
             .map_err(CliError::Runtime)
-    });
-    Ok(SurfaceApprovalWorker {
-        stop,
-        handle: Some(handle),
-    })
+    }))
 }
 
 pub(crate) fn process_due_surface_approvals(
@@ -92,7 +113,7 @@ pub(crate) fn process_due_surface_approvals(
     if !admission.writable {
         return Err(durable_work_admission_error(&admission));
     }
-    for work_id in admission.due_work_ids {
+    for work_id in admission.runnable_work_ids {
         let Some(item) = state.work.items.get(&work_id) else {
             continue;
         };
@@ -231,6 +252,7 @@ pub mod spec031_surface_approval_fixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn drop_requests_worker_stop_when_explicit_stop_is_skipped() {
@@ -239,6 +261,7 @@ mod tests {
         let observed_stop = stop.clone();
         let worker = SurfaceApprovalWorker {
             stop,
+            failed: Arc::new(AtomicBool::new(false)),
             handle: Some(thread::spawn(|| Ok(()))),
         };
 
@@ -247,5 +270,53 @@ mod tests {
 
         // Then: Drop requests stop so the owned thread is not left detached.
         assert!(observed_stop.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn failed_pass_raises_failure_signal_and_stop_returns_error() {
+        // Given: a worker whose pass fails, and one that runs until it is stopped.
+        let failing =
+            SurfaceApprovalWorker::spawn(|_| Err(CliError::Runtime("pass failed".to_owned())));
+        let running = SurfaceApprovalWorker::spawn(|stop| {
+            while !stop.load(Ordering::SeqCst) {
+                thread::yield_now();
+            }
+            Ok(())
+        });
+        let (failed, healthy) = (failing.failure_signal(), running.failure_signal());
+
+        // When: both are stopped, which waits for their threads.
+        let failure = failing.stop();
+        let success = running.stop();
+
+        // Then: only the failed worker raised the signal the gateway watches, and reports why.
+        assert!(failed.load(Ordering::SeqCst));
+        assert!(!healthy.load(Ordering::SeqCst));
+        assert!(matches!(failure, Err(CliError::Runtime(reason)) if reason == "pass failed"));
+        assert!(success.is_ok());
+    }
+
+    #[test]
+    fn panicked_pass_raises_failure_signal_before_stop() {
+        // Given: a worker whose pass panics.
+        let panicking = SurfaceApprovalWorker::spawn(|_| panic!("pass panicked"));
+        let failed = panicking.failure_signal();
+
+        // When: nothing stops or joins it.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !failed.load(Ordering::SeqCst) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        // Then: the signal the gateway watches is up, and stopping reports the panic.
+        assert!(failed.load(Ordering::SeqCst));
+        let reason = panicking
+            .stop()
+            .expect_err("a panicked worker stopped cleanly")
+            .to_string();
+        assert!(
+            reason.contains("surface approval worker panicked"),
+            "{reason}"
+        );
     }
 }

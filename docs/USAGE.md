@@ -2,7 +2,7 @@
 
 ## 컨테이너 브라우저
 
-어시스턴트는 `browser` 도구로 페이지를 열고 보이는 요소의 번호로 조작합니다. 설정을 켜는 것만으로 브라우저를 바로 띄우지는 않으며 첫 호출 때 시작합니다. 사용자가 그 화면을 보기만 하는 기능은 아래 [브라우저 화면 보기](#브라우저-화면-보기)에서 켭니다.
+어시스턴트는 `browser` 도구로 페이지를 열고 보이는 요소의 번호로 조작합니다. 설정을 켜는 것만으로 브라우저를 바로 띄우지는 않으며 첫 호출 때 시작합니다. 사용자가 그 화면을 보는 기능은 아래 [브라우저 화면 보기](#브라우저-화면-보기)에서 켭니다. 로그인처럼 사용자가 직접 해야 하는 단계에서는 [브라우저 넘겨받기와 돌려주기](#브라우저-넘겨받기와-돌려주기)대로 그 화면에서 직접 조작합니다.
 
 공식 Docker image 안에서 사용자 설정 파일에 다음 값을 넣습니다. `onboard`는 빠진 기본값만 채우고 기존 값을 보존합니다. workspace 안 설정이나 모델 인자는 실행 허락으로 받지 않습니다. 별도 설정 파일을 선택할 때도 workspace 밖의 사용자 소유 경로를 사용하세요.
 
@@ -11,31 +11,78 @@
   "tools": {
     "browser": {
       "enable": false,
+      "persistLogin": false,
       "startupTimeoutSeconds": 20,
       "idleTimeoutSeconds": 300,
       "pageTimeoutSeconds": 30,
+      "replyWaitMinutes": 30,
+      "takeoverMinutes": 15,
       "view": {
         "enable": false,
-        "password": ""
+        "password": "",
+        "url": ""
       }
     }
   }
 }
 ```
 
-`enable: true`는 브라우저 프로세스 시작만 허락합니다. 시작 때 공식 컨테이너 증명과 거절 규칙도 확인하며, 권한 mode나 대화형 여부에 기대지 않습니다. 페이지의 클릭·입력 승인을 대신하는 설정은 아닙니다. 시작 시간은 5–60초, 미사용 시간은 60–1800초, 한 동작 시간은 5–120초 범위에서 정하고 범위 밖 값은 설정 오류입니다.
+`enable: true`는 브라우저 프로세스 시작만 허락합니다. 시작 때 공식 컨테이너 증명과 거절 규칙도 확인하며, 권한 mode나 대화형 여부에 기대지 않습니다. 페이지의 클릭·입력 승인을 대신하는 설정은 아닙니다. 시작 시간은 5–60초, 미사용 시간은 60–1800초, 한 동작 시간은 5–120초, 사용자의 답을 기다리는 시간(`replyWaitMinutes`)은 5–120분, 사용자가 넘겨받아 조작하는 시간(`takeoverMinutes`)은 5–60분 범위에서 정하고 범위 밖 값은 설정 오류입니다.
 
-한 프로세스에서는 한 세션만 브라우저를 사용합니다. 다른 세션은 즉시 사용 중이라는 결과를 받습니다. 같은 세션은 다음 대화에서도 이어 쓰지만 미사용 한도에 도달하면 닫힙니다. Xvfb 가상 화면 위에 Chromium 일반 창을 띄우며 프로필·HOME·임시 자료는 현재 UID로 `/tmp/shacs-browser-…` 아래에만 만듭니다. 닫을 때 자식 프로세스를 종료하고 임시 폴더를 지웁니다. 강제 SIGKILL이나 전원 중단 때 남은 폴더는 다른 실행이 임의로 지우지 않습니다. gateway·api는 메모리 한도 2G, 예약 512M, 공유 메모리 256mb를 사용합니다.
+한 프로세스에서는 한 세션만 브라우저를 사용합니다. 다른 세션은 즉시 사용 중이라는 결과를 받습니다. 같은 세션은 다음 대화에서도 이어 쓰지만 미사용 한도에 도달하면 닫힙니다. Xvfb 가상 화면 위에 Chromium 일반 창을 띄우며 기본 설정에서는 프로필·HOME·임시 자료를 현재 UID로 `/tmp/shacs-browser-…` 아래에 만듭니다. `persistLogin`을 켜면 프로필만 data 폴더에 남깁니다. 닫을 때 자식 프로세스를 종료하고 임시 폴더를 지웁니다. 강제 SIGKILL이나 전원 중단 때 남은 폴더는 다른 실행이 임의로 지우지 않습니다. gateway·api는 메모리 한도 2G, 예약 512M, 공유 메모리 256mb를 사용합니다.
 
 연결은 SOCKS5에서 이름을 한 번만 해석하고, 나온 주소를 모두 기존 `NetworkGuard`로 확인한 뒤 그 주소로 연결합니다. `tools.ssrfWhitelist`는 주소 단위 허용이며 포트를 구별하지 않습니다. 같은 컨테이너 주소나 loopback을 허용하면 API·WebSocket 등 그 주소의 다른 포트도 열릴 수 있습니다. DevTools는 TCP 포트 없이 파이프로만 연결합니다.
 
 내부 주소를 막는 Chromium 정책은 추가 방어이며 유일한 차단 장치가 아닙니다. 페이지 내용은 http(s) 주 문서가 읽기 전후와 이벤트 기록에서 동일할 때만 반환합니다. 파일 업로드·다운로드는 거절합니다. 자식 프로세스는 빈 환경에서 필요한 경로와 화면 설정만 받으며 provider 비밀 값이나 `.env.json` 값을 상속하지 않습니다. 다만 Chromium sandbox는 꺼져 있고 shacs-bot과 같은 컨테이너·UID로 실행되므로 브라우저 취약점이 data 폴더의 비밀 파일을 읽을 위험은 남습니다.
 
-`runtime inspect`의 `Browser`와 diagnostics의 `browser`는 `enabled`, `available`, `reason`, `state`, `ownerObserved`, `updatedAtMs`와 화면 보기 상태 `view`를 보여 줍니다. 별도 inspect는 현재 실행 소유자와 일치하는 `runtime/browser-state.json`만 인정합니다. 소유자가 바뀌거나 유효 시간이 끝났거나 파일을 읽을 수 없으면 `unknown`입니다. 한 번 실행하고 끝나는 CLI처럼 소유 표식이 없으면 별도 inspect로 실행 상태를 보장하지 않으며 `ownerObserved: false`입니다. URL·페이지 내용·프로필 경로는 상태 파일과 진단에 넣지 않습니다.
+`runtime inspect`의 `Browser`와 diagnostics의 `browser`는 `enabled`, `available`, `reason`, `state`, `ownerObserved`, `updatedAtMs`, 화면 보기 상태 `view`, 답 기다리는 시간 `replyWaitMinutes`와 `replyWaitDeadlineMs`, 조작 상태 `control`(`assistant`·`user`), 넘겨받기 한도 `takeoverMinutes`와 `takeoverDeadlineMs`를 보여 줍니다. `replyWaitDeadlineMs`는 사용자의 답을 기다리는 동안에만, `takeoverDeadlineMs`는 사용자가 넘겨받은 동안에만 값이 있고, 남은 시간은 그 값에서 지금 시각을 뺀 것입니다. 넘겨받은 세션, 넘겨받기 회차, 붙여넣은 글은 넣지 않습니다. 별도 inspect는 현재 실행 소유자와 일치하는 `runtime/browser-state.json`만 인정합니다. 소유자가 바뀌거나 유효 시간이 끝났거나 파일을 읽을 수 없으면 `unknown`입니다. 한 번 실행하고 끝나는 CLI처럼 소유 표식이 없으면 별도 inspect로 실행 상태를 보장하지 않으며 `ownerObserved: false`입니다. URL·페이지 내용·프로필 경로는 상태 파일과 진단에 넣지 않습니다.
+
+### 브라우저 로그인 유지
+
+`tools.browser.persistLogin`의 기본값은 `false`입니다. `true`로 켜면 `<data 폴더>/browser/profile/` 하나를 다음 브라우저가 이어 씁니다. 처음 만드는 `browser/`와 `profile/`은 0700이고, 이미 있는 프로필의 권한은 바꾸지 않습니다. 실행 중인 브라우저는 시작할 때 읽은 값을 닫힐 때까지 씁니다. 끄면 임시 프로필로 돌아가며 이미 저장한 프로필은 읽거나 지우지 않습니다.
+
+프로필에는 cookie, 로그인 상태, 방문 기록, local storage·IndexedDB·service worker·Cache Storage 같은 사이트 자료가 남습니다. 기한이 없는 session cookie는 브라우저를 닫으면 없어져 그런 사이트는 다시 로그인해야 합니다. 사이트별·대화방별로 나누지 않으므로 모든 대화가 같은 로그인을 씁니다. 로그인 유지 브라우저를 닫을 때에는 Chromium에 정상 종료를 요청하고 최대 5초 뒤 강제로 종료합니다. `/stop`이나 닫기 응답도 그만큼 늦어질 수 있습니다.
+
+HTTP cache는 꺼지지 않습니다. `<generation 임시 폴더>/cache/`, 곧 `/tmp/shacs-browser-*/cache/`에 저장하고 브라우저를 닫을 때 임시 폴더와 함께 지웁니다. shacs-bot이 SIGKILL·OOM·`docker kill`·전원 중단으로 정리하지 못하면 로그인한 페이지 응답이 그곳에 남을 수 있습니다. `docker restart`로는 지워지지 않고 container를 새로 만들면 없어집니다. 시작할 때 남은 임시 폴더를 청소하지 않습니다. 이 임시 폴더는 0700이지만 비밀 파일 규칙의 대상은 아닙니다. 프로필에는 HTTP cache 외의 Code Cache·GPU cache·사이트의 Cache Storage 등이 남을 수 있습니다.
+
+로그인 기록은 사실상 평문이며 shacs-bot과 같은 container에 있습니다. Chromium sandbox가 꺼져 있어 브라우저 취약점으로 기록을 읽을 위험이 있습니다. 로그인된 페이지를 어시스턴트가 읽으면 내용이 AI provider로 갈 수 있습니다. `browser/profile/` 전체는 설정을 꺼도 모든 mode의 비밀 파일입니다. 목록·검색에서 숨기고, 읽기는 매번 묻고, 쓰기·삭제는 거절합니다. 사용자 allow 규칙과 `bypass_permissions`도 이를 풀지 못합니다. hard link 확인은 프로필에 별도 한도(파일 20,000개, 깊이 16)를 쓰며 한도를 넘기면 같은 device의 hard link를 비밀로 다룰 수 있습니다.
+
+사용자가 로그인 기록을 지울 때 실행합니다:
+
+```sh
+shacs-bot browser forget
+shacs-bot --config /path/to/data/config.json browser forget --yes
+docker compose exec gateway shacs-bot browser forget
+docker compose exec api shacs-bot browser forget --yes
+```
+
+Docker의 일반형은 `docker compose exec <service> shacs-bot browser forget`입니다. 명령은 폴더·크기와 닫을 브라우저가 있는지 보여 주고 `계속할까요? [y/N]`으로 묻습니다. `y`·`yes`만 진행하며 `--yes`·`-y`는 질문을 건너뜁니다. 터미널이 아니면 `--yes`가 필요합니다. 프로필과 브라우저가 모두 없으면 묻지 않습니다. `tools.browser.enable`이나 `persistLogin`을 꺼도 됩니다.
+
+같은 data 폴더를 쓰는 브라우저를 모두 닫은 뒤 프로필만 지웁니다. gateway·api, 임시 프로필, 답을 기다리거나 사용자가 넘겨받은 브라우저도 포함됩니다. 저장된 프로필이 없어도 떠 있는 브라우저를 닫습니다. 실행 중인 동작이 있으면 끝난 뒤 닫도록 예약하고 최대 15초 기다립니다. 시간 안에 닫지 못하면 지우지 않고 오류로 끝납니다. 예약은 남으므로 동작이 끝난 뒤 닫힐 수 있고, 그 뒤 명령을 다시 실행하면 됩니다. 닫힌 세션은 다음 `browser` 호출에서 `browser_closed`를 받습니다.
+
+`browser/`와 `active.lock`, `forget.lock`, `profile.lock`은 삭제 후에도 남습니다. 어시스턴트는 이 경로를 어떤 mode에서도 쓰거나 옮기거나 지울 수 없지만 읽을 수는 있습니다. 이름을 적지 않는 스크립트나 사용자가 직접 경로를 바꾸는 것은 이 보호가 잡지 못합니다. 브라우저는 1초마다 경로를 확인해 달라지면 닫고 inspect에 `browser_lock_replaced`를 남깁니다. 저장 프로필은 폴더 자체에도 잠금을 걸어, Chromium의 `SingletonLock`이 아직 없는 시작 중에도 다른 `forget`이 지우지 못하게 합니다. 파일 공유 방식이 이 잠금을 지원해야 하며 Docker Desktop의 모든 공유 방식에서 확인한 것은 아닙니다. 브라우저 시작·삭제 중에 사용자가 프로필 폴더 자체를 옮기거나 그 이름을 다른 폴더로 교체하는 작업은 함께 하지 마세요.
+
+잠김·읽기 오류에서는 프로필을 고치지 않고 시작을 거절합니다. `browser_profile_in_use`면 다른 실행이 닫힐 때까지 기다리세요. `browser_profile_unreadable`이면 폴더가 실제 폴더이며 현재 사용자 소유이고 읽기·쓰기·진입 권한이 있는지 확인하세요. `browser_profile_locked`면 `SingletonLock`을 확인하세요. 같은 hostname의 죽은 Chromium이 남긴 잠금은 Chromium이 시작하면서 정리합니다. 다른 hostname이나 알아볼 수 없는 잠금은 시작과 forget을 모두 막습니다. 특히 container를 새로 만들면 hostname이 달라질 수 있습니다. **그 프로필을 쓰는 다른 브라우저가 없음을 직접 확인한 뒤에만** 남은 `Singleton*`을 직접 지우고 다시 시작하거나 forget을 실행하세요. shacs-bot은 잠금을 스스로 지우지 않습니다. 강제 종료 직전의 cookie는 저장되지 않았을 수 있습니다.
+
+임시 프로필 브라우저도 `browser/` 폴더 자체의 공유 잠금을 정리가 끝날 때까지 유지합니다. 따라서 `active.lock` 파일만 교체되거나 없어져도 forget은 살아 있는 브라우저를 놓치지 않고, 저장 프로필이 없는 경우에도 닫기를 기다립니다. 파일 잠금과 폴더 잠금의 기다림을 합쳐 최대 15초이며, 확인하지 못하면 성공이나 삭제를 보고하지 않습니다. 저장 프로필을 여는 동안 forget이 먼저 그 폴더를 지운 경우에는 브라우저 시작을 `browser_profile_unreadable`로 거절하며 자동으로 다시 만들지 않습니다.
+
+실행 방식별 적용 범위는 다음과 같습니다.
+
+| 실행 | 로그인 유지 |
+|---|---|
+| CLI 대화·REPL | 브라우저 도구가 제공되는 실행에서 같은 설정을 사용합니다. `browser forget`은 별도 사용자 명령입니다. |
+| gateway `run` | side-effect 도구를 켠 실행에서 적용됩니다. 외부 channel 유무와 관계없이 넘겨받기 이어 가기 알림도 설치됩니다. |
+| `serve --allow-api-side-effects` | 실제 API 브라우저가 같은 프로필·잠금 규칙을 사용하고 이어 가기 알림을 설치합니다. 옵션이 없으면 브라우저 도구가 없습니다. |
+| `web` | 브라우저 도구와 browser host가 없어 이 설정으로 브라우저가 생기지 않습니다. |
+| 설정·onboard | 기본값은 꺼짐이며 기존 `persistLogin` 값을 보존합니다. |
+
+`runtime inspect`의 브라우저 항목에는 `login.persist`, `login.profile.exists`, `path`, `size_bytes`, `size_truncated`, `state`가 있습니다. 상태는 `ready`·`absent`·`in_use`·`locked`·`unreadable` 중 하나입니다. 크기는 symlink를 따라가지 않고 파일 20,000개까지만 합칩니다. inspect는 폴더와 lock 파일을 만들지 않습니다. diagnostics에는 `persist`, `exists`, `state`만 실으며 파일 이름·내용·사이트는 넣지 않습니다.
+
+실제 Docker 확인은 승인 뒤 `bash scripts/spec050-saved-login-check.sh --approved`로 합니다. 일회용 data 폴더와 별도 Compose project만 사용하고 끝나면 지웁니다. 이 작업에서는 사용자 지시로 실행하지 않았으므로 실제 cookie 유지, HTTP cache 위치·정리, 강제 종료 흔적, 정상 종료 후 SingletonLock 정리, container 사이 잠금과 forget, 경로 교체 뒤 닫힘, 실제 exec의 lock 쓰기 거절은 미검증입니다.
 
 ### 브라우저 화면 보기
 
-Docker가 도는 그 컴퓨터에서 어시스턴트가 조작하는 브라우저 창을 보기만 할 수 있습니다. 공식 image의 `x11vnc`가 브라우저의 가상 화면을 container 안 `127.0.0.1:5900`에만 내보내고, `websockify`가 noVNC 페이지와 그 연결을 container 포트 6080에서 제공합니다. Compose는 gateway의 6080을 host `127.0.0.1:6080`에만, api의 6080을 host `127.0.0.1:6081`에만 publish합니다. 다른 interface에는 열지 않고 5900은 publish하지 않습니다.
+Docker가 도는 그 컴퓨터에서 어시스턴트가 조작하는 브라우저 창을 볼 수 있습니다. 어시스턴트가 조작하는 동안에는 보기 전용이고, 사용자가 넘겨받은 동안에만 같은 화면에서 클릭·키 입력을 받습니다([브라우저 넘겨받기와 돌려주기](#브라우저-넘겨받기와-돌려주기)). 공식 image의 `x11vnc`가 브라우저의 가상 화면을 container 안 `127.0.0.1:5900`에만 내보내고, `websockify`가 noVNC 페이지와 그 연결을 container 포트 6080에서 제공합니다. Compose는 gateway의 6080을 host `127.0.0.1:6080`에만, api의 6080을 host `127.0.0.1:6081`에만 publish합니다. 다른 interface에는 열지 않고 5900은 publish하지 않습니다.
 
 켜려면 `tools.browser.view.enable`을 `true`로 두고 비밀번호는 data 폴더의 `.env.json`에 둡니다. config에는 이름만 적습니다.
 
@@ -49,7 +96,9 @@ Docker가 도는 그 컴퓨터에서 어시스턴트가 조작하는 브라우�
 
 `${이름}`은 다른 비밀과 같은 순서로 풉니다. 비어 있지 않은 process 환경 변수가 먼저, 그다음 `.env.json`이며 runtime이 `.env.json` 값을 환경에 내보내지는 않습니다. 이 칸만은 값이 아직 없어도 설정 오류가 아닙니다. `"${SHACS_BROWSER_VIEW_PASSWORD}"`를 적어 두고 값을 어디에도 두지 않으면(화면 보기를 꺼 둔 채로도) shacs-bot과 브라우저는 그대로 시작하고, 화면 보기를 켰다면 `password_missing`으로 화면 보기만 쓸 수 없습니다. 다른 칸의 `${이름}` 누락은 지금처럼 설정 오류입니다. config에 비밀번호를 직접 적었다면 `runtime config-migrate`가 다른 `password` 키처럼 `SHACS_TOOLS_BROWSER_VIEW_PASSWORD`로 옮깁니다. `onboard`는 기존 `view` 값을 보존하고 없을 때만 `enable: false`, `password: ""` stub을 더하며, 비밀번호를 대신 만들어 주지 않습니다.
 
-브라우저가 뜨면 gateway는 `http://127.0.0.1:6080/vnc.html`, api는 `http://127.0.0.1:6081/vnc.html`을 host의 브라우저에서 열고 noVNC 화면의 비밀번호 칸에 값을 칩니다(주소에 비밀번호를 넣지 않습니다). 한 번 실행하고 끝나는 CLI의 안내 주소는 6080이며 실제 publish는 사용자의 Compose 설정에 따릅니다. 화면은 보기 전용입니다. 보기 페이지를 고쳐 클릭·키를 보내도 `x11vnc`가 서버에서 버리고(`-viewonly`), selection·clipboard 교환도 양방향으로 끕니다(`-nosel -noclipboard`). 화면을 보는 사람이 있어도 어시스턴트의 동작·한도·승인 판정은 같습니다.
+브라우저가 뜨면 gateway는 `http://127.0.0.1:6080/shacs-view.html`, api는 `http://127.0.0.1:6081/shacs-view.html`을 host의 브라우저에서 열고 noVNC 화면의 비밀번호 칸에 값을 칩니다(주소에 비밀번호를 넣지 않습니다). 이 페이지는 noVNC 화면과 그 아래 붙여넣기 칸으로 되어 있고 밖의 자원을 부르지 않습니다. `vnc.html`을 직접 열려면 주소 뒤에 `?path=websockify%3Ftoken%3Dview`를 붙여야 연결됩니다. 한 번 실행하고 끝나는 CLI의 안내 주소는 6080이며 실제 publish는 사용자의 Compose 설정에 따릅니다. 어시스턴트가 조작하는 동안 화면은 보기 전용입니다. 보기 페이지를 고쳐 클릭·키를 보내도 `x11vnc`가 서버에서 버리고(`-viewonly`), selection·clipboard 교환은 넘겨받은 동안에도 양방향으로 끕니다(`-nosel -noclipboard`). 화면을 보는 사람이 있어도 어시스턴트의 동작·한도·승인 판정은 같습니다.
+
+화면 보기의 WebSocket 연결은 요청의 `Origin`이 `Host`와 같을 때만 받습니다. 사용자의 브라우저가 연 다른 웹페이지가 이 포트에 연결하는 것을 막기 위한 것이며, `Host`를 바꾸는 proxy를 거쳐 열면 둘이 달라져 연결이 거절됩니다. 이 확인과 새 보기 페이지는 image 안에 있으므로 이전 image를 쓰고 있다면 다시 build해야 합니다.
 
 비밀번호 규칙과 한계:
 
@@ -63,7 +112,7 @@ Docker가 도는 그 컴퓨터에서 어시스턴트가 조작하는 브라우�
 
 화면 보기는 브라우저와 함께 켜지고 꺼집니다. 브라우저(가상 화면·Chromium·DevTools)가 시작 한도 안에 먼저 뜨고, 그 뒤 화면 보기가 자기 몫의 10초 안에 시작합니다. 이 10초는 브라우저 시작 한도와 별개여서 화면 보기가 늦어도 브라우저는 실패하지 않으며, 첫 호출이 그만큼 더 걸릴 수 있습니다. `x11vnc`나 `websockify` 중 하나만 죽으면 둘을 모두 닫고 `failed`로 기록하되 브라우저는 계속 쓰며, 그 브라우저가 떠 있는 동안 자동으로 다시 켜지 않습니다. 다음에 브라우저가 새로 뜰 때 다시 시도합니다. 브라우저를 닫거나 Xvfb·Chromium이 죽거나 미사용으로 닫히거나 shacs-bot이 끝나면 화면 보기도 끝나고 비밀번호 파일도 남지 않습니다. 화면 보기를 켜면 container가 `x11vnc`·`websockify` 두 process만큼 CPU와 메모리를 더 쓰고, 화면을 보고 있는 동안 전송량이 늘어납니다.
 
-`runtime inspect`와 diagnostics의 `browser.view`는 `enabled`, `state`(`disabled`, `unavailable`, `starting`, `open`, `failed`, `closed`, `unknown`), `reason`, `url`을 보여 줍니다. `url`은 열려 있을 때만 있습니다. 별도 inspect에서는 브라우저 상태와 같은 소유자 검증을 거치므로 소유자가 다르거나 유효 시간이 끝났으면 `state: unknown`이고 이전 URL로 열림을 주장하지 않습니다. 꺼짐·비밀번호 문제·프로그램 부재 같은 설정상의 사실은 `enabled`와 `reason`으로 그대로 보입니다. 보기 연결에서 입력을 받거나 로그인하는 일은 이 기능의 범위가 아닙니다.
+`runtime inspect`와 diagnostics의 `browser.view`는 `enabled`, `state`(`disabled`, `unavailable`, `starting`, `open`, `failed`, `closed`, `unknown`), `reason`, `url`, `urlIgnored`를 보여 줍니다. `url`은 열려 있을 때만 있고, `urlIgnored`는 `tools.browser.view.url`에 쓸 수 없는 값이 있어 기본 주소를 보이는 중일 때 `true`입니다. 별도 inspect에서는 브라우저 상태와 같은 소유자 검증을 거치므로 소유자가 다르거나 유효 시간이 끝났으면 `state: unknown`이고 이전 URL로 열림을 주장하지 않습니다. 꺼짐·비밀번호 문제·프로그램 부재 같은 설정상의 사실은 `enabled`와 `reason`으로 그대로 보입니다. 보기 연결에서 입력을 받는 것은 사용자가 넘겨받은 동안뿐입니다.
 
 실제 Docker에서 화면 보기를 확인하는 opt-in 명령은 `bash scripts/spec049-viewer-check.sh --approved`입니다. 별도 Compose project에 gateway·api 역할 container 둘과 정적 페이지 container를 띄우고, 임시 `.env.json`의 비밀번호(출력하지 않습니다)로 host `127.0.0.1:6080`·`6081`에서 framebuffer를 받는지, 틀린 비밀번호가 거절되는지, 인증한 client가 보낸 클릭·키·clipboard가 페이지를 바꾸지 않는지, 5900이 publish되지 않고 브라우저가 viewer·API 포트에 가지 못하는지, 시작 뒤 비밀번호 파일이 없는지, viewer 자식 하나를 죽여도 `look`이 되는지, 브라우저를 닫으면 viewer가 끝나는지 확인합니다. 끝나면 자신의 project와 임시 자료만 지웁니다.
 
@@ -84,9 +133,72 @@ Docker가 도는 그 컴퓨터에서 어시스턴트가 조작하는 브라우�
 
 각 결과는 URL·제목·번호·역할·이름·현재 값·보이는 글과 잘린 개수를 알려 줍니다. 번호는 다음 결과가 발급되거나 페이지·탭이 바뀌면 만료됩니다. 지난 번호, 이름이나 종류가 바뀐 요소, 다른 요소에 가려진 버튼에는 입력하지 않습니다. 다시 `look`한 뒤 새 번호와 `revision`을 사용하세요. 입력은 기존 값을 교체하며 `submit: true`면 마지막에 Enter를 누릅니다. `press`는 Enter, Tab, Shift+Tab, Escape, 방향키, Home, End, PageUp, PageDown, Backspace, Delete만 받습니다. `scroll`에 요소 번호를 주려면 `revision`도 함께 줍니다. `wait`는 최대 10초이며 글을 못 찾으면 시간 초과 사실과 현재 화면을 돌려줍니다.
 
+### 대화로 고르기와 `/browser` 명령
+
+어시스턴트는 사용자가 정할 단계에 이르면 조작하지 않고 멈춥니다. 여러 선택지 중 하나를 골라야 할 때, 요청하지 않은 구매·결제·제출 같은 확정이 남았을 때, 페이지가 요청과 다를 때가 그렇습니다. 한 일과 페이지에 보이는 것을 짧게 알리고 선택지를 최근 결과의 요소 이름 그대로 나열한 뒤 답을 기다립니다. 답에는 번호가 아니라 그 요소 이름을 써 주세요. 번호는 다음 결과가 나오면 만료됩니다. 답이 오면 어시스턴트는 페이지를 다시 보고 그 이름의 요소가 지금 있을 때만 클릭하며, 없으면 바뀐 페이지를 설명합니다.
+
+비밀번호·인증 번호·카드 번호는 대화로 보내지 마세요. 어시스턴트도 묻지 않습니다. 이런 값이 필요한 단계에서 어시스턴트는 브라우저를 넘기고, 사용자는 화면 보기에서 직접 입력합니다. 방법은 [브라우저 넘겨받기와 돌려주기](#브라우저-넘겨받기와-돌려주기)에 있습니다.
+
+사용자 메시지로 시작한 turn이 끝나면 브라우저는 `tools.browser.replyWaitMinutes`(기본 30분, 5–120분) 동안 답을 기다리고, 그동안 `idleTimeoutSeconds`는 세지 않습니다. 시간이 지나면 닫히며 그 세션의 다음 `browser` 호출이 `browser_reply_wait_timeout`을 한 번 받아 어시스턴트가 닫혔다고 알립니다. 기다리는 동안에도 다른 세션은 사용 중이라는 결과를 받습니다. 맡긴 일이나 알림처럼 사용자 메시지로 시작하지 않은 실행은 이 시간을 쓰지 않고 미사용 한도를 따릅니다.
+
+화면을 보여 달라고 하면 어시스턴트는 `capture` 동작으로 지금 화면을 새로 찍어 media 폴더의 `tool-results/`에 저장하고 `message` 도구로 대화방에 보냅니다. 그림은 그 대화방을 운영하는 channel 회사의 서버에도 올라가므로 남기고 싶지 않은 화면에서는 청하지 마세요. `capture`는 `tools.browser.screenshots` 값과 관계없이 찍고, 그 그림을 모델에는 붙이지 않습니다. 열린 브라우저가 없으면 새로 띄우지 않고 `browser_not_open`을 돌려줍니다. 찍지 못하면 어시스턴트는 까닭을 알리고 예전 그림을 대신 보내지 않습니다.
+
+| 명령 | 하는 일 |
+|---|---|
+| `/browser status` | 브라우저 상태(열림·닫힘·꺼짐·쓸 수 없음), 쓰는 세션, 답을 기다리는 남은 분, 조작하는 쪽(어시스턴트·사용자), 넘겨받은 세션과 회차 표시와 남은 분, 화면 보기 주소를 보여 줍니다. 넘겨받은 동안 답 기다리기는 `멈춤`입니다. |
+| `/browser takeover` | 그 process의 브라우저를 넘겨받습니다. 브라우저가 없으면 빈 탭으로 새로 띄웁니다. |
+| `/browser return [회차]` | 넘겨받은 브라우저를 돌려줍니다. 회차 표시(예 `9f2c-3`)를 적으면 그 넘겨받기만 돌려줍니다. |
+| `/browser close` | 어느 대화방에서 보내든 그 process의 브라우저를 닫습니다. 실행 중인 동작이 있으면 그 동작이 끝난 뒤에 닫습니다. 넘겨받은 동안에도 닫습니다. |
+
+네 명령은 그 세션의 turn이 도는 중에도 줄을 서지 않고 처리하며, 진행 중인 일을 취소하지 않고 대화 기록에도 남기지 않습니다. `/new`와 `/stop`도 그 세션의 브라우저를 닫습니다. 사용자가 닫았거나 process가 다시 시작되어 닫힌 뒤에는 그 세션의 다음 `browser` 호출이 `browser_closed`를 한 번 받습니다. 기다리던 페이지는 되살리지 않으므로 다시 열어야 합니다.
+
+### 브라우저 넘겨받기와 돌려주기
+
+로그인, 비밀번호, 인증 번호, CAPTCHA, 본인 확인처럼 사용자가 직접 해야 하는 단계에서는 브라우저를 넘겨받아 화면 보기에서 직접 조작하고, 끝나면 돌려줍니다. 화면 보기가 열려 있어야 합니다(`tools.browser.view.enable`, 유효한 비밀번호, 두 process가 살아 있음). 아니면 넘겨받기는 화면 보기 사유와 함께 거절되고 아무것도 바뀌지 않습니다.
+
+넘겨받는 길은 둘입니다.
+
+- **말로:** "내가 직접 할게"처럼 넘겨 달라고 하거나 어시스턴트가 로그인 단계에 이르면, 어시스턴트가 `browser`의 `handoff` 동작으로 넘기고 멈춥니다. 대화방에는 까닭, 화면 보기 주소, 회차 표시, 자동으로 돌려받기까지 남은 분이 담긴 안내가 옵니다. 다 했으면 그 안내에 아무 말로나 답하세요(예: "다 했어"). 답이 오면 브라우저가 돌아가고 어시스턴트가 페이지를 다시 본 뒤 이어 갑니다. 지금 화면을 볼 수 없으면 "나중에"라고 답하세요. 어시스턴트는 다시 넘기지 않고 할 수 있는 데까지 한 뒤 남은 단계를 알립니다. 답이 어느 쪽인지는 어시스턴트가 읽고 판단하므로 잘못 읽을 수 있습니다.
+- **명령으로:** `/browser takeover`를 보냅니다. 어느 세션이 쓰던 브라우저든 넘겨받고, 열린 브라우저가 없으면 빈 탭으로 새로 띄웁니다. 답에 회차 표시와 화면 보기 주소, 한도가 있습니다. 끝나면 `/browser return`으로 돌려줍니다.
+
+넘겨받은 동안에는 다음과 같습니다.
+
+- 어시스턴트의 `browser` 동작은 어느 세션이 부르든 실행되지 않고 `browser_user_control`을 받습니다. 다른 대화방도 브라우저를 쓰지 못합니다.
+- 화면 보기가 클릭과 키를 받습니다(`x11vnc`가 `-viewonly` 없이 다시 뜹니다). clipboard 교환은 계속 꺼져 있으므로 한글이나 긴 글은 붙여넣기 칸으로 넣습니다.
+- `idleTimeoutSeconds`와 `replyWaitMinutes`는 세지 않고 `tools.browser.takeoverMinutes`(기본 15분, 5–60분)만 셉니다. 지나면 자동으로 돌려받습니다. 말로 넘겨받은 경우에는 어시스턴트가 이어서 알리고(아래 "스스로 이어지는 곳" 참고), `/browser takeover`로 넘겨받은 경우에는 대화방에 알리지 않으므로 `/browser status`로 확인하세요.
+- 탭은 하나입니다. 페이지가 새 창을 열면 그 창이 지금 탭이 되고 앞 탭은 닫힙니다. 그래서 새 창이 앞 창에 결과를 돌려주는 로그인(일부 OAuth)은 끝나지 않을 수 있습니다. 같은 탭에서 주소를 옮겨 가는 로그인은 됩니다. 파일 올리기와 내려받기는 넘겨받은 동안에도 막혀 있습니다.
+- `/browser close`는 브라우저를 닫습니다. 넘겨받은 세션의 `/stop`과 `/new`는 넘겨받기를 끝내며, 그 세션이 브라우저를 쓰던 세션이면 브라우저도 닫습니다.
+- 입력을 받는 `x11vnc`나 `websockify`가 죽으면 넘겨받기를 끝내고 화면 보기는 `failed`가 됩니다. 브라우저는 계속 씁니다.
+
+돌려주는 방법은 다음과 같습니다.
+
+- 말로 넘겨받았다면 그 안내에 답합니다. Telegram과 Discord에서 답글로 답할 때는 **지금 넘겨받기 안내**에 달아야 합니다. 지난 안내나 다른 메시지에 단 답글은 답으로 쓰이지 않고, 그렇다는 안내만 돌아옵니다.
+- 답글 없이 보낸 메시지는 shacs-bot에 닿은 때 열려 있던 넘겨받기에 묶입니다. 넘겨받기 안내가 전달되기 전에 보낸 메시지는 답으로 쓰이지 않으므로 안내를 본 뒤 다시 보내세요. channel이 늦게 전한 메시지는 닿은 때의 넘겨받기에 묶이므로, 앞 넘겨받기를 두고 한 답이 새 넘겨받기를 끝낼 수도 있습니다. Slack, Email, WhatsApp, WebSocket, API의 메시지는 모두 답글 없는 메시지로 다룹니다.
+- `/browser return`은 어느 대화방에서든 됩니다. 인자가 없으면 위와 같은 규칙(답글이 가리키는 안내, 없으면 닿은 때의 넘겨받기)으로 맞추고, `/browser return <회차 표시>`는 적은 넘겨받기가 지금 열려 있을 때만 돌려줍니다. 다른 대화방에서 돌려주거나 안내를 받지 못했을 때는 회차 표시를 적으세요. 회차 표시는 안내와 `/browser status`에 있습니다.
+
+돌려주면 shacs-bot은 입력을 받던 process가 끝났는지 확인한 뒤에만 어시스턴트에게 조작을 돌려주고 화면 보기를 다시 보기 전용으로 띄웁니다. 확인하지 못하면 브라우저를 닫습니다. 넘겨받기 전의 요소 번호와 권한 판정은 모두 무효가 되어 어시스턴트는 다시 `look`합니다. 페이지는 사용자가 두고 간 그대로이므로 로그인해 둔 페이지를 다시 열지 않고 읽습니다. 넘겨받을 때와 돌려줄 때 `x11vnc`와 `websockify`가 다시 뜨므로 이어져 있던 화면 보기는 끊기고 페이지가 잠깐 열리지 않습니다. 다시 연결하세요.
+
+**붙여넣기 칸.** 보기 페이지(`…/shacs-view.html`) 아래에 비밀번호 칸, 글 칸, 보내기 버튼이 있습니다. 화면 보기 비밀번호를 한 번 더 적고 글을 보내면 브라우저 페이지에서 지금 focus가 있는 곳에 그 글이 들어갑니다(먼저 화면에서 넣을 칸을 클릭하세요). 넘겨받은 동안에만 됩니다. 글은 한 번에 20000바이트까지이고 줄바꿈과 탭 말고 다른 제어 문자는 받지 않습니다. 글과 그 길이는 저장하지 않으며 로그, 상태 파일, inspect, 어시스턴트에게 가는 결과에 남기지 않습니다. 비밀번호는 그대로 보내지 않고 연결마다 새로 받은 값과 함께 hash해 보내며, 한 넘겨받기에서 10번 틀리면 그 넘겨받기의 붙여넣기가 꺼집니다(화면 입력은 그대로 되고, 다시 넘겨받으면 돌아옵니다). 보기 화면에 직접 치는 한글 조합은 깨질 수 있으므로 한글은 이 칸을 쓰세요.
+
+**`tools.browser.view.url`.** 안내와 `/browser status`, inspect에 보일 기준 주소입니다. 보여 주기만 하고 포트를 열거나 연결을 만들지 않으며, shacs-bot은 그 주소가 열리는지 확인하지 않습니다. `http://` 또는 `https://`, host, 선택 port, 선택 끝 `/`만 받습니다(예: `http://my-host.tailnet.example:6080`). 사용자 정보·경로·query·fragment가 있거나 200자를 넘거나 ASCII가 아니면 쓰지 않고 기본 주소(`http://127.0.0.1:6080`, api는 `6081`)를 보이며 inspect의 `view.urlIgnored`가 `true`가 됩니다. 보이는 주소는 기준 주소에 `/shacs-view.html`을 붙인 것입니다.
+
+**밖에서 열기.** shacs-bot은 화면 보기를 host의 `127.0.0.1` 밖에 열지 않습니다. 다른 기기에서 보려면 사용자가 자신의 암호화된 연결을 준비해야 합니다. 개인 VPN(Tailscale 등)이나 `ssh -L 6080:127.0.0.1:6080 <host>`가 그 방법이고, shacs-bot은 그 연결을 만들거나 확인하지 않습니다. 준비가 없으면 밖에서는 "나중에"로 그 단계를 넘기세요. 위험은 다음과 같습니다.
+
+- 화면 보기와 붙여넣기 연결은 암호화되지 않습니다. 암호화는 VPN이나 ssh 터널이 맡으므로 그 밖의 길로 열지 마세요.
+- 화면 보기 비밀번호를 아는 사람은 넘겨받은 동안 브라우저를 조작하고 글을 넣을 수 있습니다. VNC는 비밀번호의 앞 8자만 확인합니다.
+- 연결을 엿들은 사람은 붙여넣기 인증에서 주고받은 값으로 비밀번호를 offline으로 짐작해 볼 수 있고, 붙여넣은 글을 읽거나 가운데에서 바꿀 수 있습니다.
+- `Host`를 바꾸는 proxy 뒤에서는 `Origin`과 `Host`가 달라 연결이 거절됩니다. 주소를 바꾸지 않는 VPN과 `ssh -L`은 됩니다. 경로가 붙은 reverse proxy 주소는 쓸 수 없습니다.
+- `Origin` 확인은 브라우저가 연 다른 웹페이지만 막습니다. 포트에 닿는 다른 프로그램은 `Origin`을 꾸밀 수 있습니다.
+
+`handoff`의 권한은 다른 동작과 따로 정합니다. 대화형 실행에서는 mode와 관계없이 허용하고(사용자에게 묻는 일이기 때문입니다), 비대화형 실행(API, cron 등)에서는 거절합니다. `deny: ["browser"]`와 기억된 거절은 `handoff`도 막고, `ask: ["browser"]`는 넘기기 전에 승인 질문을 합니다.
+
+넘겨받기 기록은 memory에만 있습니다. process가 다시 시작되면 넘겨받기는 없어지고, 멈춰 있던 `handoff`는 그 대화의 다음 사용자 메시지에서 끝났다고 알려 이어집니다. 스스로 이어지는 곳: 답이 아닌 까닭(돌려주기, 한도, 브라우저 닫힘, 화면 보기 꺼짐)으로 넘겨받기가 끝났을 때 멈춰 있던 `handoff`는 `browser` tool을 등록한 오래 도는 실행(`run`, 그리고 `--allow-api-side-effects`로 띄운 `serve`)에서 다음 메시지를 기다리지 않고 스스로 이어집니다. `web`은 `browser` tool을 등록하지 않으므로 거기서는 `handoff`가 멈추는 일이 없습니다. 외부 channel(Telegram, Discord, Slack 등)의 대화는 넘겨받은 대화방으로, Telegram topic이나 Slack thread에서 넘겨받았다면 그 topic·thread로 이어진 답이 갑니다. WebSocket 대화는 그 chat을 쓰던 연결로 답이 갑니다. 그때 WebSocket 연결이 끊겨 있으면 넘겨받기는 기다리다가 다시 연결했을 때 이어집니다(기본 chat은 연결하자마자, 다른 chat은 그 chat으로 `attach`를 보내거나 무엇이든 주고받은 뒤). 그 전에 메시지를 보내면 그 메시지에서 끝났다고 알려 이어집니다. 한 번 실행하고 끝나는 CLI와 REPL에서는 그 대화의 다음 사용자 메시지에서 이어집니다.
+
+실제 Docker에서 넘겨받기를 확인하는 opt-in 명령은 `bash scripts/spec050-takeover-check.sh --approved`입니다. `--approved`가 없으면 아무것도 하지 않습니다. 별도 Compose project와 일회용 data 폴더에서 임시 `.env.json`의 비밀번호(출력하지 않습니다)로, 넘겨받은 동안에만 화면 보기의 클릭·키와 붙여넣기가 페이지를 바꾸는지, 틀린 비밀번호와 다시 보낸 인증 값이 거절되는지, `Origin`이 없거나 다른 연결이 403인지, 전환 때 `websockify`가 연결 process까지 끝나는지, 돌려준 뒤 입력이 꺼지고 `look`이 그 페이지를 읽는지 확인합니다. 화면 보기 인자가 바뀌었으므로 `bash scripts/spec049-viewer-check.sh --approved`도 다시 돌려 보기 전용이 그대로인지 확인합니다. 두 명령을 돌리기 전까지 실제 `websockify`·`x11vnc`에서의 동작은 미검증입니다.
+
 ### 페이지 조작의 권한 판정
 
-`browser`의 권한은 tool 이름이 아니라 동작마다 정합니다. `open`·`look`·`scroll`·`back`·`wait`·`close`는 `net_outbound`(웹 읽기)이고, `click`·`type`·`press`는 capability `browser_act`(페이지에 영향을 주는 조작)입니다. `browser_act`는 `net_outbound`·`proc_exec`와 별개라서 다른 capability의 허용이 이를 대신하지 못하며, 하위 실행에 물려준 권한 한도에 `browser_act`가 없으면 조작은 거절됩니다. 이미 저장된 한도에 이 값이 저절로 더해지지는 않고, 공식 container의 production 실행은 `net_outbound`와 `browser_act`를 모두 한도에 넣습니다. 알 수 없는 `action`은 정규화 오류로 거절합니다.
+`browser`의 권한은 tool 이름이 아니라 동작마다 정합니다. `open`·`look`·`scroll`·`back`·`wait`·`close`·`capture`는 `net_outbound`(웹 읽기)이고, `click`·`type`·`press`는 capability `browser_act`(페이지에 영향을 주는 조작)입니다. `browser_act`는 `net_outbound`·`proc_exec`와 별개라서 다른 capability의 허용이 이를 대신하지 못하며, 하위 실행에 물려준 권한 한도에 `browser_act`가 없으면 조작은 거절됩니다. 이미 저장된 한도에 이 값이 저절로 더해지지는 않고, 공식 container의 production 실행은 `net_outbound`와 `browser_act`를 모두 한도에 넣습니다. 알 수 없는 `action`은 정규화 오류로 거절합니다.
 
 | mode / 실행 | 읽기 동작(`net_outbound`) | 조작 동작(`browser_act`) |
 |---|---|---|
@@ -554,7 +666,7 @@ user-local config(`--config`로 고른 파일, 기본은 `~/.shacs-bot/config.js
 
 #### 비밀 파일
 
-active data 폴더(config 파일이 있는 폴더)의 `auth.json`, 그 원자적 저장의 임시 파일, `auth/` 아래, `.env.json`과 그 임시 파일, config migration의 백업(`config.json.migration-backup`, `config.json.secrets-migration-backup`, `config.json.secrets-migration-env-backup`)과 비밀 옮기기의 진행 표시(`config.json.secrets-migration-in-progress`)는 모든 mode에서 비밀 파일입니다. config 파일 이름이 다르면 백업과 진행 표시도 그 이름을 따릅니다.
+active data 폴더(config 파일이 있는 폴더)의 `auth.json`, 그 원자적 저장의 임시 파일, `auth/` 아래, `browser/profile/` 전체, `.env.json`과 그 임시 파일, config migration의 백업(`config.json.migration-backup`, `config.json.secrets-migration-backup`, `config.json.secrets-migration-env-backup`)과 비밀 옮기기의 진행 표시(`config.json.secrets-migration-in-progress`)는 모든 mode에서 비밀 파일입니다. config 파일 이름이 다르면 백업과 진행 표시도 그 이름을 따릅니다.
 
 - `list_dir`·`glob`·`grep`이 폴더를 훑을 때 결과에 나오지 않고 내용도 읽히지 않습니다.
 - 그 파일을 지정해 읽는 action(`read_file`, `path`로 준 `grep`, `cat`, `<` 리디렉션, here-doc이나 `python3 -c` 코드 안의 이름)은 매번 한 번 승인·거절만 받는 질문이 됩니다. 승인하면 내용이 AI provider로 가고 세션 기록에 남습니다.

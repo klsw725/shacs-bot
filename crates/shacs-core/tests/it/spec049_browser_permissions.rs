@@ -24,6 +24,7 @@ fn context(setup: &Setup, options: &Options) -> ToolExecutionContext {
         permission_interactive: options.interactive,
         browser_screenshots: Some(false),
         native_image_input_supported: false,
+        media_root: None,
     });
     context
 }
