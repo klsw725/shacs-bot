@@ -6,7 +6,7 @@ use super::web_watch_store::WebWatchLedger;
 use super::{
     ObservationVerdict as Verdict, WebCheckFailure, WebCheckResult, WebCondition, WebDecision,
     WebDecisionReason as Reason, WebEvidence, WebObservationRecord, WebObservedValue,
-    WebRuntimeGap, WebWatchEntry, WebWatchWake, WEB_TEXT_VERSION,
+    WebRuntimeGap, WebWatchEntry, WebWatchWake,
 };
 
 const DAY_MS: u64 = 86_400_000;
@@ -46,7 +46,7 @@ pub(super) fn build_record(
     WebObservationRecord {
         request_url: display_url(&entry.plan.url),
         request_url_digest: sha256_ref(&entry.plan.url),
-        text_version: WEB_TEXT_VERSION.to_owned(),
+        text_version: entry.plan.extraction.version.clone(),
         observed_at_ms: now_ms,
         wake,
         result,

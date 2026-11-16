@@ -11,6 +11,7 @@ use std::error::Error;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -150,6 +151,7 @@ pub fn at_most(value: &str) -> WebCondition {
 pub struct Server {
     base: String,
     routes: Arc<Mutex<BTreeMap<String, Page>>>,
+    requests: Arc<AtomicUsize>,
 }
 
 impl Server {
@@ -158,13 +160,20 @@ impl Server {
         let base = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
         let routes = Arc::new(Mutex::new(BTreeMap::new()));
         let shared = routes.clone();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = requests.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let routes = shared.clone();
+                seen.fetch_add(1, Ordering::SeqCst);
                 std::thread::spawn(move || serve(stream, &routes));
             }
         });
-        Ok(Self { base, routes })
+        Ok(Self {
+            base,
+            routes,
+            requests,
+        })
     }
 
     pub fn set(&self, path: &str, page: Page) -> TestResult {
@@ -177,6 +186,10 @@ impl Server {
 
     pub fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
+    }
+
+    pub fn requests(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
     }
 }
 
@@ -273,6 +286,9 @@ pub struct Fixture {
     pub server: Server,
     pub guard: NetworkGuard,
     pub limits: WebFetchLimits,
+    pub reading_mode: WebReadingMode,
+    pub use_saved_login: bool,
+    pub rendered_reader: Option<Arc<dyn RenderedWebReader>>,
     pub bus: MessageBus,
 }
 
@@ -318,6 +334,9 @@ impl Fixture {
                 max_bytes: 64 * 1024,
             },
             bus: MessageBus::new(),
+            reading_mode: WebReadingMode::Fetch,
+            use_saved_login: false,
+            rendered_reader: None,
         })
     }
 
@@ -338,8 +357,16 @@ impl Fixture {
             work: self.request(),
             url: url.to_owned(),
             target,
+            reading_mode: self.reading_mode,
+            use_saved_login: self.use_saved_login,
         };
-        preview_web_watch(&self.workspace, &request, &self.guard, &self.limits)
+        preview_web_watch(
+            &self.workspace,
+            &request,
+            &self.guard,
+            &self.limits,
+            self.rendered_reader.as_deref(),
+        )
     }
 
     pub fn confirm(
@@ -358,8 +385,16 @@ impl Fixture {
             condition,
             cadence_seconds: CADENCE_MS / 1000,
             now_ms,
+            reading_mode: self.reading_mode,
+            use_saved_login: self.use_saved_login,
         };
-        confirm_web_watch(&self.workspace, request, &self.guard, &self.limits)
+        confirm_web_watch(
+            &self.workspace,
+            request,
+            &self.guard,
+            &self.limits,
+            self.rendered_reader.as_deref(),
+        )
     }
 
     /// Watches the price on `/item` with `<= at_most`, confirmed at `T0`.
@@ -386,6 +421,7 @@ impl Fixture {
             now_ms,
             guard: &self.guard,
             limits: self.limits,
+            rendered_reader: self.rendered_reader.as_deref(),
         }
     }
 

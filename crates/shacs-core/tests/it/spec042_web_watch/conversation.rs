@@ -21,12 +21,12 @@ const EMAIL: &str = "user@example.test";
 const ADDRESS_ID: &str = "https://shop.example/item?coupon=secret-ref#checkout";
 
 /// Answers model calls from a script, in order.
-struct ScriptedProvider {
+pub(crate) struct ScriptedProvider {
     replies: Mutex<VecDeque<LlmResponse>>,
 }
 
 impl ScriptedProvider {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             replies: Mutex::new(VecDeque::new()),
         }
@@ -273,11 +273,12 @@ fn calls(ids: &[&str], name: &str, arguments: &Value) -> LlmResponse {
 
 /// A conversation with an agent loop whose tools can propose web watches, a local page and a
 /// test clock.
-struct Talk {
+pub(crate) struct Talk {
     _root: tempfile::TempDir,
     workspace: PathBuf,
     data_dir: PathBuf,
-    server: Server,
+    pub(crate) server: Server,
+    pub(crate) rendered_reader: Option<Arc<dyn RenderedWebReader>>,
     bus: MessageBus,
     now: Arc<AtomicU64>,
     email_ready: bool,
@@ -291,7 +292,7 @@ struct Talk {
 }
 
 impl Talk {
-    fn new() -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn new() -> Result<Self, Box<dyn Error>> {
         Self::on("chat")
     }
 
@@ -311,6 +312,7 @@ impl Talk {
             bus: MessageBus::new(),
             now: Arc::new(AtomicU64::new(T0)),
             email_ready: true,
+            rendered_reader: None,
             channel,
             chat,
             asking: None,
@@ -331,14 +333,14 @@ impl Talk {
         self.server.url("/item?ref=qa-secret")
     }
 
-    fn request(&self) -> String {
+    pub(crate) fn request(&self) -> String {
         format!(
             "{} 가격 좀 봐줘, 11000원 이하가 되면 {EMAIL}로 알려줘",
             self.url()
         )
     }
 
-    fn proposal(&self) -> Value {
+    pub(crate) fn proposal(&self) -> Value {
         json!({
             "goal_text": "tell me when the price drops",
             "url": self.url(),
@@ -352,7 +354,7 @@ impl Talk {
     }
 
     /// One message through a fresh agent loop on the same workspace, as a runtime would.
-    fn say(
+    pub(crate) fn say(
         &self,
         provider: &ScriptedProvider,
         sender: &str,
@@ -391,6 +393,7 @@ impl Talk {
         let now = self.now.clone();
         config.clock_ms = Some(Arc::new(move || now.load(Ordering::SeqCst)));
         config.web_watch = Some(WebWatchConversationConfig {
+            rendered_reader: self.rendered_reader.clone(),
             guard: NetworkGuard::with_ssrf_whitelist(["127.0.0.1/32"]),
             limits: WebFetchLimits {
                 timeout: Duration::from_secs(1),
@@ -418,7 +421,7 @@ impl Talk {
         Ok(self.events.lock().map_err(|_| "events poisoned")?.clone())
     }
 
-    fn propose(
+    pub(crate) fn propose(
         &self,
         provider: &ScriptedProvider,
         content: &str,
@@ -433,10 +436,11 @@ impl Talk {
 
     /// The worker's notification step at `now_ms`, then every handed-out notification consumed
     /// by the agent loop, as the runtime does.
-    fn deliver(&self, provider: &ScriptedProvider, now_ms: u64) -> TestResult {
+    pub(crate) fn deliver(&self, provider: &ScriptedProvider, now_ms: u64) -> TestResult {
         let guard = NetworkGuard::with_ssrf_whitelist(["127.0.0.1/32"]);
         dispatcher_for(&self.data_dir, &self.bus)?.enqueue_web_watch_notifications(
             &WebWatchRuntime {
+                rendered_reader: self.rendered_reader.as_deref(),
                 workspace: &self.workspace,
                 data_dir: &self.data_dir,
                 now_ms,
@@ -462,9 +466,10 @@ impl Talk {
     }
 
     /// The worker's page checks at `now_ms`, as in the other web watch tests.
-    fn tick(&self, now_ms: u64) -> TestResult {
+    pub(crate) fn tick(&self, now_ms: u64) -> TestResult {
         let guard = NetworkGuard::with_ssrf_whitelist(["127.0.0.1/32"]);
         let runtime = WebWatchRuntime {
+            rendered_reader: self.rendered_reader.as_deref(),
             workspace: &self.workspace,
             data_dir: &self.data_dir,
             now_ms,
@@ -487,7 +492,7 @@ impl Talk {
         Ok(())
     }
 
-    fn metadata(&self) -> Result<Map<String, Value>, Box<dyn Error>> {
+    pub(crate) fn metadata(&self) -> Result<Map<String, Value>, Box<dyn Error>> {
         let session = SessionManager::new(&self.workspace)?
             .load_existing(&self.session())
             .ok_or("no session")?;
@@ -502,18 +507,18 @@ impl Talk {
         Ok(())
     }
 
-    fn has_work(&self) -> Result<bool, Box<dyn Error>> {
+    pub(crate) fn has_work(&self) -> Result<bool, Box<dyn Error>> {
         let metadata = self.metadata()?;
         Ok(metadata
             .get(ENTRUSTED_WORK_METADATA_KEY)
             .is_some_and(|works| works.to_string().contains("work-")))
     }
 
-    fn pending(&self) -> Result<Option<Value>, Box<dyn Error>> {
+    pub(crate) fn pending(&self) -> Result<Option<Value>, Box<dyn Error>> {
         Ok(self.metadata()?.get("pending_web_watch_summary").cloned())
     }
 
-    fn work_id(&self) -> Result<String, Box<dyn Error>> {
+    pub(crate) fn work_id(&self) -> Result<String, Box<dyn Error>> {
         let metadata = self.metadata()?;
         let watches = metadata
             .get(WEB_WATCH_METADATA_KEY)
@@ -528,7 +533,7 @@ impl Talk {
             .to_owned())
     }
 
-    fn status(&self) -> Result<WebWatchSnapshot, Box<dyn Error>> {
+    pub(crate) fn status(&self) -> Result<WebWatchSnapshot, Box<dyn Error>> {
         Ok(read_web_watch(
             &self.workspace,
             &self.data_dir,
@@ -541,7 +546,7 @@ impl Talk {
     }
 }
 
-fn summary_id(result: &AgentLoopTurnResult) -> Result<String, Box<dyn Error>> {
+pub(crate) fn summary_id(result: &AgentLoopTurnResult) -> Result<String, Box<dyn Error>> {
     Ok(result
         .final_content
         .as_deref()
@@ -551,7 +556,7 @@ fn summary_id(result: &AgentLoopTurnResult) -> Result<String, Box<dyn Error>> {
         .to_owned())
 }
 
-fn content(result: &AgentLoopTurnResult) -> &str {
+pub(crate) fn content(result: &AgentLoopTurnResult) -> &str {
     result.final_content.as_deref().unwrap_or_default()
 }
 

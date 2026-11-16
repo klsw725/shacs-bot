@@ -20,9 +20,10 @@ use super::web_watch_surface::{
     read_value, writable_work,
 };
 use super::{
-    EntrustedWorkReadRequest, InboundMessage, WebCondition, WebDeadlineInput, WebNotifySettings,
-    WebObservedValue, WebPreviewTarget, WebTextArea, WebValueKind, WebWatchError,
-    WEB_NOTIFY_MAX_THRESHOLD_SECONDS, WEB_WATCH_MAX_CADENCE_SECONDS, WEB_WATCH_MIN_CADENCE_SECONDS,
+    CandidateAbsenceReason, EntrustedWorkReadRequest, InboundMessage, WebCondition,
+    WebDeadlineInput, WebNotifySettings, WebObservedValue, WebPreviewTarget, WebReadingMode,
+    WebTextArea, WebValueKind, WebWatchError, WEB_NOTIFY_MAX_THRESHOLD_SECONDS,
+    WEB_WATCH_MAX_CADENCE_SECONDS, WEB_WATCH_MIN_CADENCE_SECONDS,
 };
 use crate::tools::WebWatchProposalDraft;
 
@@ -106,9 +107,14 @@ pub(super) fn build_summary(
         )
     })?;
     let setup = match draft.work_id.as_deref().map(str::trim) {
-        Some(work_id) if !work_id.is_empty() => change_setup(context, config, draft, work_id)?,
-        _ => new_setup(context, config, draft)?,
-    };
+        Some(work_id) if !work_id.is_empty() => change_setup(context, config, draft, work_id),
+        _ => new_setup(context, config, draft),
+    }.map_err(|mut problem| {
+        if login_choice_available(config) {
+            problem.alternative.push_str("\n로그인한 상태로 보기 또는 로그인 없이 보기를 요청하면 새로 미리봅니다. 선택만으로 등록하지 않습니다.");
+        }
+        problem
+    })?;
     let mut summary = PendingWebWatchSummary {
         summary_id: context.summary_id.clone(),
         revision: 1,
@@ -180,7 +186,9 @@ fn new_setup(
     let failure_threshold_seconds =
         checked_threshold(draft.failure_threshold_seconds, cadence_seconds)?;
     let deadline = checked_deadline(draft_deadline(draft, None)?, context.now_ms)?;
-    let (read, extraction, target) = read_target(&url, &target, config)?;
+    let use_saved_login = draft.use_saved_login.unwrap_or(false);
+    let (read, extraction, target, reading_mode) =
+        read_target(&url, &target, draft.reading_mode, use_saved_login, config)?;
     let condition = resolved_condition(ask, &read.shown, &extraction.value)?;
     let goal_text = draft
         .goal_text
@@ -193,6 +201,9 @@ fn new_setup(
         value_text: value_text(&target, &extraction),
         phrase: phrase_of(&target),
         url,
+        reading_mode,
+        use_saved_login,
+        login_choice_available: login_choice_available(config),
         condition,
         cadence_seconds,
         notify_target: Some(notify_target),
@@ -232,6 +243,8 @@ fn change_setup(
     let notify = web_notify_settings(session, &work.work_id).ok().flatten();
     let deadline_settings = web_deadline_settings(session, &work.work_id).ok().flatten();
     let plan = &entry.plan;
+    let reading_mode = draft.reading_mode.unwrap_or(plan.reading_mode);
+    let use_saved_login = draft.use_saved_login.unwrap_or(plan.use_saved_login);
 
     let url = match draft.url.as_deref().map(str::trim) {
         Some(url) if url != plan.url => checked_url(context, config, url)?,
@@ -241,6 +254,8 @@ fn change_setup(
     let ask = draft_condition(draft)?;
     let cadence_seconds = checked_cadence(draft.cadence_seconds.unwrap_or(plan.cadence_seconds))?;
     let observation_asked = url != plan.url
+        || reading_mode != plan.reading_mode
+        || use_saved_login != plan.use_saved_login
         || target.is_some()
         || ask.is_some()
         || cadence_seconds != plan.cadence_seconds;
@@ -249,7 +264,8 @@ fn change_setup(
     let (read, condition) = if observation_asked {
         let (read, kind) = match &target {
             Some(target) => {
-                let (read, extraction, target) = read_target(&url, target, config)?;
+                let (read, extraction, target, _) =
+                    read_target(&url, target, Some(reading_mode), use_saved_login, config)?;
                 value = (value_text(&target, &extraction), phrase_of(&target));
                 (read, extraction.value)
             }
@@ -258,7 +274,13 @@ fn change_setup(
                     value.1 = Some(safe_text(phrase, MAX_PHRASE_CHARS));
                 }
                 (
-                    current_read(&url, &plan.extraction, config)?,
+                    current_read(
+                        &url,
+                        &plan.extraction,
+                        reading_mode,
+                        use_saved_login,
+                        config,
+                    )?,
                     plan.extraction.value.clone(),
                 )
             }
@@ -271,6 +293,8 @@ fn change_setup(
         let extraction_changed = candidate_extraction(&read.candidate_token)
             .map_or(true, |extraction| extraction != plan.extraction);
         let changed = url != plan.url
+            || reading_mode != plan.reading_mode
+            || use_saved_login != plan.use_saved_login
             || extraction_changed
             || condition != plan.condition
             || cadence_seconds != plan.cadence_seconds;
@@ -343,11 +367,20 @@ fn change_setup(
     let now = match (&read, now) {
         (Some(_), _) => None,
         (None, Some(now)) => Some(now),
-        (None, None) => Some(page_now(&url, &plan.extraction, config)),
+        (None, None) => Some(page_now(
+            &url,
+            &plan.extraction,
+            reading_mode,
+            use_saved_login,
+            config,
+        )),
     };
     Ok(WebWatchSetup {
         goal_text: safe_text(&goal.text, MAX_GOAL_CHARS),
         url,
+        reading_mode,
+        use_saved_login,
+        login_choice_available: login_choice_available(config),
         value_text: value.0,
         phrase: value.1,
         change: Some(WebWatchChange {
@@ -710,27 +743,69 @@ fn step(value: &str, direction: Direction) -> Option<String> {
 fn read_target(
     url: &str,
     target: &WebPreviewTarget,
+    requested_mode: Option<WebReadingMode>,
+    use_saved_login: bool,
     config: &WebWatchConversationConfig,
-) -> Result<(SummaryRead, super::WebExtraction, WebPreviewTarget), SummaryProblem> {
+) -> Result<
+    (
+        SummaryRead,
+        super::WebExtraction,
+        WebPreviewTarget,
+        WebReadingMode,
+    ),
+    SummaryProblem,
+> {
     let target = checked_target(target).map_err(|error| {
         problem(
             error_text(&error),
             "use a label or phrase of 1 to 64 characters as the page shows it",
         )
     })?;
-    let preview = preview_page(url, &target, &config.guard, &config.limits).map_err(|error| {
+    let mut mode = requested_mode.unwrap_or_default();
+    let unreadable = |error: WebWatchError| {
         problem(
-            format!("the page could not be read: {}", error_text(&error)),
-            "check the address; pages that need a login or JavaScript are not supported",
+        format!("the page could not be read: {}", error_text(&error)),
+        "check the reading mode and login setting; if busy, close the conversation browser and request a new summary",
+    )
+    };
+    let mut preview = preview_page(
+        url,
+        &target,
+        mode,
+        use_saved_login,
+        &config.guard,
+        &config.limits,
+        config.rendered_reader.as_deref(),
+    )
+    .map_err(unreadable)?;
+    if requested_mode.is_none()
+        && !use_saved_login
+        && preview.no_candidate_reason == Some(CandidateAbsenceReason::ValueAbsent)
+        && config
+            .rendered_reader
+            .as_ref()
+            .is_some_and(|reader| reader.enabled())
+    {
+        mode = WebReadingMode::Browser;
+        preview = preview_page(
+            url,
+            &target,
+            mode,
+            false,
+            &config.guard,
+            &config.limits,
+            config.rendered_reader.as_deref(),
         )
-    })?;
-    let candidate = preview.candidates.into_iter().next().ok_or_else(|| {
-        problem(
-            "the value was not found on the page",
+        .map_err(unreadable)?;
+    }
+    let candidate =
+        preview.candidates.into_iter().next().ok_or_else(|| {
+            problem(
+            format!("the value was not found on the page ({:?})", preview.no_candidate_reason),
             "use the label or phrase exactly as the page shows it; only text in the page itself \
              is read",
         )
-    })?;
+        })?;
     Ok((
         SummaryRead {
             candidate_token: candidate.token,
@@ -739,12 +814,15 @@ fn read_target(
         },
         candidate.extraction,
         target,
+        mode,
     ))
 }
 
 fn current_read(
     url: &str,
     extraction: &super::WebExtraction,
+    mode: WebReadingMode,
+    use_saved_login: bool,
     config: &WebWatchConversationConfig,
 ) -> Result<SummaryRead, SummaryProblem> {
     let unreadable = |error: WebWatchError| {
@@ -756,8 +834,20 @@ fn current_read(
             "say what to watch on the page again",
         )
     };
-    let shown = read_value(url, extraction, &config.guard, &config.limits).map_err(unreadable)?;
-    let candidate_token = candidate_token(url, extraction, &shown.value).map_err(unreadable)?;
+    let mut extraction = extraction.clone();
+    extraction.version = mode.text_version().to_owned();
+    let shown = read_value(
+        url,
+        &extraction,
+        mode,
+        use_saved_login,
+        &config.guard,
+        &config.limits,
+        config.rendered_reader.as_deref(),
+    )
+    .map_err(unreadable)?;
+    let candidate_token = candidate_token(url, mode, use_saved_login, &extraction, &shown.value)
+        .map_err(unreadable)?;
     Ok(SummaryRead {
         candidate_token,
         shown: shown.value,
@@ -771,9 +861,19 @@ fn current_read(
 fn page_now(
     url: &str,
     extraction: &super::WebExtraction,
+    mode: WebReadingMode,
+    use_saved_login: bool,
     config: &WebWatchConversationConfig,
 ) -> PageNow {
-    match read_value(url, extraction, &config.guard, &config.limits) {
+    match read_value(
+        url,
+        extraction,
+        mode,
+        use_saved_login,
+        &config.guard,
+        &config.limits,
+        config.rendered_reader.as_deref(),
+    ) {
         Ok(shown) => PageNow::Read {
             shown: shown.value,
             shown_text: shown.shown_text,
@@ -782,6 +882,13 @@ fn page_now(
             reason: error_text(&error),
         },
     }
+}
+
+fn login_choice_available(config: &WebWatchConversationConfig) -> bool {
+    config
+        .rendered_reader
+        .as_ref()
+        .is_some_and(|reader| reader.saved_login_enabled())
 }
 
 /// What a new criterion watches, in the request's words, and where the criterion it is
@@ -874,6 +981,29 @@ pub(super) fn render_summary(summary: &PendingWebWatchSummary, note: Option<&str
         summary.summary_id, summary.revision
     )];
     lines.extend(note.map(str::to_owned));
+    lines.push(format!(
+        "읽기 방식: {} ({})",
+        match setup.reading_mode {
+            WebReadingMode::Fetch => "정적 페이지 읽기",
+            WebReadingMode::Browser => "브라우저로 읽기",
+        },
+        setup.reading_mode.text_version()
+    ));
+    lines.push(if setup.use_saved_login {
+        "로그인 사용: 예 — 저장된 브라우저 프로필의 로그인 상태로 읽습니다.\n\
+         확인한 값과 근거는 감시 기록에 저장되고, 확인한 알림 대상으로 보내집니다.\n\
+         페이지 글 전체·화면·cookie·로그인 정보는 감시 사실·알림·상태 조회·진단에 남기거나 보내지 않습니다.\n\
+         로그인 기록 폴더 browser/profile/에는 cookie와 방문 기록·사이트 자료가 남고, 페이지 내용을 담을 수 있습니다. 폴더 전체는 비밀 파일로 다룹니다.\n\
+         HTTP cache는 저장 프로필 밖의 임시 폴더에 있고, 그 폴더는 비밀 파일 보호 대상이 아닙니다. 정상으로 닫히면 지워지지만 강제 종료 때는 남을 수 있습니다.\n\
+         로그인이 풀려 값을 읽지 못하면 확인 실패로 기록합니다.".to_owned()
+    } else if setup.reading_mode == WebReadingMode::Browser {
+        "로그인 사용: 아니오 — 저장 프로필을 쓰지 않고 확인마다 임시 프로필로 읽습니다. 익명 cookie를 생성·저장·전송할 수 있습니다. 임시 프로필과 HTTP cache는 저장 프로필의 비밀 파일 보호 밖이며 정상 종료 때 지우지만 강제 종료 뒤 남을 수 있습니다.".to_owned()
+    } else {
+        "로그인 사용: 아니오".to_owned()
+    });
+    if setup.login_choice_available {
+        lines.push("로그인한 상태로 보기 또는 로그인 없이 보기를 요청하면 새로 미리보고 요약을 만듭니다. 선택만으로 등록하지 않습니다.".to_owned());
+    }
     match &setup.change {
         Some(change) => lines.push(format!("Changes to watch `{}`:", change.work_id)),
         None => lines.push(format!("- Goal: {}", setup.goal_text)),
@@ -921,7 +1051,7 @@ pub(super) fn render_summary(summary: &PendingWebWatchSummary, note: Option<&str
     lines.push(format!("- Checked every {}", span(setup.cadence_seconds)));
     lines.push(match &setup.notify_target {
         Some(target) => format!(
-            "- Notification: email to {}; a check failure is mailed once it lasts {}",
+            "- Notification: email to {} ({target}); a check failure is mailed once it lasts {}",
             target.trim_start_matches("email:"),
             span(effective_threshold(
                 setup.failure_threshold_seconds,

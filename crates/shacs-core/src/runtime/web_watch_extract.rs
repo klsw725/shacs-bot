@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use super::web_watch_number::{
     adjacent_unit, infer_format, is_unit_char, numeric_runs, parse_number, NumberFormat,
     ALL_SEPARATORS,
@@ -29,6 +31,22 @@ pub(super) struct Candidate {
     pub shown_text: String,
     pub value: WebObservedValue,
     pub extraction: WebExtraction,
+}
+
+/// Ordered from weakest to strongest: an unsupported value never becomes absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateAbsenceReason {
+    ValueAbsent,
+    SearchLimit,
+    InvalidExtraction,
+    AmbiguousValue,
+    UnsupportedNumber,
+}
+
+pub(super) enum CandidateSearchResult {
+    Candidates(Vec<Candidate>),
+    Unavailable(CandidateAbsenceReason),
 }
 
 /// Reads the confirmed region. Never picks another location when the anchors do not match.
@@ -104,8 +122,17 @@ pub(super) fn extract_shown<'a>(
 }
 
 /// Deterministic preview candidates; page text only becomes anchors and values.
-pub(super) fn candidates(text: &str, target: &WebPreviewTarget) -> Vec<Candidate> {
+pub(super) fn candidates(
+    text: &str,
+    target: &WebPreviewTarget,
+    truncated: bool,
+) -> CandidateSearchResult {
     let mut found = Vec::new();
+    let mut reason = if truncated {
+        CandidateAbsenceReason::SearchLimit
+    } else {
+        CandidateAbsenceReason::ValueAbsent
+    };
     match target {
         WebPreviewTarget::Number {
             label,
@@ -114,24 +141,32 @@ pub(super) fn candidates(text: &str, target: &WebPreviewTarget) -> Vec<Candidate
             for (label_start, _) in text.match_indices(label.as_str()) {
                 let window_start = label_start + label.len();
                 let window_end = advance(text, window_start, LABEL_WINDOW_CHARS);
-                let Some((start, end, kind, value)) =
-                    first_number(text, window_start, window_end, *decimal_comma)
-                else {
+                let (start, end, kind, value) =
+                    match first_number(text, window_start, window_end, *decimal_comma) {
+                        Ok(number) => number,
+                        Err(failure) => {
+                            reason = reason.max(failure);
+                            continue;
+                        }
+                    };
+                if continues_number(&text[end..]) {
+                    reason = reason.max(CandidateAbsenceReason::UnsupportedNumber);
+                    continue;
+                }
+                let Some(suffix) = suffix_after(text, end) else {
+                    reason = reason.max(CandidateAbsenceReason::InvalidExtraction);
                     continue;
                 };
-                let Some(suffix) =
-                    suffix_after(text, end).filter(|_| !continues_number(&text[end..]))
-                else {
-                    continue;
-                };
-                push(
+                if let Err(failure) = push(
                     &mut found,
                     text,
                     (&text[label_start..start], suffix),
                     (start, &text[start..end]),
                     kind,
                     value,
-                );
+                ) {
+                    reason = reason.max(failure);
+                }
             }
         }
         WebPreviewTarget::Text { phrase, area: None } => {
@@ -140,9 +175,10 @@ pub(super) fn candidates(text: &str, target: &WebPreviewTarget) -> Vec<Candidate
                     prefix_before(text, start),
                     suffix_after(text, start + phrase.len()),
                 ) else {
+                    reason = reason.max(CandidateAbsenceReason::InvalidExtraction);
                     continue;
                 };
-                push(
+                if let Err(failure) = push(
                     &mut found,
                     text,
                     (prefix, suffix),
@@ -151,16 +187,27 @@ pub(super) fn candidates(text: &str, target: &WebPreviewTarget) -> Vec<Candidate
                         phrase: phrase.clone(),
                     },
                     WebObservedValue::Text { present: true },
-                );
+                ) {
+                    reason = reason.max(failure);
+                }
             }
         }
         WebPreviewTarget::Text {
             phrase,
             area: Some(area),
         } => {
+            for (at, _) in text.match_indices(area.label.as_str()) {
+                let after = &text[at + area.label.len()..];
+                if after
+                    .find(&area.until)
+                    .is_some_and(|end| after[..end].chars().count() > MAX_REGION_CHARS)
+                {
+                    reason = reason.max(CandidateAbsenceReason::SearchLimit);
+                }
+            }
             for (start, end) in region_matches(text, &area.label, &area.until) {
                 let region = text[start..end].trim();
-                push(
+                if let Err(failure) = push(
                     &mut found,
                     text,
                     (&area.label, &area.until),
@@ -171,12 +218,18 @@ pub(super) fn candidates(text: &str, target: &WebPreviewTarget) -> Vec<Candidate
                     WebObservedValue::Text {
                         present: region.contains(phrase.as_str()),
                     },
-                );
+                ) {
+                    reason = reason.max(failure);
+                }
             }
         }
     }
     found.truncate(MAX_CANDIDATES);
-    found
+    if found.is_empty() {
+        CandidateSearchResult::Unavailable(reason)
+    } else {
+        CandidateSearchResult::Candidates(found)
+    }
 }
 
 fn push(
@@ -186,18 +239,18 @@ fn push(
     (start, shown): (usize, &str),
     kind: WebValueKind,
     value: WebObservedValue,
-) {
+) -> Result<(), CandidateAbsenceReason> {
     let matches = region_matches(text, prefix, suffix);
     let Some(index) = matches
         .iter()
         .position(|(region_start, _)| *region_start == start)
     else {
-        return;
+        return Err(CandidateAbsenceReason::InvalidExtraction);
     };
     let (Ok(occurrence), Ok(match_count)) =
         (u32::try_from(index + 1), u32::try_from(matches.len()))
     else {
-        return;
+        return Err(CandidateAbsenceReason::AmbiguousValue);
     };
     let extraction = WebExtraction {
         version: WEB_TEXT_VERSION.to_owned(),
@@ -207,18 +260,25 @@ fn push(
         match_count,
         value: kind,
     };
-    if extract(text, &extraction).as_ref() != Ok(&value)
-        || found
-            .iter()
-            .any(|candidate| candidate.extraction == extraction)
+    match extract(text, &extraction) {
+        Ok(extracted) if extracted == value => {}
+        Err(WebCheckFailure::AmbiguousValue) => {
+            return Err(CandidateAbsenceReason::AmbiguousValue);
+        }
+        _ => return Err(CandidateAbsenceReason::InvalidExtraction),
+    }
+    if found
+        .iter()
+        .any(|candidate| candidate.extraction == extraction)
     {
-        return;
+        return Ok(());
     }
     found.push(Candidate {
         shown_text: shown.to_owned(),
         value,
         extraction,
     });
+    Ok(())
 }
 
 /// The first number in `text[from..to]`, as absolute byte positions. When v1 cannot read
@@ -228,9 +288,19 @@ fn first_number(
     from: usize,
     to: usize,
     decimal_comma: bool,
-) -> Option<(usize, usize, WebValueKind, WebObservedValue)> {
+) -> Result<(usize, usize, WebValueKind, WebObservedValue), CandidateAbsenceReason> {
     let window = &text[from..to];
-    let (run_start, run_end) = numeric_runs(window, &ALL_SEPARATORS).first().copied()?;
+    let (run_start, run_end) = numeric_runs(window, &ALL_SEPARATORS)
+        .first()
+        .copied()
+        .ok_or(if to < text.len() {
+            CandidateAbsenceReason::SearchLimit
+        } else {
+            CandidateAbsenceReason::ValueAbsent
+        })?;
+    if run_end == window.len() && to < text.len() && continues_number(&text[to..]) {
+        return Err(CandidateAbsenceReason::SearchLimit);
+    }
     let mut parts = vec![(run_start, run_end)];
     if window[run_start..run_end].contains(' ') {
         parts.extend(
@@ -243,7 +313,8 @@ fn first_number(
         let Some(format) = infer_format(&window[start..end], decimal_comma) else {
             continue;
         };
-        let value = parse_number(&window[start..end], format)?;
+        let value = parse_number(&window[start..end], format)
+            .ok_or(CandidateAbsenceReason::UnsupportedNumber)?;
         let unit_before = adjacent_unit(&window[..start], true);
         let unit_after = adjacent_unit(&window[end..], false);
         let span_start = from + start - unit_before.len();
@@ -257,14 +328,14 @@ fn first_number(
             unit_after: (!unit_after.is_empty()).then(|| unit_after.to_owned()),
         };
         let span_end = from + end + unit_after.len();
-        return Some((
+        return Ok((
             span_start,
             span_end,
             kind,
             WebObservedValue::Number { value },
         ));
     }
-    None
+    Err(CandidateAbsenceReason::UnsupportedNumber)
 }
 
 /// Regions between `prefix` and the next `suffix`, scanning left to right without overlap.

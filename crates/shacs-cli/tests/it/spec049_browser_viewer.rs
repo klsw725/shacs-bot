@@ -7,10 +7,11 @@ use super::spec049_browser_runtime::{
 };
 use serde_json::{json, Value};
 use shacs_cli::browser::{
-    self, BrowserChild, BrowserChildKind, BrowserChildSpec, BrowserEnvironment,
-    BrowserLifecycleFactory, BrowserOwnerBinding, BrowserProcessRunner, BrowserSnapshotDestination,
-    BrowserState, BrowserStatus, BrowserViewPasswordProblem, BrowserViewState,
-    BrowserViewerFactory, DevToolsPeer, ManagedBrowserHost, ViewerListenAddress, ViewerListener,
+    self, BrowserCancellation, BrowserChild, BrowserChildKind, BrowserChildSpec,
+    BrowserEnvironment, BrowserLifecycleFactory, BrowserOwnerBinding, BrowserProcessRunner,
+    BrowserSnapshotDestination, BrowserState, BrowserStatus, BrowserViewPasswordProblem,
+    BrowserViewState, BrowserViewerFactory, DevToolsPeer, ManagedBrowserHost, ViewerListenAddress,
+    ViewerListener,
 };
 use shacs_cli::{
     RuntimeOwnerProcessEvidence, RuntimeOwnershipMarker, RuntimeOwnershipState,
@@ -170,8 +171,13 @@ impl BrowserProcessRunner for ViewerRunner {
         }
         ViewerListener::OwnedByChild
     }
-    fn display_ready(&self, display: u16, deadline: Instant) -> Result<(), BrowserError> {
-        self.inner.display_ready(display, deadline)
+    fn display_ready(
+        &self,
+        display: u16,
+        deadline: Instant,
+        cancellation: &BrowserCancellation,
+    ) -> Result<(), BrowserError> {
+        self.inner.display_ready(display, deadline, cancellation)
     }
     fn spawn(
         &self,

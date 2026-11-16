@@ -7,13 +7,17 @@ use serde_json::json;
 use shacs_core::runtime::{
     ConfigureWebDeadlineRequest, ConfigureWebNotifyRequest, ConfirmWebWatchRequest,
     EntrustedWorkReadRequest, ObservationError, WebCondition, WebDeadlineInput, WebFetchLimits,
-    WebPreviewRequest, WebPreviewTarget, WebTextArea, WebWatchError,
+    WebPreviewRequest, WebPreviewTarget, WebReadingMode, WebTextArea, WebWatchError,
 };
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreviewBody {
     url: String,
+    #[serde(default)]
+    reading_mode: WebReadingMode,
+    #[serde(default)]
+    use_saved_login: bool,
     #[serde(default)]
     label: Option<String>,
     #[serde(default)]
@@ -54,6 +58,10 @@ struct DeadlineBody {
 struct ConfirmBody {
     expected_revision: u64,
     url: String,
+    #[serde(default)]
+    reading_mode: WebReadingMode,
+    #[serde(default)]
+    use_saved_login: bool,
     candidate: String,
     condition: WebCondition,
     cadence_seconds: u64,
@@ -161,25 +169,41 @@ pub(crate) fn handle(
             let preview = WebPreviewRequest {
                 work,
                 url: body.url,
+                reading_mode: body.reading_mode,
+                use_saved_login: body.use_saved_login,
                 target,
             };
-            shacs_core::runtime::preview_web_watch(&workspace, &preview, &guard, &limits)
-                .map(|preview| json!(preview))
-                .map_err(web_error)
+            shacs_core::runtime::preview_web_watch(
+                &workspace,
+                &preview,
+                &guard,
+                &limits,
+                adapter.rendered_web_reader(),
+            )
+            .map(|preview| json!(preview))
+            .map_err(web_error)
         }),
         (ApiMethod::Post, None) => body::<ConfirmBody>(request).and_then(|body| {
             let confirm = ConfirmWebWatchRequest {
                 work,
                 expected_revision: body.expected_revision,
                 url: body.url,
+                reading_mode: body.reading_mode,
+                use_saved_login: body.use_saved_login,
                 candidate_token: body.candidate,
                 condition: body.condition,
                 cadence_seconds: body.cadence_seconds,
                 now_ms: adapter.now_ms(),
             };
-            shacs_core::runtime::confirm_web_watch(&workspace, confirm, &guard, &limits)
-                .map(|configured| json!(configured))
-                .map_err(web_error)
+            shacs_core::runtime::confirm_web_watch(
+                &workspace,
+                confirm,
+                &guard,
+                &limits,
+                adapter.rendered_web_reader(),
+            )
+            .map(|configured| json!(configured))
+            .map_err(web_error)
         }),
         (ApiMethod::Get, None) => match adapter.runtime_data_dir() {
             Some(data_dir) => shacs_core::runtime::read_web_watch(&workspace, &data_dir, &work)

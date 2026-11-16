@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    EntrustedWorkReadRequest, ObservationBlock, ObservationNextWake, ObservationVerdict,
-    PersistentGoalStatus, WebCheckFailure, WebCondition, WebDeadlineView, WebEvidence,
-    WebExtraction, WebNotificationSnapshot, WebNotifySettingsView, WebObservedValue,
-    WebResponseFacts, WebWatchWake,
+    BrowserUnavailableReason, EntrustedWorkReadRequest, ObservationBlock, ObservationNextWake,
+    ObservationVerdict, PersistentGoalStatus, WebCheckFailure, WebCondition, WebDeadlineView,
+    WebEvidence, WebExtraction, WebNotificationSnapshot, WebNotifySettingsView, WebObservedValue,
+    WebReadingMode, WebResponseFacts, WebWatchWake,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +16,8 @@ pub enum WebCheckResult {
     },
     Failed {
         failure: WebCheckFailure,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        browser_reason: Option<BrowserUnavailableReason>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         response: Option<WebResponseFacts>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,6 +144,10 @@ impl WebFailureInterval {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebWatchPlanView {
     pub url: String,
+    #[serde(default)]
+    pub reading_mode: WebReadingMode,
+    #[serde(default)]
+    pub use_saved_login: bool,
     pub url_digest: String,
     pub extraction: WebExtraction,
     pub condition: WebCondition,
@@ -198,6 +204,8 @@ pub struct WebTextArea {
 pub struct WebPreviewRequest {
     pub work: EntrustedWorkReadRequest,
     pub url: String,
+    pub reading_mode: WebReadingMode,
+    pub use_saved_login: bool,
     pub target: WebPreviewTarget,
 }
 
@@ -212,11 +220,17 @@ pub struct WebCandidate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebPreview {
     pub url: String,
+    #[serde(default)]
+    pub reading_mode: WebReadingMode,
+    #[serde(default)]
+    pub use_saved_login: bool,
     pub final_url: String,
     pub http_status: u16,
     pub truncated: bool,
     pub text_digest: String,
     pub candidates: Vec<WebCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_candidate_reason: Option<super::CandidateAbsenceReason>,
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +238,8 @@ pub struct ConfirmWebWatchRequest {
     pub work: EntrustedWorkReadRequest,
     pub expected_revision: u64,
     pub url: String,
+    pub reading_mode: WebReadingMode,
+    pub use_saved_login: bool,
     pub candidate_token: String,
     pub condition: WebCondition,
     pub cadence_seconds: u64,

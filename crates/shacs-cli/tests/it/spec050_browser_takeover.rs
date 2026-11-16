@@ -541,8 +541,13 @@ impl BrowserProcessRunner for StageRunner {
         self.installed.load(Ordering::SeqCst)
     }
 
-    fn display_ready(&self, display: u16, deadline: Instant) -> Result<(), BrowserError> {
-        self.inner.display_ready(display, deadline)
+    fn display_ready(
+        &self,
+        display: u16,
+        deadline: Instant,
+        cancellation: &BrowserCancellation,
+    ) -> Result<(), BrowserError> {
+        self.inner.display_ready(display, deadline, cancellation)
     }
 
     fn viewer_listener(
@@ -1393,6 +1398,9 @@ fn listener_check_reads_bind_address_port_and_socket_inode() -> Result<(), Box<d
 
 #[test]
 fn takeover_blocks_every_action_without_devtools_traffic() -> Result<(), Box<dyn Error>> {
+    use shacs_core::runtime::{
+        RenderedWebReader, RenderedWebRequest, WebCheckFailure, WebFetchLimits,
+    };
     let stage = Stage::new()?;
     stage.run(OWNER, &open())?;
     let read = stage.look(OWNER)?;
@@ -1419,6 +1427,21 @@ fn takeover_blocks_every_action_without_devtools_traffic() -> Result<(), Box<dyn
     let refused = BrowserError::UserControl.to_string();
     assert!(refused.starts_with("browser_user_control"));
     let before = stage.commands();
+    for use_saved_login in [false, true] {
+        assert_eq!(
+            stage
+                .host
+                .read(&RenderedWebRequest {
+                    url: "https://example.com/",
+                    limits: &WebFetchLimits::PRODUCTION,
+                    use_saved_login
+                })
+                .unwrap_err()
+                .failure,
+            WebCheckFailure::BrowserBusy,
+            "a watch cannot take a browser from its user"
+        );
+    }
     for (action, digest) in actions.iter().zip(&prepared) {
         for session in [OWNER, OTHER] {
             assert!(

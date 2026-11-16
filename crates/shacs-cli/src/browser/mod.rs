@@ -13,6 +13,7 @@ mod browser_state;
 mod browser_viewer;
 mod cdp_connection;
 mod cdp_document;
+mod rendered_load;
 mod startup;
 
 pub use browser_forget::*;

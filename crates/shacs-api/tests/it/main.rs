@@ -30,3 +30,4 @@ pub mod spec035_tasks_fail_closed;
 pub mod spec035_websocket_query_api;
 #[path = "spec042_web_watch_api.rs"]
 pub mod spec042_web_watch_api;
+mod spec051_web_watch_api;

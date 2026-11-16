@@ -7,6 +7,12 @@
 //! of new `tests/*.rs` files, which each link a separate test binary.
 
 mod spec049_browser_registry;
+#[cfg(unix)]
+mod spec051_login_watch;
+#[cfg(unix)]
+mod spec051_rendered_browser;
+#[cfg(all(unix, feature = "spec031-test-fixture"))]
+mod spec051_web_watch_cli;
 
 #[path = "readiness_owner_parity.rs"]
 pub mod readiness_owner_parity;

@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{EntrustedWorkReadRequest, WebCheckFailure, WebCondition, WebEvidence, WebWatchWake};
+use super::{
+    EntrustedWorkReadRequest, WebCheckFailure, WebCondition, WebEvidence, WebReadingMode,
+    WebWatchWake,
+};
 
 pub const WEB_NOTIFY_PREFIX: &str = "web-watch-notification:";
 pub const WEB_NOTIFY_MAX_THRESHOLD_SECONDS: u64 = 7 * 86_400;
@@ -112,6 +115,10 @@ impl WebNotifyContent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebNotifyIntent {
+    #[serde(default, skip_serializing_if = "WebReadingMode::is_fetch")]
+    pub reading_mode: WebReadingMode,
+    #[serde(default, skip_serializing_if = "super::web_watch::login_unused")]
+    pub use_saved_login: bool,
     pub correlation_id: String,
     pub owner_session_id: String,
     pub entrusted_work_id: String,

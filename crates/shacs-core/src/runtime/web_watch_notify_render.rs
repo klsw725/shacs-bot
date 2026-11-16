@@ -1,11 +1,27 @@
 use chrono::{DateTime, SecondsFormat};
 
 use super::web_watch::value_text;
-use super::{WebCheckFailure, WebCondition, WebEvidence, WebNotifyContent, WebNotifyIntent};
+use super::{
+    WebCheckFailure, WebCondition, WebEvidence, WebNotifyContent, WebNotifyIntent, WebReadingMode,
+};
 
 const LIMITS: &str = "Limits: static page text only (normalized_static_text_v1); no JavaScript, \
 login or cookies; the value is not verified elsewhere. No external action performed. Transport \
 send is not a remote receipt.";
+const RENDERED_LIMITS: &str = "Limits: rendered page text (rendered_text_v1); no saved login \
+profile; read-only observation, no input or capture. Load and 500 ms network idle in the \
+initial page session are bounded, and do not prove the final value; text is limited to 1 MiB \
+and may be truncated. Temporary cookies and cache may exist until cleanup. The value is not \
+verified elsewhere. Transport send is not a remote receipt.";
+const SAVED_LOGIN_LIMITS: &str = "Limits: rendered page text (rendered_text_v1); saved login \
+profile; read-only observation, no input or capture. Load and 500 ms network idle in the \
+initial page session are bounded, and do not prove the final value; text is limited to 1 MiB \
+and may be truncated. Confirmed values and evidence are stored and sent to the confirmed \
+email target; whole page text, screenshots, cookies and credentials are not. Cookies and \
+site data remain in browser/profile/ under secret-file protection. HTTP cache is outside \
+that profile in the temporary generation folder, outside secret-file protection; normal \
+cleanup deletes it, forced termination may leave it. The value is not verified elsewhere. \
+Transport send is not a remote receipt.";
 
 /// The notification text, built only from the stored intent.
 pub(super) fn render_web_notification(intent: &WebNotifyIntent) -> String {
@@ -105,7 +121,24 @@ pub(super) fn render_web_notification(intent: &WebNotifyIntent) -> String {
             ),
         ),
     };
-    format!("{body}\n{LIMITS}")
+    let limits = match intent.reading_mode {
+        WebReadingMode::Fetch => LIMITS,
+        WebReadingMode::Browser if intent.use_saved_login => SAVED_LOGIN_LIMITS,
+        WebReadingMode::Browser => RENDERED_LIMITS,
+    };
+    let login_help = if intent.use_saved_login
+        && matches!(
+            intent.content,
+            WebNotifyContent::Failure {
+                failure: WebCheckFailure::RenderedContentUnavailable,
+                ..
+            }
+        ) {
+        "\n로그인이 풀렸을 수 있습니다. 감시 확인이 끝난 뒤 /browser takeover로 브라우저를 넘겨받아 다시 로그인하세요. 로그인 뒤 돌려주고 /browser close로 닫으면 다음 예정 확인에서 다시 읽습니다. 비밀번호나 인증 코드는 대화로 보내지 마세요. slash 명령이 안 되면 \"브라우저 넘겨줘\", \"브라우저 닫아\"라고 요청하세요."
+    } else {
+        ""
+    };
+    format!("{body}{login_help}\n{limits}")
 }
 
 pub(super) fn duration_text(ms: u64) -> String {
@@ -148,6 +181,9 @@ pub(super) fn failure_text(failure: WebCheckFailure) -> &'static str {
         WebCheckFailure::StaticContentUnavailable => "static_content_unavailable",
         WebCheckFailure::AmbiguousValue => "ambiguous_value",
         WebCheckFailure::FormatMismatch => "format_mismatch",
+        WebCheckFailure::BrowserUnavailable => "browser_unavailable",
+        WebCheckFailure::BrowserBusy => "browser_busy",
+        WebCheckFailure::RenderedContentUnavailable => "rendered_content_unavailable",
     }
 }
 

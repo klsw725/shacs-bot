@@ -26,6 +26,19 @@ pub(super) fn render_status(snapshot: &WebWatchSnapshot) -> String {
             condition_text(&plan.condition, phrase),
             duration_text(plan.cadence_seconds.saturating_mul(1000))
         ));
+        lines.push(format!(
+            "- Reading mode: {} ({})",
+            words(&plan.reading_mode),
+            plan.extraction.version
+        ));
+        lines.push(format!(
+            "- 로그인 사용: {}",
+            if plan.use_saved_login {
+                "예"
+            } else {
+                "아니오"
+            }
+        ));
     }
     lines.push(match snapshot.last_success_at_ms {
         Some(at_ms) => format!("- Last successful read: {}", time(at_ms)),

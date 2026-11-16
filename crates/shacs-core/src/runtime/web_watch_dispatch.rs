@@ -14,7 +14,8 @@ use super::web_watch_gate::{active_web_wake, check_web_wake};
 use super::web_watch_store::{web_notify_settings, web_watches, WebWatchLedger};
 use super::{
     DurableWorkDispatcher, EntrustedWorkError, ObservationBlock, ObservationError,
-    ObservationNextWake, WebCheckResult, WebWatchEntry, WebWatchWake, WEB_WATCH_WORK_KIND,
+    ObservationNextWake, RenderedWebReader, WebCheckResult, WebWatchEntry, WebWatchWake,
+    WEB_WATCH_WORK_KIND,
 };
 
 pub struct WebWatchRuntime<'a> {
@@ -23,6 +24,7 @@ pub struct WebWatchRuntime<'a> {
     pub now_ms: u64,
     pub guard: &'a NetworkGuard,
     pub limits: WebFetchLimits,
+    pub rendered_reader: Option<&'a dyn RenderedWebReader>,
 }
 
 /// Owner checks before a watcher read: execution snapshot provenance and `tool:before` hooks.
@@ -68,7 +70,13 @@ impl DurableWorkDispatcher {
             };
             let (result, snapshot_ref) = match preparation {
                 Ok(snapshot_ref) => (
-                    check_plan(&entry.plan, runtime.guard, &runtime.limits, runtime.now_ms),
+                    check_plan(
+                        &entry.plan,
+                        runtime.guard,
+                        &runtime.limits,
+                        runtime.now_ms,
+                        runtime.rendered_reader,
+                    ),
                     Some(snapshot_ref),
                 ),
                 Err(reason) => (WebCheckResult::Blocked { reason }, None),

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -65,6 +65,7 @@ pub(super) fn other_replies(workspace: &Path, session_key: &str) -> u64 {
 pub struct WebWatchConversationConfig {
     pub guard: NetworkGuard,
     pub limits: WebFetchLimits,
+    pub rendered_reader: Option<Arc<dyn super::RenderedWebReader>>,
     pub data_dir: PathBuf,
     /// Whether the configured Email channel can send (enabled, consented, SMTP settings).
     pub email_ready: bool,
@@ -100,6 +101,12 @@ pub(super) struct PendingWebWatchSummary {
 pub(super) struct WebWatchSetup {
     pub goal_text: String,
     pub url: String,
+    #[serde(default)]
+    pub reading_mode: super::WebReadingMode,
+    #[serde(default)]
+    pub use_saved_login: bool,
+    #[serde(default)]
+    pub login_choice_available: bool,
     /// What is watched, as shown (safe text).
     pub value_text: String,
     /// The phrase of a phrase condition, as shown (safe text).

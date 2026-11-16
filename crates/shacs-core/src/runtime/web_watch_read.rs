@@ -231,6 +231,8 @@ fn mask_web_watch_calls(value: &mut Value) {
 pub(super) fn plan_view(plan: &WebWatchPlan) -> WebWatchPlanView {
     WebWatchPlanView {
         url: display_url(&plan.url),
+        reading_mode: plan.reading_mode,
+        use_saved_login: plan.use_saved_login,
         url_digest: sha256_ref(&plan.url),
         extraction: safe_extraction(&plan.extraction),
         condition: plan.condition.clone(),

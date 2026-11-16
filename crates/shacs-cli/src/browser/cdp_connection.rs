@@ -46,8 +46,11 @@ pub struct CdpReply {
 /// Runs for a page target that attached paused while a reply is pending, with
 /// the peer that reply is awaited on. Returns the events its own requests
 /// collected.
-pub type PausedTargetAdmission<'a> =
-    &'a mut dyn FnMut(&mut dyn DevToolsPeer, &Value, Instant) -> Result<Vec<Value>, BrowserError>;
+pub type PausedTargetAdmission<'a> = &'a mut dyn FnMut(
+    &mut dyn DevToolsPeer,
+    &mut Value,
+    Instant,
+) -> Result<Vec<Value>, BrowserError>;
 
 /// How many paused page targets may be admitted inside one another before the
 /// transport gives up with a fatal error. Chromium opens popups one at a time
@@ -66,7 +69,7 @@ pub fn paused_page_attachment(event: &Value) -> bool {
 /// boundary and resumed the target. The document layer then only switches.
 pub fn mark_admitted(event: &mut Value) {
     event["params"]["waitingForDebugger"] = json!(false);
-    event["params"]["admitted"] = json!(true);
+    event["params"]["admitted"] = json!(event["params"]["rejected"] != true);
 }
 
 /// Whether `mark_admitted` ran for this attachment event.
@@ -133,13 +136,14 @@ pub fn admit_after_reply<P: DevToolsPeer>(
     admit: PausedTargetAdmission<'_>,
 ) -> Result<CdpReply, BrowserError> {
     let mut events = Vec::new();
-    for event in std::mem::take(&mut reply.events) {
+    for mut event in std::mem::take(&mut reply.events) {
         if paused_page_attachment(&event) {
             // Reserve the attachment's place first; what the admission receives
             // follows it.
             let reserved = events.len();
-            events.push(event);
-            let nested = admit(peer, &events[reserved], deadline)?;
+            events.push(event.clone());
+            let nested = admit(peer, &mut event, deadline)?;
+            events[reserved] = event;
             mark_admitted(&mut events[reserved]);
             events.extend(nested);
         } else {
@@ -325,9 +329,11 @@ impl CdpConnection {
                 let reserved = self.pending_events.len();
                 self.pending_events.push(event.clone());
                 self.admissions += 1;
-                let admitted = admit(self, &event, deadline);
+                let mut event = event;
+                let admitted = admit(self, &mut event, deadline);
                 self.admissions -= 1;
                 let nested = admitted?;
+                self.pending_events[reserved] = event;
                 mark_admitted(&mut self.pending_events[reserved]);
                 self.pending_events.extend(nested);
             } else {

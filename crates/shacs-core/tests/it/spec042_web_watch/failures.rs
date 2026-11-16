@@ -361,8 +361,16 @@ fn configuration_rejects_internal_addresses_userinfo_and_other_schemes() -> Test
             work: fixture.request(),
             url: url.clone(),
             target: number("판매가"),
+            reading_mode: WebReadingMode::Fetch,
+            use_saved_login: false,
         };
-        preview_web_watch(&fixture.workspace, &request, &production, &fixture.limits)
+        preview_web_watch(
+            &fixture.workspace,
+            &request,
+            &production,
+            &fixture.limits,
+            None,
+        )
     });
     let redirected = fixture.preview(&fixture.server.url("/hop"), number("판매가"));
 

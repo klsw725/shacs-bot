@@ -123,12 +123,20 @@ fn reread(
     let candidate = confirmation_candidate(
         &setup.url,
         &read.candidate_token,
+        setup.reading_mode,
+        setup.use_saved_login,
         setup.condition.clone(),
         setup.cadence_seconds,
         &config.guard,
     )
     .map_err(Reread::Failed)?;
-    match read_confirming(&setup.url, candidate, &config.guard, &config.limits) {
+    match read_confirming(
+        &setup.url,
+        candidate,
+        &config.guard,
+        &config.limits,
+        config.rendered_reader.as_deref(),
+    ) {
         Ok(ConfirmingRead::Same(confirmed)) => Ok(*confirmed),
         Ok(ConfirmingRead::Changed(current)) => Err(Reread::Changed(current)),
         Err(error) => Err(Reread::Failed(error)),
@@ -142,7 +150,13 @@ fn revised_read(
 ) -> Result<SummaryRead, WebWatchError> {
     let extraction = candidate_extraction(&read.candidate_token)?;
     Ok(SummaryRead {
-        candidate_token: candidate_token(&setup.url, &extraction, &current.value)?,
+        candidate_token: candidate_token(
+            &setup.url,
+            setup.reading_mode,
+            setup.use_saved_login,
+            &extraction,
+            &current.value,
+        )?,
         shown: current.value,
         shown_text: current.shown_text,
     })

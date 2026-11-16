@@ -1,6 +1,6 @@
 #[cfg(unix)]
 use super::CdpConnection;
-use super::{BrowserClock, BrowserProxy, BrowserViewStatus, DevToolsPeer};
+use super::{BrowserCancellation, BrowserClock, BrowserProxy, BrowserViewStatus, DevToolsPeer};
 use shacs_core::runtime::{BrowserError, NetworkGuard};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -84,7 +84,12 @@ pub trait BrowserProcessRunner: Send + Sync {
         spec: &BrowserChildSpec,
         deadline: Instant,
     ) -> Result<Box<dyn BrowserChild>, BrowserError>;
-    fn display_ready(&self, display: u16, deadline: Instant) -> Result<(), BrowserError>;
+    fn display_ready(
+        &self,
+        display: u16,
+        deadline: Instant,
+        cancellation: &BrowserCancellation,
+    ) -> Result<(), BrowserError>;
     /// One non-blocking look at the LISTEN sockets on `<port>` that `address`
     /// counts and, when `owner` is given, whether that process holds them.
     /// Without an owner any listener is `Foreign`.
@@ -406,7 +411,13 @@ impl BrowserProcesses {
         guard: NetworkGuard,
         deadline: Instant,
     ) -> Result<(Self, Box<dyn DevToolsPeer>), BrowserError> {
-        Self::start_on(runner, guard, None, deadline)
+        Self::start_on(
+            runner,
+            guard,
+            None,
+            deadline,
+            &BrowserCancellation::default(),
+        )
     }
 
     /// `start`, with Chromium on the saved login `profile` when one is given.
@@ -415,7 +426,9 @@ impl BrowserProcesses {
         guard: NetworkGuard,
         profile: Option<&Path>,
         deadline: Instant,
+        cancellation: &BrowserCancellation,
     ) -> Result<(Self, Box<dyn DevToolsPeer>), BrowserError> {
+        cancellation.check()?;
         let proxy = BrowserProxy::start(guard).map_err(|_| BrowserError::Unavailable)?;
         let environment = BrowserEnvironment::create()?;
         let mut processes = Self {
@@ -443,8 +456,15 @@ impl BrowserProcesses {
                 cookie,
             ],
         );
-        let mut child = runner.spawn(&xauth, deadline)?;
+        cancellation.check()?;
+        processes.children.push(runner.spawn(&xauth, deadline)?);
+        cancellation.check()?;
+        let child = processes
+            .children
+            .last_mut()
+            .ok_or(BrowserError::Protocol)?;
         while !child.exited()? {
+            cancellation.check()?;
             if Instant::now() >= deadline {
                 child.stop();
                 return Err(BrowserError::StartupTimeout);
@@ -456,6 +476,7 @@ impl BrowserProcesses {
             return Err(BrowserError::Unavailable);
         }
         child.stop();
+        processes.children.pop();
         let xvfb = processes.environment.child(
             BrowserChildKind::Xvfb,
             "/usr/bin/Xvfb",
@@ -470,8 +491,11 @@ impl BrowserProcesses {
                 auth.to_string_lossy().to_string(),
             ],
         );
+        cancellation.check()?;
         processes.children.push(runner.spawn(&xvfb, deadline)?);
-        runner.display_ready(processes.environment.display, deadline)?;
+        cancellation.check()?;
+        runner.display_ready(processes.environment.display, deadline, cancellation)?;
+        cancellation.check()?;
         let proxy_port = processes
             .proxy
             .as_ref()
@@ -482,7 +506,9 @@ impl BrowserProcesses {
             Some(profile) => processes.environment.chromium_on(proxy_port, profile),
             None => processes.environment.chromium(proxy_port),
         };
+        cancellation.check()?;
         processes.children.push(runner.spawn(&chromium, deadline)?);
+        cancellation.check()?;
         let peer = processes
             .children
             .last_mut()
@@ -757,9 +783,16 @@ impl BrowserProcessRunner for LinuxBrowserProcessRunner {
         }))
     }
 
-    fn display_ready(&self, display: u16, deadline: Instant) -> Result<(), BrowserError> {
+    fn display_ready(
+        &self,
+        display: u16,
+        deadline: Instant,
+        cancellation: &BrowserCancellation,
+    ) -> Result<(), BrowserError> {
+        cancellation.check()?;
         #[cfg(unix)]
         while Instant::now() < deadline {
+            cancellation.check()?;
             if std::os::unix::net::UnixStream::connect(format!("/tmp/.X11-unix/X{display}")).is_ok()
             {
                 return Ok(());

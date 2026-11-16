@@ -10,11 +10,10 @@ use super::entrusted_work_store::store_entrusted_works;
 use super::entrusted_work_surface::load_owner_session;
 use super::web_watch_decision::condition_matches;
 use super::web_watch_extract::{
-    candidates, continues_number, extract_shown, UNSUPPORTED_NUMBER_LEAD,
+    candidates, continues_number, extract_shown, CandidateSearchResult, UNSUPPORTED_NUMBER_LEAD,
 };
 use super::web_watch_fetch::{
-    display_url, read_page, sha256_ref, status_failure, validate_watch_url, ReadPage,
-    WebFetchLimits,
+    display_url, sha256_ref, status_failure, validate_watch_url, ReadPage, WebFetchLimits,
 };
 use super::web_watch_number::{is_unit_char, parse_plain_decimal, ALL_SEPARATORS};
 use super::web_watch_read::plan_view;
@@ -24,10 +23,10 @@ use super::web_watch_text::normalize_fragment;
 use super::{
     ConfirmWebWatchRequest, EntrustedWork, EntrustedWorkError, EntrustedWorkReadRequest,
     EntrustedWorkRevision, ObservationBlock, ObservationError, PersistentGoal,
-    PersistentGoalStatus, WebCandidate, WebCondition, WebEvidence, WebExtraction, WebObservedValue,
-    WebPreview, WebPreviewRequest, WebPreviewTarget, WebResponseFacts, WebTextArea, WebValueKind,
-    WebWatchConfigured, WebWatchEntry, WebWatchError, WebWatchPlan, WEB_TEXT_VERSION,
-    WEB_WATCH_MAX_CADENCE_SECONDS, WEB_WATCH_MIN_CADENCE_SECONDS,
+    PersistentGoalStatus, RenderedWebReader, WebCandidate, WebCondition, WebEvidence,
+    WebExtraction, WebObservedValue, WebPreview, WebPreviewRequest, WebPreviewTarget,
+    WebReadingMode, WebResponseFacts, WebTextArea, WebValueKind, WebWatchConfigured, WebWatchEntry,
+    WebWatchError, WebWatchPlan, WEB_WATCH_MAX_CADENCE_SECONDS, WEB_WATCH_MIN_CADENCE_SECONDS,
 };
 
 const MAX_NEEDLE_CHARS: usize = 64;
@@ -37,6 +36,10 @@ const MAX_NEEDLE_CHARS: usize = 64;
 #[serde(deny_unknown_fields)]
 struct CandidateToken {
     version: u8,
+    #[serde(default, skip_serializing_if = "WebReadingMode::is_fetch")]
+    reading_mode: WebReadingMode,
+    #[serde(default, skip_serializing_if = "super::web_watch::login_unused")]
+    use_saved_login: bool,
     url_digest: String,
     extraction: WebExtraction,
     shown: WebObservedValue,
@@ -47,6 +50,7 @@ pub fn preview_web_watch(
     request: &WebPreviewRequest,
     guard: &NetworkGuard,
     limits: &WebFetchLimits,
+    reader: Option<&dyn RenderedWebReader>,
 ) -> Result<WebPreview, WebWatchError> {
     validate_watch_url(&request.url, guard).map_err(WebWatchError::InvalidInput)?;
     let target = checked_target(&request.target)?;
@@ -55,7 +59,15 @@ pub fn preview_web_watch(
         let (_, session) = load_owner_session(workspace, &request.work.owner_session_id)?;
         writable_work(&session, &request.work)?;
     }
-    preview_page(&request.url, &target, guard, limits)
+    preview_page(
+        &request.url,
+        &target,
+        request.reading_mode,
+        request.use_saved_login,
+        guard,
+        limits,
+        reader,
+    )
 }
 
 pub(super) fn checked_target(target: &WebPreviewTarget) -> Result<WebPreviewTarget, WebWatchError> {
@@ -83,16 +95,32 @@ pub(super) fn checked_target(target: &WebPreviewTarget) -> Result<WebPreviewTarg
 pub(super) fn preview_page(
     url: &str,
     target: &WebPreviewTarget,
+    mode: WebReadingMode,
+    use_saved_login: bool,
     guard: &NetworkGuard,
     limits: &WebFetchLimits,
+    reader: Option<&dyn RenderedWebReader>,
 ) -> Result<WebPreview, WebWatchError> {
     validate_watch_url(url, guard).map_err(WebWatchError::InvalidInput)?;
-    let page = successful_page(url, guard, limits)?;
-    let candidates = candidates(&page.text, target)
+    checked_login(mode, use_saved_login)?;
+    let page = successful_page(url, mode, use_saved_login, guard, limits, reader)?;
+    let (found, no_candidate_reason) = match candidates(&page.text, target, page.response.truncated)
+    {
+        CandidateSearchResult::Candidates(found) => (found, None),
+        CandidateSearchResult::Unavailable(reason) => (Vec::new(), Some(reason)),
+    };
+    let candidates = found
         .into_iter()
-        .map(|candidate| {
+        .map(|mut candidate| {
+            candidate.extraction.version = mode.text_version().to_owned();
             Ok(WebCandidate {
-                token: candidate_token(url, &candidate.extraction, &candidate.value)?,
+                token: candidate_token(
+                    url,
+                    mode,
+                    use_saved_login,
+                    &candidate.extraction,
+                    &candidate.value,
+                )?,
                 shown_text: safe_text(&candidate.shown_text, MAX_ANCHOR_CHARS),
                 value: candidate.value,
                 extraction: safe_extraction(&candidate.extraction),
@@ -101,21 +129,28 @@ pub(super) fn preview_page(
         .collect::<Result<Vec<_>, WebWatchError>>()?;
     Ok(WebPreview {
         url: display_url(url),
+        reading_mode: mode,
+        use_saved_login,
         final_url: page.response.final_url,
         http_status: page.response.http_status,
         truncated: page.response.truncated,
         text_digest: page.response.text_digest,
         candidates,
+        no_candidate_reason,
     })
 }
 
 pub(super) fn candidate_token(
     url: &str,
+    mode: WebReadingMode,
+    use_saved_login: bool,
     extraction: &WebExtraction,
     shown: &WebObservedValue,
 ) -> Result<String, WebWatchError> {
     let token = CandidateToken {
-        version: 1,
+        version: 3,
+        reading_mode: mode,
+        use_saved_login,
         url_digest: sha256_ref(url),
         extraction: extraction.clone(),
         shown: shown.clone(),
@@ -139,15 +174,20 @@ pub(super) struct ShownValue {
 pub(super) fn read_value(
     url: &str,
     extraction: &WebExtraction,
+    mode: WebReadingMode,
+    use_saved_login: bool,
     guard: &NetworkGuard,
     limits: &WebFetchLimits,
+    reader: Option<&dyn RenderedWebReader>,
 ) -> Result<ShownValue, WebWatchError> {
     validate_watch_url(url, guard).map_err(WebWatchError::InvalidInput)?;
-    let page = successful_page(url, guard, limits)?;
+    checked_login(mode, use_saved_login)?;
+    let page = successful_page(url, mode, use_saved_login, guard, limits, reader)?;
     let (value, shown) =
         extract_shown(&page.text, extraction).map_err(|failure| WebWatchError::Unreadable {
-            failure,
+            failure: mode.extraction_failure(failure),
             http_status: Some(page.response.http_status),
+            browser_reason: None,
         })?;
     Ok(ShownValue {
         value,
@@ -171,6 +211,8 @@ pub(super) struct ConfirmedRead {
 pub(super) fn confirmation_candidate(
     url: &str,
     candidate_token: &str,
+    mode: WebReadingMode,
+    use_saved_login: bool,
     condition: WebCondition,
     cadence_seconds: u64,
     guard: &NetworkGuard,
@@ -181,10 +223,14 @@ pub(super) fn confirmation_candidate(
         ));
     }
     validate_watch_url(url, guard).map_err(WebWatchError::InvalidInput)?;
+    checked_login(mode, use_saved_login)?;
     let token = decode_token(candidate_token)?;
-    if token.url_digest != sha256_ref(url) {
+    if token.url_digest != sha256_ref(url)
+        || token.reading_mode != mode
+        || token.use_saved_login != use_saved_login
+    {
         return Err(WebWatchError::InvalidInput(
-            "candidate was previewed for a different URL".to_owned(),
+            "candidate was previewed for a different URL, reading mode or login choice; preview again".to_owned(),
         ));
     }
     let condition = checked_condition(condition, &token.extraction.value)?;
@@ -207,13 +253,23 @@ pub(super) fn read_confirming(
     candidate: ConfirmationCandidate,
     guard: &NetworkGuard,
     limits: &WebFetchLimits,
+    reader: Option<&dyn RenderedWebReader>,
 ) -> Result<ConfirmingRead, WebWatchError> {
-    let page = successful_page(url, guard, limits)?;
+    let mode = candidate.token.reading_mode;
+    let page = successful_page(
+        url,
+        mode,
+        candidate.token.use_saved_login,
+        guard,
+        limits,
+        reader,
+    )?;
     let (current, shown) =
         extract_shown(&page.text, &candidate.token.extraction).map_err(|failure| {
             WebWatchError::Unreadable {
-                failure,
+                failure: mode.extraction_failure(failure),
                 http_status: Some(page.response.http_status),
+                browser_reason: None,
             }
         })?;
     if current != candidate.token.shown {
@@ -236,9 +292,10 @@ pub(super) fn read_confirmation(
     candidate: ConfirmationCandidate,
     guard: &NetworkGuard,
     limits: &WebFetchLimits,
+    reader: Option<&dyn RenderedWebReader>,
 ) -> Result<ConfirmedRead, WebWatchError> {
     let shown = candidate.token.shown.clone();
-    match read_confirming(url, candidate, guard, limits)? {
+    match read_confirming(url, candidate, guard, limits, reader)? {
         ConfirmingRead::Same(confirmed) => Ok(*confirmed),
         ConfirmingRead::Changed(current) => Err(WebWatchError::ValueChanged {
             shown,
@@ -254,10 +311,13 @@ pub fn confirm_web_watch(
     request: ConfirmWebWatchRequest,
     guard: &NetworkGuard,
     limits: &WebFetchLimits,
+    reader: Option<&dyn RenderedWebReader>,
 ) -> Result<WebWatchConfigured, WebWatchError> {
     let candidate = confirmation_candidate(
         &request.url,
         &request.candidate_token,
+        request.reading_mode,
+        request.use_saved_login,
         request.condition.clone(),
         request.cadence_seconds,
         guard,
@@ -269,7 +329,7 @@ pub fn confirm_web_watch(
         let (works, index, _) = writable_work(&session, &request.work)?;
         expect_revision(&works[index], request.expected_revision)?;
     }
-    let read = read_confirmation(&request.url, candidate, guard, limits)?;
+    let read = read_confirmation(&request.url, candidate, guard, limits, reader)?;
     let _guard = SessionMutationGuard::acquire(workspace, &owner)?;
     let (mut manager, mut session) = load_owner_session(workspace, &owner)?;
     let configured = store_confirmed_watch(
@@ -325,6 +385,8 @@ pub(super) fn store_confirmed_watch(
     let first_wake_at_ms = now_ms.saturating_add(cadence_seconds.saturating_mul(1000));
     let plan = WebWatchPlan {
         url,
+        reading_mode: token.reading_mode,
+        use_saved_login: token.use_saved_login,
         extraction: token.extraction,
         condition,
         cadence_seconds,
@@ -392,20 +454,42 @@ fn expect_revision(work: &EntrustedWork, expected: u64) -> Result<(), WebWatchEr
 
 fn successful_page(
     url: &str,
+    mode: WebReadingMode,
+    use_saved_login: bool,
     guard: &NetworkGuard,
     limits: &WebFetchLimits,
+    reader: Option<&dyn RenderedWebReader>,
 ) -> Result<ReadPage, WebWatchError> {
-    let page = read_page(url, guard, limits).map_err(|failure| WebWatchError::Unreadable {
-        failure,
-        http_status: None,
+    let page = super::rendered_web_reader::read_selected(
+        url,
+        mode,
+        use_saved_login,
+        guard,
+        limits,
+        reader,
+    )
+    .map_err(|error| WebWatchError::Unreadable {
+        failure: error.failure,
+        http_status: error.response.as_ref().map(|page| page.http_status),
+        browser_reason: error.browser_reason,
     })?;
     match status_failure(page.response.http_status) {
         Some(failure) => Err(WebWatchError::Unreadable {
             failure,
             http_status: Some(page.response.http_status),
+            browser_reason: None,
         }),
         None => Ok(page),
     }
+}
+
+fn checked_login(mode: WebReadingMode, use_saved_login: bool) -> Result<(), WebWatchError> {
+    if mode == WebReadingMode::Fetch && use_saved_login {
+        return Err(WebWatchError::InvalidInput(
+            "saved login requires browser reading mode".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn needle(text: &str) -> Result<String, WebWatchError> {
@@ -476,8 +560,14 @@ fn decode_token(token: &str) -> Result<CandidateToken, WebWatchError> {
         }
         _ => false,
     };
-    if token.version != 1
-        || extraction.version != WEB_TEXT_VERSION
+    let version_matches = match token.version {
+        1 => token.reading_mode == WebReadingMode::Fetch && !token.use_saved_login,
+        2 => token.reading_mode == WebReadingMode::Browser && !token.use_saved_login,
+        3 => checked_login(token.reading_mode, token.use_saved_login).is_ok(),
+        _ => false,
+    };
+    if !version_matches
+        || extraction.version != token.reading_mode.text_version()
         || !bounded(&extraction.prefix)
         || !bounded(&extraction.suffix)
         || extraction.occurrence == 0

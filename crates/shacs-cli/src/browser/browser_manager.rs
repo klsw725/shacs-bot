@@ -19,8 +19,10 @@ use shacs_core::runtime::{
     BrowserDocument, BrowserError, BrowserHandoffEpisode, BrowserHost, BrowserPendingResume,
     BrowserPreparedAction, BrowserRead, BrowserResumeNotifier, BrowserReturnOutcome,
     BrowserReturnTarget, BrowserSession, BrowserTakeover, BrowserTakeoverDescription,
-    BrowserTakeoverError, BrowserTakeoverRequest, BrowserViewDescription, ProcessExecutionReceipt,
-    ProcessGate, ProcessSpawnReport, ProcessTerminalOutcome,
+    BrowserTakeoverError, BrowserTakeoverRequest, BrowserUnavailableReason, BrowserViewDescription,
+    ProcessExecutionReceipt, ProcessGate, ProcessSpawnReport, ProcessTerminalOutcome,
+    RenderedWebFailure, RenderedWebPage, RenderedWebReader, RenderedWebRequest, WebCheckFailure,
+    WebFetchLimits,
 };
 use std::collections::{HashSet, VecDeque};
 use std::fs::File;
@@ -33,7 +35,8 @@ use std::time::{Duration, Instant};
 /// How many ended episodes are kept for diagnostics.
 const SETTLED_EPISODES: usize = 8;
 /// How often a request that waits for the slot looks again.
-const SLOT_POLL: Duration = Duration::from_millis(5);
+const SLOT_POLL_MS: u64 = 5;
+const SLOT_POLL: Duration = Duration::from_millis(SLOT_POLL_MS);
 /// How often maintenance looks at the browser lock files.
 const LOCK_CHECK_MS: u64 = 1_000;
 /// How long a Chromium that was asked to end may take before it is killed.
@@ -41,6 +44,12 @@ const QUIT_LIMIT_MS: u64 = 5_000;
 const QUIT_POLL_MS: u64 = 50;
 /// The status reason of a browser closed because its lock paths changed.
 const LOCK_REPLACED: &str = "browser_lock_replaced";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GenerationPurpose {
+    Conversation,
+    Watch,
+}
 
 pub trait BrowserClock: Send + Sync {
     fn now_ms(&self) -> u64;
@@ -64,6 +73,7 @@ struct Generation {
     /// When the turn of this session's user ended with the browser open.
     /// While set, the reply wait replaces the idle timeout.
     waiting_since: Option<u64>,
+    purpose: GenerationPurpose,
     /// Locked for as long as this generation lives.
     marker: Option<SessionMarker>,
     /// The browser lock files. The last field, so they are released only
@@ -101,6 +111,8 @@ struct Live {
     session: String,
     /// A close was accepted for this generation and answered `Scheduled`.
     close: bool,
+    /// A watch has its own cancellation signal; it never poisons a later generation.
+    watch_cancellation: Option<BrowserCancellation>,
 }
 
 /// What arrived while an operation held the slot. Whoever holds the slot
@@ -554,6 +566,7 @@ impl ManagedBrowserHost {
         // Signal before taking the slot: an in-flight pipe write/read owns it.
         // The transport observes cancellation within its bounded poll interval.
         self.manager.cancellation.cancel();
+        self.manager.cancel_watch()?;
         let mut slot = self
             .manager
             .slot
@@ -650,6 +663,9 @@ impl BrowserManager {
     /// Refuses everything the assistant does while the user is in control,
     /// before anything else is looked at.
     fn assistant(&self) -> Result<(), BrowserError> {
+        if self.watch_active()? {
+            return Err(BrowserError::Busy);
+        }
         if self.user_control()? {
             return Err(BrowserError::UserControl);
         }
@@ -676,6 +692,9 @@ impl BrowserManager {
                 // An episode opens only under the slot, so this answer holds
                 // for as long as the slot is held.
                 self.assistant()?;
+                if self.reserved.load(Ordering::Acquire) > 0 {
+                    return Err(contended());
+                }
                 Ok(slot)
             }
             Err(TryLockError::WouldBlock) => {
@@ -869,6 +888,9 @@ impl BrowserManager {
                     .map_err(|_| BrowserError::StateUnavailable)?;
                 if let Some(live) = deferred.live.as_mut().filter(|live| live.number == number) {
                     live.close = true;
+                    if let Some(cancellation) = &live.watch_cancellation {
+                        cancellation.cancel();
+                    }
                 }
                 return Ok(());
             }
@@ -1122,14 +1144,40 @@ impl BrowserManager {
     /// Make generation `number`, open or starting, the one a close can be
     /// asked of.
     fn admit(&self, number: u64, session: &str) -> Result<(), BrowserError> {
-        self.deferred
+        let mut deferred = self
+            .deferred
             .lock()
-            .map_err(|_| BrowserError::StateUnavailable)?
-            .live = Some(Live {
+            .map_err(|_| BrowserError::StateUnavailable)?;
+        deferred.live = Some(Live {
             number,
             session: session.to_owned(),
             close: false,
+            watch_cancellation: None,
         });
+        Ok(())
+    }
+
+    fn watch_active(&self) -> Result<bool, BrowserError> {
+        Ok(self
+            .deferred
+            .lock()
+            .map_err(|_| BrowserError::StateUnavailable)?
+            .live
+            .as_ref()
+            .is_some_and(|live| live.watch_cancellation.is_some()))
+    }
+
+    fn cancel_watch(&self) -> Result<(), BrowserError> {
+        let mut deferred = self
+            .deferred
+            .lock()
+            .map_err(|_| BrowserError::StateUnavailable)?;
+        if let Some(live) = deferred.live.as_mut() {
+            if let Some(cancellation) = &live.watch_cancellation {
+                live.close = true;
+                cancellation.cancel();
+            }
+        }
         Ok(())
     }
 
@@ -1149,13 +1197,37 @@ impl BrowserManager {
     /// told to its session as `Closed` whatever else ended it; otherwise the
     /// session is told `told`, or nothing.
     fn end(&self, slot: &mut Slot, told: Option<BrowserError>) -> Result<(), BrowserError> {
-        let asked = self.retire(slot.number);
+        let watch = self.watch_active()?;
+        let asked = !watch && self.retire(slot.number);
         if let Some(paste) = slot.paste.take() {
             paste.browser_closed();
         }
         let Some(mut generation) = slot.generation.take() else {
+            if watch {
+                self.unwatch(slot.number);
+                self.retire(slot.number);
+            }
             return Ok(());
         };
+        if generation.purpose == GenerationPurpose::Watch {
+            // Keep occupancy and filesystem locks through every child, proxy
+            // and temporary directory destructor. Watches leave no session notice.
+            let saved = generation
+                .locks
+                .as_ref()
+                .is_some_and(|locks| locks.profile().is_some());
+            if saved {
+                self.quit(&mut generation);
+            } else {
+                generation
+                    .document
+                    .close(Instant::now() + Duration::from_secs(1));
+            }
+            drop(generation);
+            self.unwatch(slot.number);
+            self.retire(slot.number);
+            return Ok(());
+        }
         let told = if asked {
             Some(BrowserError::Closed)
         } else {
@@ -1297,6 +1369,9 @@ impl BrowserManager {
                     return BrowserCloseOutcome::NothingOpen;
                 };
                 live.close = true;
+                if let Some(cancellation) = &live.watch_cancellation {
+                    cancellation.cancel();
+                }
                 return BrowserCloseOutcome::Scheduled;
             }
             Err(TryLockError::Poisoned(_)) => return BrowserCloseOutcome::NothingOpen,
@@ -1377,19 +1452,48 @@ impl BrowserManager {
     /// Starts a generation for `session` in an empty slot. It is the one
     /// start path: a session's first action and a takeover of a closed
     /// browser both come through it.
-    fn start(&self, slot: &mut Slot, session: &str) -> Result<(), BrowserError> {
+    fn start(
+        &self,
+        slot: &mut Slot,
+        session: &str,
+        purpose: GenerationPurpose,
+        overall_deadline: Option<Instant>,
+        watch_profile: Option<ProfileUse>,
+    ) -> Result<(), BrowserError> {
         let config = self.startup.config();
         // A browser whose session cannot be recorded is not started.
-        let marker = self.notices.claim(session, self.clock.now_ms())?;
-        slot.number += 1;
+        let marker = match purpose {
+            GenerationPurpose::Conversation => self.notices.claim(session, self.clock.now_ms())?,
+            GenerationPurpose::Watch => None,
+        };
+        if purpose == GenerationPurpose::Conversation {
+            slot.number += 1;
+        }
         let mut starting = Starting {
             manager: self,
             number: slot.number,
             session,
             marker,
             started: false,
+            purpose,
         };
-        self.admit(slot.number, session)?;
+        let cancellation = match purpose {
+            GenerationPurpose::Conversation => {
+                self.admit(slot.number, session)?;
+                self.cancellation.clone()
+            }
+            GenerationPurpose::Watch => self
+                .deferred
+                .lock()
+                .map_err(|_| BrowserError::StateUnavailable)?
+                .live
+                .as_ref()
+                .filter(|live| live.number == slot.number)
+                .and_then(|live| live.watch_cancellation.clone())
+                .ok_or(BrowserError::StateUnavailable)?,
+        };
+        self.cancellation.check()?;
+        cancellation.check()?;
         slot.owner = self.snapshot.as_ref().and_then(|destination| {
             destination
                 .owner
@@ -1404,13 +1508,21 @@ impl BrowserManager {
             Ok(input) => input,
             Err(error) => {
                 self.publish(slot, BrowserState::Failed, Some(error.to_string()))?;
-                return Err(error);
+                return Err(
+                    if purpose == GenerationPurpose::Watch && error == BrowserError::Unavailable {
+                        BrowserError::StartDenied
+                    } else {
+                        error
+                    },
+                );
             }
         };
         let expected = input.envelope.clone();
         self.publish(slot, BrowserState::Starting, None)?;
         let started_at = self.clock.now_ms();
-        let deadline = Instant::now() + Duration::from_secs(config.startup_timeout_seconds);
+        let startup_deadline = Instant::now() + Duration::from_secs(config.startup_timeout_seconds);
+        let deadline =
+            overall_deadline.map_or(startup_deadline, |overall| overall.min(startup_deadline));
         let mut result = Err(BrowserError::StartDenied);
         // When the browser core (Xvfb, Chromium, DevTools) finished. The
         // optional viewer starts after this inside the same approved
@@ -1419,41 +1531,60 @@ impl BrowserManager {
         let number = slot.number;
         // The value read here is the one this generation runs with until it
         // closes.
-        let profile = if config.persist_login {
+        let profile = watch_profile.unwrap_or(if config.persist_login {
             ProfileUse::Saved
         } else {
             ProfileUse::Temporary
-        };
+        });
         let receipt = ProcessGate::new()
             .evaluate_and_maybe_spawn(input, |_| {
                 // The locks come before any process and outlive every one of
                 // them: a start that fails below drops its processes inside
                 // the inner closure, and the locks after it.
                 result = self.lock_files(number, profile).and_then(|locks| {
+                    self.cancellation.check()?;
+                    cancellation.check()?;
                     let saved = locks.as_ref().and_then(BrowserLockHold::profile);
                     BrowserProcesses::start_on(
                         self.runner.as_ref(),
-                        self.startup.network_guard(),
+                        match purpose {
+                            GenerationPurpose::Conversation => self.startup.network_guard(),
+                            GenerationPurpose::Watch => crate::web_watch_profile::web_watch_guard(),
+                        },
                         saved,
                         deadline,
+                        &cancellation,
                     )
                     .and_then(|(mut processes, mut peer)| {
-                        peer.set_cancellation(self.cancellation.clone());
-                        let document =
-                            CdpDocument::initialize(peer, deadline).map_err(|error| {
-                                if error == BrowserError::PageTimeout {
-                                    BrowserError::StartupTimeout
-                                } else {
-                                    error
-                                }
-                            })?;
+                        self.cancellation.check()?;
+                        cancellation.check()?;
+                        peer.set_cancellation(cancellation.clone());
+                        let document = match purpose {
+                            GenerationPurpose::Conversation => {
+                                CdpDocument::initialize(peer, deadline)
+                            }
+                            GenerationPurpose::Watch => {
+                                CdpDocument::initialize_rendered(peer, deadline)
+                            }
+                        }
+                        .map_err(|error| {
+                            if error == BrowserError::PageTimeout {
+                                BrowserError::StartupTimeout
+                            } else {
+                                error
+                            }
+                        })?;
                         core_finished_ms = Some(self.clock.now_ms());
+                        cancellation.check()?;
                         let viewer = self.viewer.as_ref().map(|factory| factory.create());
+                        let viewer_deadline = Instant::now() + browser_viewer::VIEWER_START_LIMIT;
                         processes.start_viewer(
                             self.runner.as_ref(),
                             viewer,
-                            Instant::now() + browser_viewer::VIEWER_START_LIMIT,
+                            overall_deadline
+                                .map_or(viewer_deadline, |overall| overall.min(viewer_deadline)),
                         );
+                        cancellation.check()?;
                         Ok((processes, document))
                     })
                     .map(|(processes, document)| Generation {
@@ -1462,6 +1593,7 @@ impl BrowserManager {
                         session: session.to_owned(),
                         last_used: self.clock.now_ms(),
                         waiting_since: None,
+                        purpose,
                         marker: None,
                         locks,
                     })
@@ -1485,7 +1617,11 @@ impl BrowserManager {
         if core_elapsed_ms >= config.startup_timeout_seconds * 1000 {
             result = Err(BrowserError::StartupTimeout);
         }
-        result = self.cancellation.check().and(result);
+        result = self
+            .cancellation
+            .check()
+            .and(cancellation.check())
+            .and(result);
         match result {
             Ok(mut generation) if valid => {
                 generation.marker = starting.marker.take();
@@ -1531,7 +1667,20 @@ impl BrowserManager {
     /// next thing to run. The wait ends after the page timeout and five
     /// seconds on the browser clock.
     fn reserve(&self) -> Result<MutexGuard<'_, Slot>, BrowserTakeoverError> {
-        let _reservation = Reservation::new(&self.reserved);
+        let _reservation = {
+            let deferred = self
+                .deferred
+                .lock()
+                .map_err(|_| BrowserTakeoverError::Browser(BrowserError::StateUnavailable))?;
+            if deferred
+                .live
+                .as_ref()
+                .is_some_and(|live| live.watch_cancellation.is_some())
+            {
+                return Err(BrowserTakeoverError::Browser(BrowserError::Busy));
+            }
+            Reservation::new(&self.reserved)
+        };
         let started = self.clock.now_ms();
         let limit = (self.startup.config().page_timeout_seconds + 5) * 1000;
         loop {
@@ -1553,7 +1702,7 @@ impl BrowserManager {
             if self.clock.now_ms().saturating_sub(started) >= limit {
                 return Err(BrowserTakeoverError::Browser(BrowserError::Busy));
             }
-            thread::sleep(SLOT_POLL);
+            self.clock.pause(SLOT_POLL_MS);
         }
     }
 
@@ -1607,7 +1756,8 @@ impl BrowserManager {
                 if view.state != BrowserViewState::Closed {
                     return Err(BrowserTakeoverError::ViewUnavailable(view_reason(&view)));
                 }
-                self.start(slot, session).map_err(browser)?;
+                self.start(slot, session, GenerationPurpose::Conversation, None, None)
+                    .map_err(browser)?;
                 started = true;
             }
         }
@@ -2028,6 +2178,164 @@ impl BrowserManager {
     }
 }
 
+impl RenderedWebReader for ManagedBrowserHost {
+    fn enabled(&self) -> bool {
+        self.manager.startup.config().enable
+    }
+
+    fn saved_login_enabled(&self) -> bool {
+        self.manager.startup.config().persist_login
+    }
+
+    fn read(
+        &self,
+        request: &RenderedWebRequest<'_>,
+    ) -> Result<RenderedWebPage, RenderedWebFailure> {
+        let url = request.url;
+        let limits = request.limits;
+        let manager = &self.manager;
+        manager.cancellation.check().map_err(watch_start_failure)?;
+        // No maintenance here: a watch may never expire somebody else's browser.
+        let (mut slot, cancellation) = {
+            // Close and takeover use this same admission lock. Holding it
+            // across the nonblocking slot attempt publishes occupancy atomically,
+            // before even startup availability can run or block. Never wait for
+            // the slot here: ordinary holders take deferred in the other order.
+            let mut deferred = manager
+                .deferred
+                .lock()
+                .map_err(|_| watch_start_failure(BrowserError::StateUnavailable))?;
+            if deferred.live.is_some() || manager.reserved.load(Ordering::Acquire) > 0 {
+                return Err(watch_start_failure(BrowserError::Busy));
+            }
+            let mut slot = match manager.slot.try_lock() {
+                Ok(slot) => slot,
+                Err(TryLockError::WouldBlock) => {
+                    return Err(watch_start_failure(BrowserError::Busy))
+                }
+                Err(TryLockError::Poisoned(_)) => {
+                    return Err(watch_start_failure(BrowserError::StateUnavailable))
+                }
+            };
+            if slot.generation.is_some() {
+                return Err(watch_start_failure(BrowserError::Busy));
+            }
+            slot.number += 1;
+            let cancellation = BrowserCancellation::default();
+            deferred.live = Some(Live {
+                number: slot.number,
+                session: String::new(),
+                close: false,
+                watch_cancellation: Some(cancellation.clone()),
+            });
+            (slot, cancellation)
+        };
+        let started = manager.clock.now_ms();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        // The slot guard stays outside the existing panic boundary, so cleanup
+        // finishes before it is released and a caught panic cannot poison it.
+        let result = crate::isolate_panic(|| {
+            if !manager.startup.config().enable {
+                return Err(watch_start_failure(BrowserError::Disabled));
+            }
+            if request.use_saved_login && !manager.startup.config().persist_login {
+                return Err(RenderedWebFailure {
+                    failure: WebCheckFailure::BrowserUnavailable,
+                    browser_reason: Some(BrowserUnavailableReason::PersistLoginDisabled),
+                    response: None,
+                });
+            }
+            if !manager.runner.available() {
+                return Err(watch_start_failure(BrowserError::Unavailable));
+            }
+            manager
+                .start(
+                    &mut slot,
+                    "",
+                    GenerationPurpose::Watch,
+                    Some(deadline),
+                    Some(if request.use_saved_login {
+                        ProfileUse::Saved
+                    } else {
+                        ProfileUse::Temporary
+                    }),
+                )
+                .map_err(watch_start_failure)?;
+            let remaining_ms =
+                60_000u64.saturating_sub(manager.clock.now_ms().saturating_sub(started));
+            if remaining_ms == 0 || Instant::now() >= deadline {
+                return Err(watch_start_failure(BrowserError::StartupTimeout));
+            }
+            let generation = slot
+                .generation
+                .as_mut()
+                .ok_or_else(|| watch_start_failure(BrowserError::Closed))?;
+            let bounded = WebFetchLimits {
+                timeout: limits
+                    .timeout
+                    .min(Duration::from_secs(20))
+                    .min(Duration::from_millis(remaining_ms)),
+                max_bytes: limits.max_bytes.min(1024 * 1024),
+            };
+            let read_deadline = deadline.min(Instant::now() + bounded.timeout);
+            generation
+                .document
+                .read_rendered(url, &bounded, read_deadline, manager.clock.as_ref())
+        });
+        let cleanup = manager.end(&mut slot, None);
+        let (state, reason) = manager.closed_as(slot.number);
+        let published = manager.publish(&slot, state, reason);
+        drop(slot);
+        let result = match result {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+        cleanup.and(published).map_err(watch_start_failure)?;
+        manager.cancellation.check().map_err(watch_start_failure)?;
+        cancellation.check().map_err(watch_start_failure)?;
+        result
+    }
+}
+
+fn watch_start_failure(error: BrowserError) -> RenderedWebFailure {
+    let (failure, reason) = match error {
+        BrowserError::Busy | BrowserError::UserControl => (WebCheckFailure::BrowserBusy, None),
+        BrowserError::Disabled => (
+            WebCheckFailure::BrowserUnavailable,
+            Some(BrowserUnavailableReason::Disabled),
+        ),
+        BrowserError::StartDenied => (
+            WebCheckFailure::BrowserUnavailable,
+            Some(BrowserUnavailableReason::PermissionDenied),
+        ),
+        BrowserError::Cancelled | BrowserError::Closed => (
+            WebCheckFailure::BrowserUnavailable,
+            Some(BrowserUnavailableReason::Closed),
+        ),
+        BrowserError::ProfileInUse => (
+            WebCheckFailure::BrowserUnavailable,
+            Some(BrowserUnavailableReason::ProfileInUse),
+        ),
+        BrowserError::ProfileUnreadable => (
+            WebCheckFailure::BrowserUnavailable,
+            Some(BrowserUnavailableReason::ProfileUnreadable),
+        ),
+        BrowserError::ProfileLocked => (
+            WebCheckFailure::BrowserUnavailable,
+            Some(BrowserUnavailableReason::ProfileLocked),
+        ),
+        _ => (
+            WebCheckFailure::BrowserUnavailable,
+            Some(BrowserUnavailableReason::StartupFailed),
+        ),
+    };
+    RenderedWebFailure {
+        failure,
+        browser_reason: reason,
+        response: None,
+    }
+}
+
 impl BrowserHost for ManagedBrowserHost {
     fn prepare(
         &self,
@@ -2360,8 +2668,13 @@ impl BrowserHost for ManagedBrowserHost {
             if !self.manager.runner.available() {
                 return Err(BrowserError::Unavailable);
             }
-            self.manager
-                .start(&mut slot, &context.effective_session_id)?;
+            self.manager.start(
+                &mut slot,
+                &context.effective_session_id,
+                GenerationPurpose::Conversation,
+                None,
+                None,
+            )?;
         }
         if let Some(generation) = slot.generation.as_mut() {
             generation.last_used = self.manager.clock.now_ms();
@@ -2382,6 +2695,7 @@ struct Starting<'a> {
     session: &'a str,
     marker: Option<SessionMarker>,
     started: bool,
+    purpose: GenerationPurpose,
 }
 impl Drop for Starting<'_> {
     fn drop(&mut self) {
@@ -2393,9 +2707,11 @@ impl Drop for Starting<'_> {
             .manager
             .retire(self.number)
             .then_some(BrowserError::Closed);
-        let _ = self
-            .manager
-            .record_end(self.session, self.marker.take(), told);
+        if self.purpose == GenerationPurpose::Conversation {
+            let _ = self
+                .manager
+                .record_end(self.session, self.marker.take(), told);
+        }
     }
 }
 
@@ -2564,6 +2880,14 @@ impl PasteTarget for BrowserManager {
 }
 
 static BROWSER: OnceLock<ManagedBrowserHost> = OnceLock::new();
+
+/// Installs real manager ownership over fixture process/DevTools clients before
+/// production tooling is constructed. A separate test process owns this slot.
+#[cfg(feature = "spec031-test-fixture")]
+#[doc(hidden)]
+pub fn install_process_browser_fixture(host: ManagedBrowserHost) -> Result<(), BrowserError> {
+    BROWSER.set(host).map_err(|_| BrowserError::Busy)
+}
 
 pub fn process_browser_host(bundle: &ConfigBundle) -> ManagedBrowserHost {
     BROWSER

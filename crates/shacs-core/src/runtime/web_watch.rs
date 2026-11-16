@@ -7,8 +7,80 @@ pub const WEB_WATCH_METADATA_KEY: &str = "web_watch";
 pub const WEB_WATCH_WORK_KIND: &str = "web_watch.observation";
 pub const WEB_WATCH_OUTCOME: &str = "web_watch_observation";
 pub const WEB_TEXT_VERSION: &str = "normalized_static_text_v1";
+pub const RENDERED_TEXT_VERSION: &str = "rendered_text_v1";
 pub const WEB_WATCH_MIN_CADENCE_SECONDS: u64 = 600;
 pub const WEB_WATCH_MAX_CADENCE_SECONDS: u64 = 86_400;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebReadingMode {
+    #[default]
+    Fetch,
+    Browser,
+}
+
+impl WebReadingMode {
+    pub const fn text_version(self) -> &'static str {
+        match self {
+            Self::Fetch => WEB_TEXT_VERSION,
+            Self::Browser => RENDERED_TEXT_VERSION,
+        }
+    }
+
+    pub const fn is_fetch(&self) -> bool {
+        matches!(self, Self::Fetch)
+    }
+
+    pub(super) fn extraction_failure(self, failure: WebCheckFailure) -> WebCheckFailure {
+        match (self, failure) {
+            (Self::Browser, WebCheckFailure::StaticContentUnavailable) => {
+                WebCheckFailure::RenderedContentUnavailable
+            }
+            (_, failure) => failure,
+        }
+    }
+}
+
+impl std::str::FromStr for WebReadingMode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "fetch" => Ok(Self::Fetch),
+            "browser" => Ok(Self::Browser),
+            _ => Err("reading mode must be fetch or browser"),
+        }
+    }
+}
+
+/// Fixed reasons only: browser errors never expose page or process output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserUnavailableReason {
+    Disabled,
+    PersistLoginDisabled,
+    ProfileInUse,
+    ProfileUnreadable,
+    ProfileLocked,
+    PermissionDenied,
+    StartupFailed,
+    Closed,
+}
+
+impl BrowserUnavailableReason {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::PersistLoginDisabled => "persist_login_disabled",
+            Self::ProfileInUse => "profile_in_use",
+            Self::ProfileUnreadable => "profile_unreadable",
+            Self::ProfileLocked => "profile_locked",
+            Self::PermissionDenied => "permission_denied",
+            Self::StartupFailed => "startup_failed",
+            Self::Closed => "closed",
+        }
+    }
+}
 
 /// One region between fixed anchors of the `normalized_static_text_v1` text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +137,9 @@ pub enum WebCheckFailure {
     StaticContentUnavailable,
     AmbiguousValue,
     FormatMismatch,
+    BrowserUnavailable,
+    BrowserBusy,
+    RenderedContentUnavailable,
 }
 
 /// Stored plan. Holds the full confirmed URL and never appears in outputs.
@@ -72,10 +147,18 @@ pub enum WebCheckFailure {
 #[serde(deny_unknown_fields)]
 pub(super) struct WebWatchPlan {
     pub url: String,
+    #[serde(default, skip_serializing_if = "WebReadingMode::is_fetch")]
+    pub reading_mode: WebReadingMode,
+    #[serde(default, skip_serializing_if = "login_unused")]
+    pub use_saved_login: bool,
     pub extraction: WebExtraction,
     pub condition: WebCondition,
     pub cadence_seconds: u64,
     pub first_wake_at_ms: u64,
+}
+
+pub(super) const fn login_unused(value: &bool) -> bool {
+    !*value
 }
 
 impl WebWatchPlan {
@@ -146,6 +229,7 @@ pub enum WebWatchError {
     Unreadable {
         failure: WebCheckFailure,
         http_status: Option<u16>,
+        browser_reason: Option<BrowserUnavailableReason>,
     },
     ValueChanged {
         shown: WebObservedValue,
@@ -161,13 +245,17 @@ impl std::fmt::Display for WebWatchError {
             Self::Unreadable {
                 failure,
                 http_status,
-            } => match http_status {
-                Some(status) => write!(
-                    formatter,
-                    "web page could not be read: {failure:?} (HTTP {status})"
-                ),
-                None => write!(formatter, "web page could not be read: {failure:?}"),
-            },
+                browser_reason,
+            } => {
+                write!(formatter, "web page could not be read: {failure:?}")?;
+                if let Some(status) = http_status {
+                    write!(formatter, " (HTTP {status})")?;
+                }
+                if let Some(reason) = browser_reason {
+                    write!(formatter, " ({})", reason.code())?;
+                }
+                Ok(())
+            }
             Self::ValueChanged { shown, current } => write!(
                 formatter,
                 "page value changed since the preview (shown {}, now {}); preview again",

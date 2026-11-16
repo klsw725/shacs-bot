@@ -245,7 +245,7 @@ impl DevToolsPeer for Peer {
             // until the popup resumes.
             let mut attached = json!({"method":"Target.attachedToTarget","params":{"sessionId":"popup-session",
                 "waitingForDebugger":true,"targetInfo":{"targetId":"popup","type":"page","url":"","browserContextId":"context-1"}}});
-            let nested = admit(self, &attached, deadline)?;
+            let nested = admit(self, &mut attached, deadline)?;
             if !self
                 .facts
                 .lock()
@@ -277,7 +277,7 @@ impl DevToolsPeer for Peer {
             // receives it marked, behind everything that arrived before it.
             let mut attached = json!({"method":"Target.attachedToTarget","params":{"sessionId":format!("{id}-session"),
                 "waitingForDebugger":true,"targetInfo":{"targetId":id,"type":"page","url":"","browserContextId":"context-1"}}});
-            let nested = admit(self, &attached, deadline)?;
+            let nested = admit(self, &mut attached, deadline)?;
             shacs_cli::browser::mark_admitted(&mut attached);
             events.push(attached);
             events.extend(nested);
@@ -939,7 +939,7 @@ impl BrowserSession for Host {
 /// Tests that drive the transport directly never meet a paused target.
 fn no_admission(
     _peer: &mut dyn DevToolsPeer,
-    _event: &Value,
+    _event: &mut Value,
     _deadline: Instant,
 ) -> Result<Vec<Value>, BrowserError> {
     Ok(Vec::new())

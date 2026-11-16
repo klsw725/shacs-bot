@@ -107,6 +107,9 @@ mod provider_credentials;
 pub use browser_host::*;
 pub use browser_start_evidence::BrowserStartEvidence;
 mod quiet_tools;
+mod rendered_web_reader;
+#[cfg(test)]
+mod rendered_web_reader_tests;
 mod replay;
 mod runner;
 pub mod sandbox_adapter;
@@ -537,6 +540,10 @@ pub use provider_credentials::{
     ProviderCredentialClientConfig, ProviderCredentialInvocation, ProviderCredentialPlan,
     ProviderCredentialRuntime,
 };
+pub use rendered_web_reader::{
+    rendered_text_expression, RenderedWebFailure, RenderedWebPage, RenderedWebReader,
+    RenderedWebRequest,
+};
 pub use replay::{run_local_replay, RuntimeReplayInput, RuntimeReplayOutcome};
 pub(crate) use runner::isolate_panic;
 pub use runner::{
@@ -662,9 +669,10 @@ pub use trajectory_store::{
 pub use trusted_javascript_tool_before::register_trusted_javascript_tool_before_handlers;
 pub use trusted_tool_before_registry::TrustedToolBeforeRegistry;
 pub use web_watch::{
-    WebCheckFailure, WebCondition, WebEvidence, WebExtraction, WebObservedValue, WebResponseFacts,
-    WebValueKind, WebWatchError, WebWatchWake, WEB_TEXT_VERSION, WEB_WATCH_MAX_CADENCE_SECONDS,
-    WEB_WATCH_METADATA_KEY, WEB_WATCH_MIN_CADENCE_SECONDS, WEB_WATCH_OUTCOME, WEB_WATCH_WORK_KIND,
+    BrowserUnavailableReason, WebCheckFailure, WebCondition, WebEvidence, WebExtraction,
+    WebObservedValue, WebReadingMode, WebResponseFacts, WebValueKind, WebWatchError, WebWatchWake,
+    RENDERED_TEXT_VERSION, WEB_TEXT_VERSION, WEB_WATCH_MAX_CADENCE_SECONDS, WEB_WATCH_METADATA_KEY,
+    WEB_WATCH_MIN_CADENCE_SECONDS, WEB_WATCH_OUTCOME, WEB_WATCH_WORK_KIND,
 };
 use web_watch::{WebWatchEntry, WebWatchPlan};
 pub use web_watch_conversation::{
@@ -679,6 +687,7 @@ pub use web_watch_deadline::{
 };
 pub use web_watch_deadline_surface::configure_web_watch_deadline;
 pub use web_watch_dispatch::{WebWatchExecutor, WebWatchRuntime};
+pub use web_watch_extract::CandidateAbsenceReason;
 pub use web_watch_fetch::WebFetchLimits;
 pub use web_watch_notify::{
     ConfigureWebNotifyRequest, WebNotificationSnapshot, WebNotifyContent, WebNotifyDelivery,

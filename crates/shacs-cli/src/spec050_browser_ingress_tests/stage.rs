@@ -223,7 +223,13 @@ impl BrowserProcessRunner for Runner {
         true
     }
 
-    fn display_ready(&self, _display: u16, _deadline: Instant) -> Result<(), BrowserError> {
+    fn display_ready(
+        &self,
+        _display: u16,
+        _deadline: Instant,
+        cancellation: &BrowserCancellation,
+    ) -> Result<(), BrowserError> {
+        cancellation.check()?;
         Ok(())
     }
 

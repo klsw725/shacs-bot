@@ -12,6 +12,10 @@ pub(crate) fn web_watch_guard() -> NetworkGuard {
 
 #[cfg(feature = "spec042-test-profile")]
 pub(crate) fn web_watch_guard() -> NetworkGuard {
+    #[cfg(feature = "spec051-test-profile")]
+    if std::env::var("SHACS_SPEC051_ALLOW_TEST_PAGE").as_deref() == Ok("1") {
+        return NetworkGuard::with_ssrf_whitelist(["172.30.250.2/32"]);
+    }
     match std::env::var("SHACS_SPEC042_ALLOW_LOOPBACK").as_deref() {
         Ok("1") => NetworkGuard::with_ssrf_whitelist(["127.0.0.1/32"]),
         _ => NetworkGuard::default(),

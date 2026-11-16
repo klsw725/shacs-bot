@@ -72,6 +72,8 @@ pub(super) fn derive_intents(
             return;
         }
         intents.push(WebNotifyIntent {
+            reading_mode: entry.plan.reading_mode,
+            use_saved_login: entry.plan.use_saved_login,
             correlation_id,
             owner_session_id: point.record.wake.owner_session_id.clone(),
             entrusted_work_id: point.record.wake.entrusted_work_id.clone(),
@@ -129,6 +131,8 @@ pub(super) fn derive_deadline_intent(
         return None;
     }
     Some(WebNotifyIntent {
+        reading_mode: active.entry.plan.reading_mode,
+        use_saved_login: active.entry.plan.use_saved_login,
         correlation_id: WebNotifyIntent::correlation(
             WebNotifyKind::Deadline,
             &event_id,

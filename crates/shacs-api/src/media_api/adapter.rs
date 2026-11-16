@@ -113,6 +113,10 @@ pub trait ChatCompletionAdapter {
         shacs_core::runtime::NetworkGuard::default()
     }
 
+    fn rendered_web_reader(&self) -> Option<&dyn shacs_core::runtime::RenderedWebReader> {
+        None
+    }
+
     fn web_watch_email_ready(&self) -> bool {
         false
     }

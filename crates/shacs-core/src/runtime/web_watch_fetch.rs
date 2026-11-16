@@ -9,7 +9,7 @@ use ureq::Agent;
 
 use super::web_watch_extract::extract;
 use super::web_watch_text::normalized_static_text_v1;
-use super::{WebCheckFailure, WebCheckResult, WebResponseFacts, WebWatchPlan};
+use super::{RenderedWebReader, WebCheckFailure, WebCheckResult, WebResponseFacts, WebWatchPlan};
 
 const MAX_URL_CHARS: usize = 2048;
 const MAX_REDIRECTS: usize = 5;
@@ -171,21 +171,24 @@ pub(super) fn check_plan(
     guard: &NetworkGuard,
     limits: &WebFetchLimits,
     now_ms: u64,
+    reader: Option<&dyn RenderedWebReader>,
 ) -> WebCheckResult {
-    let page = match read_page(&plan.url, guard, limits) {
+    let page = match super::rendered_web_reader::read_selected(
+        &plan.url,
+        plan.reading_mode,
+        plan.use_saved_login,
+        guard,
+        limits,
+        reader,
+    ) {
         Ok(page) => page,
-        Err(failure) => {
-            return WebCheckResult::Failed {
-                failure,
-                response: None,
-                retry_after_ms: None,
-            }
-        }
+        Err(error) => return super::rendered_web_reader::failed_check(error, now_ms),
     };
     if let Some(failure) = status_failure(page.response.http_status) {
         let throttled = matches!(page.response.http_status, 429 | 503);
         return WebCheckResult::Failed {
             failure,
+            browser_reason: None,
             retry_after_ms: page
                 .retry_after
                 .as_deref()
@@ -200,7 +203,8 @@ pub(super) fn check_plan(
             value,
         },
         Err(failure) => WebCheckResult::Failed {
-            failure,
+            failure: plan.reading_mode.extraction_failure(failure),
+            browser_reason: None,
             response: Some(page.response),
             retry_after_ms: None,
         },
@@ -215,7 +219,7 @@ pub(super) fn status_failure(status: u16) -> Option<WebCheckFailure> {
     }
 }
 
-fn retry_after_ms(value: &str, now_ms: u64) -> Option<u64> {
+pub(super) fn retry_after_ms(value: &str, now_ms: u64) -> Option<u64> {
     let value = value.trim();
     let delay = match value.parse::<u64>() {
         Ok(seconds) => seconds.saturating_mul(1000),

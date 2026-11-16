@@ -231,6 +231,9 @@ use surface_approval_worker::{start_surface_approval_worker, SurfaceApprovalWork
 #[cfg(any(test, feature = "spec031-test-fixture"))]
 #[doc(hidden)]
 pub use surface_approval_worker::spec031_surface_approval_fixture;
+#[cfg(feature = "spec031-test-fixture")]
+#[doc(hidden)]
+pub mod spec051_gateway_fixture;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const RUNTIME_DATA_SCHEMA_VERSION: u32 = 1;
@@ -11300,6 +11303,7 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
         .lock()
         .map(|reason| *reason)
         .unwrap_or(RuntimeShutdownReason::StartupFailed);
+    browser::shutdown_process_browser();
     let approval_worker_result = approval_worker.stop();
     let cron_worker_result = cron_worker
         .join()
@@ -11465,6 +11469,7 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
     let serve_failed = serve_result.is_err();
     shutdown_reason = finalized_runtime_shutdown_reason(shutdown_reason, serve_failed);
     let supervisor_report_result = supervisor.stop(shutdown_reason);
+    browser::shutdown_process_browser();
     let approval_worker_result = approval_worker.stop();
     let heartbeat_result = join_heartbeat_worker(heartbeat_worker);
     let cron_result = cron_worker
@@ -19647,6 +19652,7 @@ pub struct AgentLoopChatCompletionAdapter {
     _mcp_runtime: Option<McpRuntime>,
     _mcp_reports: Vec<McpServerConnectionReport>,
     browser_host: Option<Arc<dyn shacs_core::runtime::BrowserHost>>,
+    rendered_reader: Option<Arc<dyn shacs_core::runtime::RenderedWebReader>>,
     /// The WebSocket connections that can go on with a paused `handoff` call.
     websocket_runtime_turns: Arc<shacs_api::WebSocketRuntimeTurns>,
     allow_side_effect_tools: bool,
@@ -19788,6 +19794,7 @@ impl AgentLoopChatCompletionAdapter {
             _mcp_runtime: tooling.mcp_runtime,
             _mcp_reports: tooling.mcp_reports,
             browser_host: tooling.browser_host,
+            rendered_reader: tooling.rendered_reader,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools,
             send_progress: true,
@@ -19841,6 +19848,9 @@ impl AgentLoopChatCompletionAdapter {
             self.tools
                 .register(shacs_core::tools::BrowserTool::new(browser.clone()));
             self.browser_host = Some(browser);
+            // A custom conversation host cannot borrow the process host's
+            // reader: that would create two independent occupancy domains.
+            self.rendered_reader = None;
         }
         self
     }
@@ -19929,6 +19939,7 @@ impl AgentLoopChatCompletionAdapter {
             shacs_core::runtime::WebWatchConversationConfig {
                 guard: web_watch_profile::web_watch_guard(),
                 limits: shacs_core::runtime::WebFetchLimits::PRODUCTION,
+                rendered_reader: self.rendered_reader.clone(),
                 data_dir: data_dir.to_path_buf(),
                 email_ready: spec042_web_watch_cli::email_ready(Some(self.config_path.clone()))
                     .unwrap_or(false),
@@ -21696,6 +21707,10 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
 
     fn web_watch_network_guard(&self) -> shacs_core::runtime::NetworkGuard {
         web_watch_profile::web_watch_guard()
+    }
+
+    fn rendered_web_reader(&self) -> Option<&dyn shacs_core::runtime::RenderedWebReader> {
+        self.rendered_reader.as_deref()
     }
 
     fn web_watch_email_ready(&self) -> bool {
@@ -25754,6 +25769,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: false,
@@ -28204,6 +28220,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: true,
             send_progress: false,
@@ -28365,6 +28382,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: true,
             send_progress: false,
@@ -28605,6 +28623,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: true,
             send_progress: false,
@@ -29651,6 +29670,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: false,
@@ -29744,6 +29764,7 @@ mod tests {
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
                 browser_host: None,
+                rendered_reader: None,
                 websocket_runtime_turns: Arc::default(),
                 allow_side_effect_tools: false,
                 send_progress: false,
@@ -34143,6 +34164,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: false,
@@ -34841,6 +34863,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -34905,6 +34928,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -35180,6 +35204,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -35286,6 +35311,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -35415,6 +35441,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -35511,6 +35538,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -35591,6 +35619,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -35690,6 +35719,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -35779,6 +35809,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -35871,6 +35902,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -35987,6 +36019,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: true,
             send_progress: true,
@@ -36317,6 +36350,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -36486,6 +36520,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -36564,6 +36599,7 @@ mod tests {
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
                 browser_host: None,
+                rendered_reader: None,
                 websocket_runtime_turns: Arc::default(),
                 allow_side_effect_tools: false,
                 send_progress: true,
@@ -36654,6 +36690,7 @@ mod tests {
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
                 browser_host: None,
+                rendered_reader: None,
                 websocket_runtime_turns: Arc::default(),
                 allow_side_effect_tools: false,
                 send_progress: true,
@@ -36749,6 +36786,7 @@ mod tests {
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
                 browser_host: None,
+                rendered_reader: None,
                 websocket_runtime_turns: Arc::default(),
                 allow_side_effect_tools: false,
                 send_progress: true,
@@ -36856,6 +36894,7 @@ mod tests {
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
                 browser_host: None,
+                rendered_reader: None,
                 websocket_runtime_turns: Arc::default(),
                 allow_side_effect_tools: false,
                 send_progress: true,
@@ -37061,6 +37100,7 @@ mod tests {
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
                 browser_host: None,
+                rendered_reader: None,
                 websocket_runtime_turns: Arc::default(),
                 allow_side_effect_tools: false,
                 send_progress: true,
@@ -37292,6 +37332,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -37380,6 +37421,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -37534,6 +37576,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -37632,6 +37675,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: true,
@@ -38223,6 +38267,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: true,
             send_progress: true,
@@ -38485,6 +38530,7 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             browser_host: None,
+            rendered_reader: None,
             websocket_runtime_turns: Arc::default(),
             allow_side_effect_tools: false,
             send_progress: false,

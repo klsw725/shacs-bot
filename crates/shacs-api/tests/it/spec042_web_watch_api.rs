@@ -177,7 +177,7 @@ async fn web_watch_routes_preview_confirm_and_report_masked_status(
     Ok(())
 }
 
-async fn request(
+pub(super) async fn request(
     app: axum::Router,
     method: &str,
     path: &str,

@@ -191,6 +191,7 @@ fn web_record(work_id: &str, at_ms: u64, failed: bool) -> WebObservationRecord {
         text_version: WEB_TEXT_VERSION.to_owned(),
         result: if failed {
             WebCheckResult::Failed {
+                browser_reason: None,
                 failure: WebCheckFailure::HttpError,
                 response: None,
                 retry_after_ms: None,
@@ -257,6 +258,8 @@ fn observation_record(
 
 fn web_intent(event_id: &str) -> WebNotifyIntent {
     WebNotifyIntent {
+        reading_mode: super::WebReadingMode::Fetch,
+        use_saved_login: false,
         correlation_id: WebNotifyIntent::correlation(WebNotifyKind::Gap, event_id, 1),
         owner_session_id: "owner".to_owned(),
         entrusted_work_id: "watch-1".to_owned(),

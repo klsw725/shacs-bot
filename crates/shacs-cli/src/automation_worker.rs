@@ -55,6 +55,7 @@ impl AutomationOwnerAdapters for AgentLoopChatCompletionAdapter {
             now_ms,
             guard: &guard,
             limits: shacs_core::runtime::WebFetchLimits::PRODUCTION,
+            rendered_reader: self.rendered_reader.as_deref(),
         };
         dispatcher
             .process_entrusted_observations(&runtime, self)

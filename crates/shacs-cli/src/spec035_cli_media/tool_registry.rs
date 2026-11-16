@@ -8,7 +8,7 @@ use shacs_core::memory_search::{MemorySearch, MemorySearchPaths, MemorySearchSet
 use shacs_core::runtime::{
     discover_plugins, register_plugin_runtime_tools, BrowserHost,
     CredentialResolvingImageGenerationClient, ProviderCredentialClientConfig,
-    ProviderCredentialRuntime,
+    ProviderCredentialRuntime, RenderedWebReader,
 };
 use shacs_core::tools::{
     AskUserTool, BrowserTool, CronTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool,
@@ -31,6 +31,7 @@ pub(crate) struct ProductionTooling {
     pub(crate) mcp_runtime: Option<McpRuntime>,
     pub(crate) mcp_reports: Vec<McpServerConnectionReport>,
     pub(crate) browser_host: Option<Arc<dyn BrowserHost>>,
+    pub(crate) rendered_reader: Option<Arc<dyn RenderedWebReader>>,
 }
 
 pub(crate) fn production_tool_registry(
@@ -50,8 +51,14 @@ pub(crate) fn production_tool_registry(
     };
     let file_state = Arc::new(Mutex::new(FileState::new()));
     let mut registry = ToolRegistry::new();
-    let browser_host = allow_side_effect_tools.then(|| {
-        let host: Arc<dyn BrowserHost> = Arc::new(crate::browser::process_browser_host(bundle));
+    let browser =
+        allow_side_effect_tools.then(|| Arc::new(crate::browser::process_browser_host(bundle)));
+    let rendered_reader = browser.as_ref().map(|host| {
+        let reader: Arc<dyn RenderedWebReader> = host.clone();
+        reader
+    });
+    let browser_host = browser.map(|host| {
+        let host: Arc<dyn BrowserHost> = host;
         host
     });
     if let Some(host) = &browser_host {
@@ -255,5 +262,6 @@ pub(crate) fn production_tool_registry(
         mcp_runtime,
         mcp_reports,
         browser_host,
+        rendered_reader,
     })
 }

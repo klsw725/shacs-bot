@@ -373,6 +373,9 @@ shacs-bot work observations "$WORK" --workspace "$WS" --session email:me@example
 
 ### 웹페이지 한 곳의 값 관찰 (Spec 042 PRD 000)
 
+읽기 방식의 기본값은 `fetch`입니다. 아래 정적 HTML 규칙은 이 기본 방식에 적용됩니다.
+JavaScript가 그린 글은 뒤의 **브라우저로 웹페이지 관찰**에서 설명하는 `browser` 방식으로 읽습니다.
+
 활성 위임 하나에 **공개 웹페이지 한 곳의 값 하나**를 맡길 수 있습니다. 어시스턴트가 페이지를 직접 읽어 볼 값 후보를 보여주고, 사용자가 확인한 위치와 조건으로 주기적으로 다시 읽어 판정합니다. 이 단계는 알림을 보내지 않으며 CLI/API로 판정과 상태를 조회합니다. 로컬 파일 관측(`observe`)을 설정한 위임에는 웹페이지를 설정할 수 없고, 그 반대도 마찬가지입니다.
 
 ```sh
@@ -413,6 +416,118 @@ serve 또는 channel `runtime start`의 기존 worker가 029 queue에 `web_watch
 **지원하지 않는 것:** JavaScript 실행, 로그인·cookie·인증 header·credential이 필요한 페이지, URL의 사용자 이름·비밀번호, http/https 이외 scheme, 접근 차단이나 이용 제한의 우회, 여러 값·여러 페이지입니다. 내부·사설 주소는 `tools.ssrfWhitelist`와 관계없이 설정 단계와 실행 중 모두 거절합니다. 프록시 환경 변수(`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`)는 쓰지 않고 페이지에 직접 연결합니다. 그래서 프록시를 거쳐야만 밖으로 나갈 수 있는 환경에서는 `network_error`가 됩니다. 주소 확인과 실제 연결 사이에 DNS 응답이 바뀌는 경우까지 막지는 않습니다. 위임 확인은 이 읽기 하나의 근거일 뿐 `web_fetch` 같은 도구 권한이 아니며 예약·구매·발송 승인이 아닙니다. 읽기 전에는 031 실행 snapshot과 030 `tool:before` hook(`web_watch_fetch`, 인자는 query를 뺀 주소)을 거치며 hook이 거절하면 `blocked`로 기록하고 다음 주기에 다시 확인합니다.
 
 종료 시험은 `--features spec042-test-profile`로 따로 빌드한 binary에서만 `SHACS_SPEC042_ALLOW_LOOPBACK=1`(127.0.0.1/32 허용)과 `SHACS_SPEC042_CLOCK_FILE`(시험용 시계)을 읽습니다. 일반 빌드와 Docker 빌드는 이 변수를 무시합니다.
+
+### 브라우저로 웹페이지 관찰 (Spec 051)
+
+JavaScript가 값을 그리는 공개 페이지는 CLI 미리보기와 확인 양쪽에
+`--reading-mode browser`를 붙입니다. 생략하거나 `fetch`를 쓰면 기존 정적 읽기입니다.
+브라우저는 공식 컨테이너에서 사용자 설정 파일의 `tools.browser.enable`과 기존 시작
+권한 판정을 통과해야 합니다. 거절되면 값을 추정하거나 provider에 묻지 않습니다.
+
+```sh
+shacs-bot --config "$DATA/config.json" work web-preview "$WORK" \
+  --workspace "$WS" --session cli:direct --url "$URL" --label "판매가" --reading-mode browser
+shacs-bot --config "$DATA/config.json" work web-watch "$WORK" \
+  --workspace "$WS" --session cli:direct --url "$URL" --reading-mode browser \
+  --candidate '<token-from-browser-preview>' --at-most 11000 \
+  --cadence-seconds 3600 --expected-revision 1
+```
+
+API의 `POST .../web-watch/preview`와 `POST .../web-watch`에도
+`"reading_mode": "browser"`를 함께 넣습니다. 모르는 방식, 다른 방식으로 만든 token,
+서로 다른 추출 버전은 읽기 전에 거절합니다. 방식을 바꾸려면 새 미리보기와 확인을
+거치며 revision과 비교 기준이 새로 잡힙니다. CLI/API 상태와 대화 상태 조회는 저장된
+`reading_mode`와 `use_saved_login`을 보여줍니다.
+
+대화에서는 정적 읽기가 실제 값 부재(`value_absent`)를 확인한 경우에만 같은 URL과
+문구로 브라우저 미리보기를 한 번 더 합니다. 숫자 형식·부호·범위 값 오류, 모호함,
+검증 실패, 잘림·검색 한도, HTTP 오류·429·주소 거절에서는 자동 전환하지 않습니다.
+처음부터 “브라우저로 읽어 줘”라고 하면 정적 읽기를 건너뛰며, 정적 읽기로 한정하면
+자동 전환하지 않습니다. 방식과 값을 적은 새 요약을 확인하기 전에는 감시를 등록하지 않습니다.
+
+로그인 감시는 `tools.browser.persistLogin=true` 설정과 감시별 명시 선택이 모두 필요합니다.
+설정이 켜져 있으면 요약이나 값 부재 안내에서 **로그인한 상태로 보기**와 **로그인 없이 보기**를
+고를 수 있습니다. 선택은 새 미리보기와 요약을 만들 뿐 등록 확인을 대신하지 않습니다.
+사용자가 요청하기 전에는 저장 프로필을 열지 않습니다. CLI에서는 미리보기와 확인 양쪽에
+`--reading-mode browser --use-saved-login`을, API에서는 양쪽 body에
+`"reading_mode":"browser","use_saved_login":true`를 넣습니다. 생략은 false이며,
+fetch와 true의 조합이나 token과 다른 선택은 거절합니다. 로그인 선택 변경은 새 요약 확인,
+관측 revision 증가와 baseline 재설정을 거칩니다. 알림 대상·실패 시간·마감만 바꾸면
+기존 방식·로그인 선택·baseline을 유지합니다.
+
+`serve --allow-api-side-effects`와 브라우저 도구를 허용한 channel gateway는 대화와
+감시에 같은 브라우저 관리자를 사용합니다. 일회 CLI도 같은 시작 경계를 씁니다.
+`web`과 side-effect 도구를 허용하지 않은 API adapter에는 reader가 없어
+`browser_unavailable`이 됩니다. 임베디드 API가 별도 conversation host만 주입한 경우도
+다른 관리자의 reader를 빌리지 않고 unavailable로 처리합니다. 반복 확인에는 실행 중인
+serve 또는 channel runtime의 기존 worker가 필요합니다.
+
+확인마다 브라우저를 열고 최초 탭만 읽은 뒤 닫습니다. 로그인 미사용 감시는
+`persistLogin=true`여도 저장 프로필 `browser/profile/`을 열거나 만들지 않습니다. 임시 프로필에는 그 확인 동안
+익명 cookie·방문 기록·사이트 자료가, 임시 HTTP cache에는 응답 내용이 남을 수 있습니다.
+정상 종료 때 generation 폴더와 함께 지우지만 강제 종료 뒤에는 남을 수 있으며,
+임시 프로필과 cache에는 저장 프로필의 비밀 파일 보호가 적용되지 않습니다.
+관측 사실·알림·조회에는 페이지 원문 전체, cookie, header 전체, 화면을 저장하지 않습니다.
+
+로그인 사용 감시는 050의 공용 `browser/profile/`을 잠그고 읽습니다. **확인한 계정 값과
+추출 근거는 감시 기록에 저장되고, 요약에서 확인한 `email:<주소>`로 전송됩니다.**
+알림 대상이 없으면 보내지 않습니다. 프로필에는 cookie·방문 기록·사이트 자료와 페이지
+내용이 남을 수 있으며 폴더 전체에 비밀 파일 보호가 적용됩니다. HTTP cache는 프로필 밖
+임시 폴더이며 이 보호 밖입니다. 정상 종료는 `Browser.close` 후 최대 5초 기다리고 강제로
+정리하며, process와 임시 자료를 없앤 뒤에만 잠금과 브라우저 자리를 놓습니다.
+`active.lock`·`forget.lock`·`profile.lock`, 프로필 폴더 배타 잠금과 잠금 뒤 identity 확인,
+browser 폴더 공유 잠금 및 1초 점검을 대화 브라우저와 그대로 공유합니다.
+다른 process가 프로필을 쓰면 `profile_in_use`, 해석할 수 없거나 다른 hostname의
+SingletonLock이면 `profile_locked`로 실패합니다. `browser forget`은 한 15초 예산 안에
+감시를 중단·정리한 뒤에만 프로필을 지웁니다. lock 파일 교체도 감시를 취소합니다.
+폴더 잠금을 전달하지 않는 공유 파일 시스템과 프로필 폴더 자체의 외부 이름 변경은 보장 밖입니다.
+
+`persistLogin`을 끄면 기존 로그인 감시는 `browser_unavailable`의
+`persist_login_disabled`로 실패하며 비로그인으로 바뀌지 않습니다. 고정 문구를 못 읽으면
+실패 알림에 “로그인이 풀렸을 수 있다”고 안내합니다. 로그인 만료를 판정한 것은 아니며
+401/403과 숫자 오류는 원래 실패 분류를 유지합니다. 감시가 끝난 뒤 `/browser takeover`로
+다시 로그인하고 돌려준 다음 **`/browser close`로 닫아야** 다음 예정 감시가 읽을 수 있습니다.
+slash 명령이 없는 channel에서는 “브라우저 넘겨줘”, “브라우저 닫아”라고 요청하세요.
+비밀번호·인증 코드를 대화로 보내지 마세요. 감시 중 takeover는 즉시 busy입니다.
+프로필의 계정을 고정하지 않으므로 계정을 바꾸면 같은 감시가 다른 계정 내용을 읽을 수 있습니다.
+계정을 바꿀 때는 감시를 중지하고 새 요약으로 다시 확인하세요.
+
+일회용 Docker 점검은 사용자 승인 뒤 `bash scripts/spec051-web-watch-check.sh --approved`로
+실행합니다. 사용자 data 대신 임시 data와 로컬 SMTP sink를 쓰며, `spec051-test-profile`
+빌드에서만 고정 시험 주소 `172.30.250.2/32`를 허용합니다
+(`SHACS_SPEC051_ALLOW_TEST_PAGE=1`, 시계는 `SHACS_SPEC042_CLOCK_FILE`).
+일반 빌드와 기존 042 전용 빌드에서는 이 051 변수가 사설 주소를 열지 않습니다.
+
+`rendered_text_v1`은 현재 주 문서의 load 뒤 최초 탭 session의 HTTP(S) 요청이 0개인
+상태가 500 ms 유지되면 `document.body.innerText`를 읽습니다. NFC와 공백만 정규화하며,
+화면에 보이는 `<`나 `&amp;`를 HTML로 다시 해석하지 않습니다. 시작부터 결과까지 60초,
+그 안에서 navigation·load·idle·본문 읽기는 최대 20초입니다. 글은 브라우저 안에서
+UTF-8 1 MiB로 제한하고 잘림을 표시합니다. 앞뒤 고정 문구가 온전히 남은 구간만 읽습니다.
+읽기 전후 URL·loader가 바뀌거나 응답이 그 문서의 것이 아니면 값으로 남기지 않습니다.
+주 문서 429·503의 `Retry-After`는 기존 대기를 따르며 하위 자원과 앞 redirect의 값은 쓰지 않습니다.
+시간 초과 때 보이던 옛 값을 성공으로 저장하지 않으며, 자원 정리는 읽기 예산을 넘더라도 끝냅니다.
+
+이 대기는 사이트의 최종 값 보장이 아닙니다. 늦은 timer, WebSocket,
+다른 target의 iframe·worker 변화는 놓칠 수 있고 계속 요청하는 페이지는 실패합니다.
+클릭·입력·스크롤·캡처는 하지 않고 popup은 닫습니다. 페이지 자체의 JavaScript 요청은
+실행됩니다. 감시 proxy는 사용자 `ssrfWhitelist`를 적용하지 않고 공개 주소만 연결하며,
+DNS 결과를 모두 검사한 뒤 검사한 주소에만 연결합니다.
+
+| 상황 | 분류 |
+|---|---|
+| 꺼짐·시작 권한 거절·실행 불가·시작 실패·강제 닫힘 | `browser_unavailable` (`disabled`, `permission_denied`, `startup_failed`, `closed` 같은 고정 `browser_reason`) |
+| 대화·답 기다림·user takeover·다른 확인이 시작/사용/정리 중 | `browser_busy` |
+| 그려진 글에 확인한 고정 문구가 없음 | `rendered_content_unavailable` |
+| load/idle/본문 읽기 초과·연결 실패·문서 변경·응답 결속 실패 | `network_error` |
+
+대화가 브라우저를 쓰면 감시는 기다리거나 대화 탭을 닫지 않습니다. 반대로 감시가
+시작·읽기·정리 중이면 대화 도구와 `/browser takeover`는 즉시 busy이며, 끝난 뒤
+takeover를 자동 실행하지 않습니다. 보기 화면은 읽기 전용입니다. `/browser close`,
+`browser forget`, runtime 종료는 진행 중인 감시를 중단할 수 있고, process·proxy·임시
+폴더 정리가 끝난 뒤에만 잠금과 자리를 놓습니다. 중단은 `browser_unavailable`이고,
+작업 자체의 취소나 revision 변경은 기존 오래된 결과 폐기 규칙이 우선합니다.
+busy도 기존 실패 구간을 이어 다음 정규 주기에 확인합니다. 변화·실패·회복·공백·마감
+알림은 저장된 방식에 맞는 한계를 적으며, 다른 곳 검증이나 원격 수신 확인을 뜻하지 않습니다.
 
 ### 웹페이지 관찰 알림 (Spec 042 PRD 010)
 

@@ -274,7 +274,13 @@ impl BrowserProcessRunner for Runner {
             }),
         }))
     }
-    fn display_ready(&self, _display: u16, _deadline: Instant) -> Result<(), BrowserError> {
+    fn display_ready(
+        &self,
+        _display: u16,
+        _deadline: Instant,
+        cancellation: &BrowserCancellation,
+    ) -> Result<(), BrowserError> {
+        cancellation.check()?;
         Ok(())
     }
 }
@@ -417,7 +423,7 @@ pub(super) fn input(bundle: &ConfigBundle) -> Result<ProcessGateInput, BrowserEr
 /// Tests that drive the transport directly never meet a paused target.
 fn no_admission(
     _peer: &mut dyn DevToolsPeer,
-    _event: &Value,
+    _event: &mut Value,
     _deadline: Instant,
 ) -> Result<Vec<Value>, BrowserError> {
     Ok(Vec::new())
@@ -1427,8 +1433,13 @@ impl BrowserProcessRunner for StalledRunner {
         }))
     }
 
-    fn display_ready(&self, display: u16, deadline: Instant) -> Result<(), BrowserError> {
-        self.runner.display_ready(display, deadline)
+    fn display_ready(
+        &self,
+        display: u16,
+        deadline: Instant,
+        cancellation: &BrowserCancellation,
+    ) -> Result<(), BrowserError> {
+        self.runner.display_ready(display, deadline, cancellation)
     }
 }
 

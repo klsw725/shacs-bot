@@ -1,11 +1,13 @@
 use super::browser_snapshot::{self, BrowserNode, BrowserSnapshot};
+use super::rendered_load::RenderedLoad;
 use super::{
     browser_action_binding, changes_document, event_admitted, recoverable, with_cleanup,
-    BrowserCancellation, CdpReply, DevToolsPeer,
+    BrowserCancellation, BrowserClock, CdpReply, DevToolsPeer,
 };
 use serde_json::{json, Value};
 use shacs_core::runtime::{
-    BrowserAction, BrowserDocument, BrowserError, BrowserPreparedAction, BrowserRead,
+    self, BrowserAction, BrowserDocument, BrowserError, BrowserPreparedAction, BrowserRead,
+    BrowserUnavailableReason, RenderedWebFailure, RenderedWebPage, WebCheckFailure, WebFetchLimits,
 };
 use std::collections::VecDeque;
 use std::thread;
@@ -37,6 +39,7 @@ pub struct CdpDocument {
     /// prepares. The manager raises it at each takeover and each return.
     control: u64,
     notice: Option<String>,
+    rendered: Option<RenderedLoad>,
 }
 
 /// What a key press is bound to: the approval's snapshot and arguments, and
@@ -71,7 +74,11 @@ fn configure_target(
     session: &str,
     browser_context: Option<&str>,
     deadline: Instant,
+    initial_target: Option<&str>,
 ) -> Result<Vec<Value>, BrowserError> {
+    let mut admit = |peer: &mut dyn DevToolsPeer, event: &mut Value, deadline| {
+        admit_target(peer, event, deadline, initial_target)
+    };
     let mut download = json!({"behavior":"deny","eventsEnabled":true});
     if let Some(context) = browser_context {
         download["browserContextId"] = json!(context);
@@ -82,7 +89,7 @@ fn configure_target(
             download,
             None,
             deadline,
-            &mut admit_paused_target,
+            &mut admit,
         )?
         .events;
     for (method, params) in [
@@ -93,13 +100,7 @@ fn configure_target(
             json!({"enabled":true}),
         ),
     ] {
-        let reply = peer.request(
-            method,
-            params,
-            Some(session),
-            deadline,
-            &mut admit_paused_target,
-        )?;
+        let reply = peer.request(method, params, Some(session), deadline, &mut admit)?;
         events.extend(reply.events);
     }
     Ok(events)
@@ -111,20 +112,46 @@ fn configure_target(
 /// popup resumes.
 fn admit_paused_target(
     peer: &mut dyn DevToolsPeer,
-    event: &Value,
+    event: &mut Value,
     deadline: Instant,
 ) -> Result<Vec<Value>, BrowserError> {
+    admit_target(peer, event, deadline, None)
+}
+
+fn admit_target(
+    peer: &mut dyn DevToolsPeer,
+    event: &mut Value,
+    deadline: Instant,
+    initial_target: Option<&str>,
+) -> Result<Vec<Value>, BrowserError> {
+    if initial_target
+        .is_some_and(|initial| event["params"]["targetInfo"]["targetId"].as_str() != Some(initial))
+    {
+        let target = event["params"]["targetInfo"]["targetId"]
+            .as_str()
+            .ok_or(BrowserError::Protocol)?
+            .to_owned();
+        let reply = peer.request(
+            "Target.closeTarget",
+            json!({"targetId":target}),
+            None,
+            deadline,
+            &mut |peer, event, deadline| admit_target(peer, event, deadline, initial_target),
+        )?;
+        event["params"]["rejected"] = json!(true);
+        return Ok(reply.events);
+    }
     let session = event["params"]["sessionId"]
         .as_str()
         .ok_or(BrowserError::Protocol)?;
     let context = event["params"]["targetInfo"]["browserContextId"].as_str();
-    let mut events = configure_target(peer, session, context, deadline)?;
+    let mut events = configure_target(peer, session, context, deadline, initial_target)?;
     let resumed = peer.request(
         "Runtime.runIfWaitingForDebugger",
         json!({}),
         Some(session),
         deadline,
-        &mut admit_paused_target,
+        &mut |peer, event, deadline| admit_target(peer, event, deadline, initial_target),
     )?;
     events.extend(resumed.events);
     Ok(events)
@@ -357,30 +384,43 @@ impl CdpDocument {
     }
 
     pub fn initialize(
-        mut peer: Box<dyn DevToolsPeer>,
+        peer: Box<dyn DevToolsPeer>,
         deadline: Instant,
     ) -> Result<Self, BrowserError> {
+        Self::initialize_with(peer, deadline, None)
+    }
+
+    pub fn initialize_rendered(
+        peer: Box<dyn DevToolsPeer>,
+        deadline: Instant,
+    ) -> Result<Self, BrowserError> {
+        Self::initialize_with(peer, deadline, Some(RenderedLoad::default()))
+    }
+
+    fn initialize_with(
+        mut peer: Box<dyn DevToolsPeer>,
+        deadline: Instant,
+        rendered: Option<RenderedLoad>,
+    ) -> Result<Self, BrowserError> {
+        let initial_target = rendered.as_ref().map(|_| "");
+        let mut admit = |peer: &mut dyn DevToolsPeer, event: &mut Value, deadline| {
+            admit_target(peer, event, deadline, initial_target)
+        };
         peer.request(
             "Browser.setDownloadBehavior",
             json!({"behavior":"deny", "eventsEnabled":true}),
             None,
             deadline,
-            &mut admit_paused_target,
+            &mut admit,
         )?;
         peer.request(
             "Target.setDiscoverTargets",
             json!({"discover":true}),
             None,
             deadline,
-            &mut admit_paused_target,
+            &mut admit,
         )?;
-        let targets = peer.request(
-            "Target.getTargets",
-            json!({}),
-            None,
-            deadline,
-            &mut admit_paused_target,
-        )?;
+        let targets = peer.request("Target.getTargets", json!({}), None, deadline, &mut admit)?;
         let target = targets.result["targetInfos"]
             .as_array()
             .and_then(|targets| targets.iter().find(|target| target["type"] == "page"))
@@ -392,7 +432,14 @@ impl CdpDocument {
             json!({"targetId":target, "flatten":true}),
             None,
             deadline,
-            &mut admit_paused_target,
+            &mut |peer, event, deadline| {
+                admit_target(
+                    peer,
+                    event,
+                    deadline,
+                    rendered.as_ref().map(|_| target.as_str()),
+                )
+            },
         )?;
         let session = attached.result["sessionId"]
             .as_str()
@@ -412,6 +459,7 @@ impl CdpDocument {
             epoch: 0,
             control: 0,
             notice: None,
+            rendered,
         };
         document.configure_session(deadline)?;
         // New page targets remain paused until the host installs the same boundary.
@@ -425,7 +473,8 @@ impl CdpDocument {
 
     fn configure_session(&mut self, deadline: Instant) -> Result<(), BrowserError> {
         let session = self.session.clone();
-        let events = configure_target(&mut *self.peer, &session, None, deadline)?;
+        let initial = self.rendered.as_ref().map(|_| self.target.as_str());
+        let events = configure_target(&mut *self.peer, &session, None, deadline, initial)?;
         self.events(&events, deadline)
     }
 
@@ -587,6 +636,22 @@ impl CdpDocument {
     }
 
     fn apply_event(&mut self, event: &Value, deadline: Instant) -> Result<(), BrowserError> {
+        if let Some(rendered) = &mut self.rendered {
+            rendered.event(event, &self.session);
+            if event["method"] == "Target.attachedToTarget"
+                && event["params"]["targetInfo"]["type"] == "page"
+                && event["params"]["targetInfo"]["targetId"] != self.target
+            {
+                if event["params"]["rejected"] != true {
+                    self.global(
+                        "Target.closeTarget",
+                        json!({"targetId":event["params"]["targetInfo"]["targetId"]}),
+                        deadline,
+                    )?;
+                }
+                return Ok(());
+            }
+        }
         {
             // The same predicate the transport stamps its read epoch with: a
             // frame removal, a destroyed or renamed target, a chooser count as
@@ -657,9 +722,9 @@ impl CdpDocument {
                         let nested = if event_admitted(event) {
                             Vec::new()
                         } else if event["params"]["waitingForDebugger"] == true {
-                            admit_paused_target(&mut *self.peer, event, deadline)?
+                            admit_paused_target(&mut *self.peer, &mut event.clone(), deadline)?
                         } else {
-                            configure_target(&mut *self.peer, session, context, deadline)?
+                            configure_target(&mut *self.peer, session, context, deadline, None)?
                         };
                         self.events(&nested, deadline)?;
                         if previous != target {
@@ -703,7 +768,14 @@ impl CdpDocument {
             params,
             Some(&self.session),
             deadline,
-            &mut admit_paused_target,
+            &mut |peer, event, deadline| {
+                admit_target(
+                    peer,
+                    event,
+                    deadline,
+                    self.rendered.as_ref().map(|_| self.target.as_str()),
+                )
+            },
         );
         self.replied(reply, deadline)
     }
@@ -759,9 +831,20 @@ impl CdpDocument {
         params: Value,
         deadline: Instant,
     ) -> Result<CdpReply, BrowserError> {
-        let reply = self
-            .peer
-            .request(method, params, None, deadline, &mut admit_paused_target);
+        let reply = self.peer.request(
+            method,
+            params,
+            None,
+            deadline,
+            &mut |peer, event, deadline| {
+                admit_target(
+                    peer,
+                    event,
+                    deadline,
+                    self.rendered.as_ref().map(|_| self.target.as_str()),
+                )
+            },
+        );
         self.replied(reply, deadline)
     }
 
@@ -841,6 +924,128 @@ impl CdpDocument {
 
     pub fn read(&mut self, capture: bool, deadline: Instant) -> Result<BrowserRead, BrowserError> {
         self.read_verified(None, capture, deadline)
+    }
+
+    /// Observes only the initial page's rendered text. No accessibility tree,
+    /// numbered elements, capture or input is involved.
+    pub fn read_rendered(
+        &mut self,
+        url: &str,
+        limits: &WebFetchLimits,
+        deadline: Instant,
+        clock: &dyn BrowserClock,
+    ) -> Result<RenderedWebPage, RenderedWebFailure> {
+        let result = self.rendered_transaction(url, limits, deadline, clock);
+        result.map_err(|error| {
+            let response = self
+                .verified
+                .as_ref()
+                .and_then(|document| self.rendered.as_ref().and_then(|load| load.page(document)));
+            self.close(deadline);
+            let closed = matches!(error, BrowserError::Cancelled | BrowserError::Closed);
+            RenderedWebFailure {
+                failure: if closed {
+                    WebCheckFailure::BrowserUnavailable
+                } else {
+                    WebCheckFailure::NetworkError
+                },
+                browser_reason: closed.then_some(BrowserUnavailableReason::Closed),
+                response,
+            }
+        })
+    }
+
+    fn rendered_transaction(
+        &mut self,
+        url: &str,
+        limits: &WebFetchLimits,
+        deadline: Instant,
+        clock: &dyn BrowserClock,
+    ) -> Result<RenderedWebPage, BrowserError> {
+        if self.rendered.is_none() || !http_document(url) {
+            return Err(BrowserError::DocumentChanged);
+        }
+        let started = clock.now_ms();
+        let budget_ms = u64::try_from(limits.timeout.as_millis()).unwrap_or(u64::MAX);
+        self.request("Network.enable", json!({}), deadline)?;
+        self.request(
+            "Page.setLifecycleEventsEnabled",
+            json!({"enabled":true}),
+            deadline,
+        )?;
+        let (initial, _) = self.main_frame(deadline)?;
+        self.rendered = Some(RenderedLoad::default());
+        self.navigation_started = true;
+        let navigation = self.request("Page.navigate", json!({"url":url}), deadline)?;
+        if navigation.result.get("errorText").is_some() {
+            return Err(BrowserError::TransportClosed);
+        }
+        loop {
+            if Instant::now() >= deadline || clock.now_ms().saturating_sub(started) >= budget_ms {
+                return Err(BrowserError::PageTimeout);
+            }
+            self.poll(deadline)?;
+            let (before, first) = self.main_frame(deadline)?;
+            if before == initial && before.url == "about:blank" {
+                clock.pause(10);
+                continue;
+            }
+            if !http_document(&before.url) {
+                return Err(BrowserError::DocumentChanged);
+            }
+            self.verified = Some(before.clone());
+            let load = self.rendered.as_mut().ok_or(BrowserError::Protocol)?;
+            if let Some(mut page) = load.page(&before) {
+                // A verified error response wins over scripts that keep issuing requests.
+                if !(200..=299).contains(&page.http_status) {
+                    let (after, last) = self.frame(deadline)?;
+                    if before != after
+                        || first.document_epoch != last.document_epoch
+                        || first.sequence >= last.sequence
+                    {
+                        return Err(BrowserError::DocumentChanged);
+                    }
+                    return Ok(page);
+                }
+                if load.quiet(&before, clock.now_ms()) {
+                    // Byte counting happens in Chromium, before the DevTools reply is built.
+                    // Only the numeric limit is substituted into this fixed expression.
+                    let expression = runtime::rendered_text_expression(limits);
+                    let text = self.request(
+                        "Runtime.evaluate",
+                        json!({"expression":expression,"returnByValue":true}),
+                        deadline,
+                    )?;
+                    let (after, last) = self.frame(deadline)?;
+                    if before != after
+                        || first.document_epoch != text.document_epoch
+                        || text.document_epoch != last.document_epoch
+                        || first.sequence >= text.sequence
+                        || text.sequence >= last.sequence
+                    {
+                        return Err(BrowserError::DocumentChanged);
+                    }
+                    let load = self.rendered.as_mut().ok_or(BrowserError::Protocol)?;
+                    if load.page(&after).is_none() || !load.quiet(&after, clock.now_ms()) {
+                        return Err(BrowserError::DocumentChanged);
+                    }
+                    if Instant::now() >= deadline
+                        || clock.now_ms().saturating_sub(started) >= budget_ms
+                    {
+                        return Err(BrowserError::PageTimeout);
+                    }
+                    let value = &text.result["result"]["value"];
+                    let bounded = value["text"].as_str().ok_or(BrowserError::Protocol)?;
+                    if bounded.len() > limits.max_bytes {
+                        return Err(BrowserError::Protocol);
+                    }
+                    page.text = bounded.to_owned();
+                    page.truncated = value["truncated"].as_bool().ok_or(BrowserError::Protocol)?;
+                    return Ok(page);
+                }
+            }
+            clock.pause(10);
+        }
     }
 
     /// Read the current document; when `expected` is given, only that document
@@ -1530,7 +1735,14 @@ impl CdpDocument {
                 json!({"targetId":self.target}),
                 None,
                 deadline,
-                &mut admit_paused_target,
+                &mut |peer, event, deadline| {
+                    admit_target(
+                        peer,
+                        event,
+                        deadline,
+                        self.rendered.as_ref().map(|_| self.target.as_str()),
+                    )
+                },
             );
             self.closed = true;
         }

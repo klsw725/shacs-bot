@@ -15,7 +15,8 @@ pub(crate) fn is_web_watch_tool(name: &str) -> bool {
 }
 const MAX_GOAL_CHARS: usize = 240;
 const MAX_FIELD_CHARS: usize = 2_048;
-const TEXT_FIELDS: [&str; 11] = [
+const TEXT_FIELDS: [&str; 12] = [
+    "reading_mode",
     "work_id",
     "url",
     "value_label",
@@ -33,7 +34,12 @@ const NUMBER_FIELDS: [&str; 3] = [
     "failure_threshold_seconds",
     "remind_before_seconds",
 ];
-const FLAG_FIELDS: [&str; 3] = ["decimal_comma", "remind_now", "clear_deadline"];
+const FLAG_FIELDS: [&str; 4] = [
+    "decimal_comma",
+    "remind_now",
+    "clear_deadline",
+    "use_saved_login",
+];
 
 /// What the model proposes; the runtime checks every field and reads the page itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +48,8 @@ pub(crate) struct WebWatchProposalDraft {
     pub work_id: Option<String>,
     pub goal_text: Option<String>,
     pub url: Option<String>,
+    pub reading_mode: Option<crate::runtime::WebReadingMode>,
+    pub use_saved_login: Option<bool>,
     pub value_label: Option<String>,
     pub value_phrase: Option<String>,
     pub area_label: Option<String>,
@@ -81,7 +89,10 @@ impl Tool for ProposeWebWatchTool {
          them, and do not read the page yourself: the runtime reads it and shows the user a summary. \
          Conditions: at_most or at_least with condition_value, below_current or above_current for a \
          number; text_present or text_absent for a phrase. Give work_id with only the fields to \
-         change an existing watch. This never sets anything up or grants permission."
+         change an existing watch. Omit reading_mode for automatic static-to-browser preview, \
+         or set fetch/browser when the user explicitly chooses. Set use_saved_login only when \
+         the user chooses saved login; use browser mode for that choice. A login choice needs \
+         a fresh summary and is never confirmation. This never sets anything up or grants permission."
     }
 
     fn parameters(&self) -> Value {
@@ -91,6 +102,8 @@ impl Tool for ProposeWebWatchTool {
                 "work_id": {"type": "string", "description": "Existing watch to change"},
                 "goal_text": {"type": "string"},
                 "url": {"type": "string"},
+                "reading_mode": {"type": "string", "enum": ["fetch", "browser"]},
+                "use_saved_login": {"type": "boolean", "description": "Use the saved profile only when the user explicitly requests it; false reads without saved login"},
                 "value_label": {"type": "string", "description": "Text shown right before the number"},
                 "decimal_comma": {"type": "boolean"},
                 "value_phrase": {"type": "string", "description": "Phrase to watch for"},

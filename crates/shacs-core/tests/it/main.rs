@@ -14,6 +14,8 @@ mod spec050_conversational_choice;
 mod spec050_handoff;
 mod spec050_login_profile_secret;
 mod spec050_runnable_work;
+mod spec051_registration_and_login;
+mod spec051_rendered_observation;
 
 #[path = "containment_external.rs"]
 pub mod containment_external;

@@ -279,6 +279,8 @@ fn confirmed_watch(root: &Path) -> Result<EntrustedWorkReadRequest, Box<dyn std:
     let preview = preview_web_watch(
         root,
         &WebPreviewRequest {
+            reading_mode: shacs_core::runtime::WebReadingMode::Fetch,
+            use_saved_login: false,
             work: work.clone(),
             url: url.clone(),
             target: WebPreviewTarget::Number {
@@ -288,6 +290,7 @@ fn confirmed_watch(root: &Path) -> Result<EntrustedWorkReadRequest, Box<dyn std:
         },
         &guard,
         &limits,
+        None,
     )?;
     let candidate_token = preview
         .candidates
@@ -298,6 +301,8 @@ fn confirmed_watch(root: &Path) -> Result<EntrustedWorkReadRequest, Box<dyn std:
     confirm_web_watch(
         root,
         ConfirmWebWatchRequest {
+            reading_mode: shacs_core::runtime::WebReadingMode::Fetch,
+            use_saved_login: false,
             work: work.clone(),
             expected_revision: 1,
             url,
@@ -310,6 +315,7 @@ fn confirmed_watch(root: &Path) -> Result<EntrustedWorkReadRequest, Box<dyn std:
         },
         &guard,
         &limits,
+        None,
     )?;
     Ok(work)
 }

@@ -7,8 +7,8 @@ use shacs_channels::EMAIL_CHANNEL;
 use shacs_config::LoadOptions;
 use shacs_core::runtime::{
     ConfigureWebDeadlineRequest, ConfigureWebNotifyRequest, ConfirmWebWatchRequest,
-    EntrustedWorkReadRequest, WebCondition, WebDeadlineInput, WebFetchLimits, WebPreviewRequest,
-    WebPreviewTarget, WebTextArea,
+    EntrustedWorkReadRequest, RenderedWebReader, WebCondition, WebDeadlineInput, WebFetchLimits,
+    WebPreviewRequest, WebPreviewTarget, WebReadingMode, WebTextArea,
 };
 use std::path::PathBuf;
 
@@ -17,11 +17,17 @@ pub enum WebWatchAction {
     Preview {
         work_id: String,
         url: String,
+        reading_mode: WebReadingMode,
+        use_saved_login: bool,
+        config_path: Option<PathBuf>,
         target: WebPreviewTarget,
     },
     Confirm {
         work_id: String,
         url: String,
+        reading_mode: WebReadingMode,
+        use_saved_login: bool,
+        config_path: Option<PathBuf>,
         candidate: String,
         condition: WebCondition,
         cadence_seconds: u64,
@@ -68,11 +74,37 @@ pub(super) fn run(options: WorkOptions, action: WebWatchAction) -> Result<String
     let guard = super::web_watch_profile::web_watch_guard();
     let limits = WebFetchLimits::PRODUCTION;
     let runtime = |error: shacs_core::runtime::WebWatchError| CliError::Runtime(error.to_string());
+    let browser = match &action {
+        WebWatchAction::Preview {
+            reading_mode: WebReadingMode::Browser,
+            config_path,
+            ..
+        }
+        | WebWatchAction::Confirm {
+            reading_mode: WebReadingMode::Browser,
+            config_path,
+            ..
+        } => {
+            let bundle = shacs_config::load_config_or_default(LoadOptions {
+                config_path: config_path.clone(),
+                workspace_override: Some(options.workspace.clone()),
+                resolve_env: true,
+                write_back_migrations: false,
+            })
+            .map_err(|error| CliError::Runtime(error.to_string()))?;
+            Some(super::browser::process_browser_host(&bundle))
+        }
+        _ => None,
+    };
+    let reader = browser.as_ref().map(|host| host as &dyn RenderedWebReader);
     let output = match action {
         WebWatchAction::Preview {
             work_id,
             url,
             target,
+            reading_mode,
+            use_saved_login,
+            config_path: _,
         } => serde_json::to_value(
             shacs_core::runtime::preview_web_watch(
                 &options.workspace,
@@ -80,15 +112,21 @@ pub(super) fn run(options: WorkOptions, action: WebWatchAction) -> Result<String
                     work: request(work_id),
                     url,
                     target,
+                    reading_mode,
+                    use_saved_login,
                 },
                 &guard,
                 &limits,
+                reader,
             )
             .map_err(runtime)?,
         ),
         WebWatchAction::Confirm {
             work_id,
             url,
+            reading_mode,
+            use_saved_login,
+            config_path: _,
             candidate,
             condition,
             cadence_seconds,
@@ -100,6 +138,8 @@ pub(super) fn run(options: WorkOptions, action: WebWatchAction) -> Result<String
                     work: request(work_id),
                     expected_revision,
                     url,
+                    reading_mode,
+                    use_saved_login,
                     candidate_token: candidate,
                     condition,
                     cadence_seconds,
@@ -107,6 +147,7 @@ pub(super) fn run(options: WorkOptions, action: WebWatchAction) -> Result<String
                 },
                 &guard,
                 &limits,
+                reader,
             )
             .map_err(runtime)?,
         ),
@@ -168,6 +209,8 @@ pub(super) fn parse(
     let mut owner = None;
     let mut data_dir = None;
     let mut url = None;
+    let mut reading_mode = WebReadingMode::Fetch;
+    let mut use_saved_login = false;
     let mut label = None;
     let mut phrase = None;
     let mut until = None;
@@ -192,6 +235,12 @@ pub(super) fn parse(
             "--owner-session" => owner = Some(take_value(&mut parser, &argument)?),
             "--data-dir" => data_dir = Some(take_path(&mut parser, &argument)?),
             "--url" => url = Some(take_value(&mut parser, &argument)?),
+            "--use-saved-login" => use_saved_login = true,
+            "--reading-mode" => {
+                reading_mode = take_value(&mut parser, &argument)?
+                    .parse()
+                    .map_err(|reason: &str| CliError::InvalidArguments(reason.to_owned()))?;
+            }
             "--label" => label = Some(take_value(&mut parser, &argument)?),
             "--phrase" => phrase = Some(take_value(&mut parser, &argument)?),
             "--until" => until = Some(take_value(&mut parser, &argument)?),
@@ -228,10 +277,18 @@ pub(super) fn parse(
     }
     let workspace = workspace.ok_or_else(|| missing("--workspace"))?;
     let session = session.ok_or_else(|| missing("--session"))?;
+    if use_saved_login && reading_mode != WebReadingMode::Browser {
+        return Err(CliError::InvalidArguments(
+            "--use-saved-login requires --reading-mode browser".to_owned(),
+        ));
+    }
     let action = match action_name.as_str() {
         "web-preview" => WebWatchAction::Preview {
             work_id,
             url: url.ok_or_else(|| missing("--url"))?,
+            reading_mode,
+            use_saved_login,
+            config_path,
             target: match (label, phrase, until) {
                 (Some(label), None, None) => WebPreviewTarget::Number {
                     label,
@@ -256,6 +313,9 @@ pub(super) fn parse(
         "web-watch" => WebWatchAction::Confirm {
             work_id,
             url: url.ok_or_else(|| missing("--url"))?,
+            reading_mode,
+            use_saved_login,
+            config_path,
             candidate: candidate.ok_or_else(|| missing("--candidate"))?,
             condition: match <[WebCondition; 1]>::try_from(conditions) {
                 Ok([condition]) => condition,
