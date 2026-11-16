@@ -160,6 +160,8 @@ mod tool_before;
 mod tool_execution;
 mod tool_execution_provider;
 pub(crate) mod tool_images;
+mod tool_refusal;
+mod tool_refusals;
 mod tool_search;
 mod trajectory_store;
 mod trusted_javascript_tool_before;

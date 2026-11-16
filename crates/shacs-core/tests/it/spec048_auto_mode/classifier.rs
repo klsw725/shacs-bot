@@ -692,9 +692,13 @@ fn a_deferred_process_tool_without_a_container_proof_is_refused_with_the_gate_te
     assert!(result.interrupt.is_none());
     assert!(recorded.names().is_empty());
     let refused = result.messages.iter().any(|message| {
-        message["content"] == "Error: Process launch blocked by permission gate (Denied)"
+        message["content"].as_str().is_some_and(|text| {
+            text.starts_with("Error: Process launch blocked by permission gate (Denied)\n\n")
+                && text.contains("policy boundary")
+        })
     });
     assert!(refused, "{:?}", result.messages);
+    assert_eq!(result.stop_reason, "completed");
     Ok(())
 }
 

@@ -122,7 +122,12 @@ fn a_tool_error_that_stops_the_turn_shows_only_its_digest() -> Result<(), Box<dy
     std::fs::write(dir.path().join("notes.md"), "Revenue grew 10%.")?;
     let mut tools = super::report::report_tools(dir.path());
     tools.register(ViolatingLookup);
-    let provider = Provider::new(vec![read("r1", "notes.md"), call("lookup", json!({}))]);
+    let provider = Provider::new(vec![
+        read("r1", "notes.md"),
+        call("lookup", json!({})),
+        call("lookup", json!({})),
+        call("lookup", json!({})),
+    ]);
     let mut agent = runtime(dir.path(), &tools, &provider)?;
     // When
     let answer = output(agent.process_message(inbound(REPORT_AND_CALCULATION))?);

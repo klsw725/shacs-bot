@@ -1,3 +1,4 @@
+use super::tool_refusals::{self, ToolRefusals};
 use crate::runtime::auto_mode::classifier_review::{turn_classifier, TurnClassifierInput};
 use crate::runtime::entrusted_work_conversation::{
     clear_pending_proposal, pending_proposal, proposal_from_runner_messages, store_pending_proposal,
@@ -38,11 +39,11 @@ use crate::runtime::{
     SessionRememberedPermissionRules, SessionTurnAcquireError, SessionTurnCancelOutcome,
     SessionTurnGuard, SessionTurnLock, SubagentExecutionConfig, SubagentOutcomeKind,
     SubagentRuntime, TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext,
-    ToolImageSettings, WorkflowAdmissionDecision, WorkflowAdmissionInput, WorkflowBudgetPolicy,
-    WorkflowBudgetSlice, WorkflowBudgetUsage, WorkflowCheckpointInput, WorkflowCheckpointPolicy,
-    WorkflowChildResult, WorkflowChildRunStatus, WorkflowChildSpec, WorkflowContextPolicy,
-    WorkflowHarnessPlan, WorkflowMergePolicy, WorkflowModelRoutingPolicy, WorkflowPattern,
-    WorkflowPermissionPolicy, WorkflowQuarantinePolicy, WorkflowRecipeReadiness,
+    ToolImageSettings, ToolStatus, WorkflowAdmissionDecision, WorkflowAdmissionInput,
+    WorkflowBudgetPolicy, WorkflowBudgetSlice, WorkflowBudgetUsage, WorkflowCheckpointInput,
+    WorkflowCheckpointPolicy, WorkflowChildResult, WorkflowChildRunStatus, WorkflowChildSpec,
+    WorkflowContextPolicy, WorkflowHarnessPlan, WorkflowMergePolicy, WorkflowModelRoutingPolicy,
+    WorkflowPattern, WorkflowPermissionPolicy, WorkflowQuarantinePolicy, WorkflowRecipeReadiness,
     WorkflowResumeDecision, WorkflowResumePolicy, WorkflowRunState, WorkflowStep,
     WorkflowStopCondition, WorkflowToolScopePolicy, WorkflowVerifierSpec, WorkflowWorktreePolicy,
     DEFAULT_GOAL_TURN_BUDGET, GOAL_EVALUATOR_BOUNDARY_METADATA_KEY,
@@ -1063,6 +1064,29 @@ impl<'a> AgentLoop<'a> {
             .as_ref()
             .is_some_and(|call| call.kind == crate::tools::PausedCallKind::BrowserHandoff);
         let pending_ask_id = pending_paused.map(|call| call.id);
+        let stored_refusal_root = pending_permission_approval
+            .as_ref()
+            .and_then(|approval| approval.tool_context.metadata.get(tool_refusals::ROOT_KEY))
+            .or_else(|| {
+                (pending_recent_retry_approval.is_some() || pending_ask_id.is_some())
+                    .then(|| session.metadata.get(tool_refusals::ROOT_KEY))
+                    .flatten()
+            });
+        let refusal_root = tool_refusals::root_id(stored_refusal_root)?
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                format!(
+                    "user:{}:{}:{}:{}",
+                    turn_id_for_message(&message, &session),
+                    std::process::id(),
+                    now_iso(),
+                    COMMAND_TURN_NONCE.fetch_add(1, Ordering::Relaxed),
+                )
+            });
+        let tool_refusals = ToolRefusals::load(&session, &refusal_root)?;
+        session
+            .metadata
+            .insert(tool_refusals::ROOT_KEY.to_owned(), json!(refusal_root));
         let method_tracked = method::user_turn(&message)
             || (pending_ask_id.is_some() && method::request_in_progress(&session)?);
         let execution_ledger = Arc::new(Mutex::new(execution_ledger_for_turn(&message, &session)));
@@ -1097,6 +1121,7 @@ impl<'a> AgentLoop<'a> {
                 PermissionApprovalReply::Approve => {
                     if approval.auto_mode != auto_mode_turn::active(&self.config) {
                         session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                        tool_refusals.finish(&mut session);
                         return self.publish_command_response(
                             &message,
                             session,
@@ -1119,6 +1144,7 @@ impl<'a> AgentLoop<'a> {
                             Ok(shown) => Some(shown),
                             Err(refusal) => {
                                 session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                                tool_refusals.finish(&mut session);
                                 return self.publish_command_response(
                                     &message,
                                     session,
@@ -1153,6 +1179,7 @@ impl<'a> AgentLoop<'a> {
                         Ok(token) => token,
                         Err(error) => {
                             session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                            tool_refusals.finish(&mut session);
                             return self.publish_command_response(
                                 &message,
                                 session,
@@ -1191,6 +1218,7 @@ impl<'a> AgentLoop<'a> {
                         .is_approved()
                     {
                         session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                        tool_refusals.finish(&mut session);
                         return self.publish_command_response(
                             &message,
                             session,
@@ -1274,11 +1302,11 @@ impl<'a> AgentLoop<'a> {
                         call_start = held_from;
                         let fatal_error = self.append_approved_tool_messages(
                             &message,
-                            &session_key,
                             &mut session,
                             &execution_ledger,
                             report,
                             events,
+                            &tool_refusals,
                         );
                         method::image::hold_results(&mut session, held_from)?;
                         session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
@@ -1326,6 +1354,7 @@ impl<'a> AgentLoop<'a> {
                 | PermissionApprovalReply::DenyProject => {
                     self.recent_retry_tokens.invalidate(&approval.denial_id);
                     session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                    tool_refusals.finish(&mut session);
                     return self.publish_command_response(
                         &message,
                         session,
@@ -1338,6 +1367,7 @@ impl<'a> AgentLoop<'a> {
                 PermissionApprovalReply::Deny => {
                     self.recent_retry_tokens.invalidate(&approval.denial_id);
                     session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                    tool_refusals.finish(&mut session);
                     action::cancel(&mut session);
                     return self.publish_command_response(
                         &message,
@@ -1458,6 +1488,7 @@ impl<'a> AgentLoop<'a> {
                             shacs_session::PermissionApprovalTerminalState::Rejected,
                         );
                         session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
+                        tool_refusals.finish(&mut session);
                         return self.publish_command_response(
                             &message,
                             session,
@@ -1501,11 +1532,11 @@ impl<'a> AgentLoop<'a> {
                     call_start = held_from;
                     let fatal_error = self.append_approved_tool_messages(
                         &message,
-                        &session_key,
                         &mut session,
                         &execution_ledger,
                         report,
                         events,
+                        &tool_refusals,
                     );
                     method::image::hold_results(&mut session, held_from)?;
                     session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
@@ -1630,6 +1661,7 @@ impl<'a> AgentLoop<'a> {
                                         record_permission_approval_terminal(&mut session, &approval,
                                             shacs_session::PermissionApprovalTerminalState::Rejected);
                                         session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
+                                        tool_refusals.finish(&mut session);
                                         return self.publish_command_response(
                                             &message,
                                             session,
@@ -1676,6 +1708,7 @@ impl<'a> AgentLoop<'a> {
                     );
                     session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
                     action::cancel(&mut session);
+                    tool_refusals.finish(&mut session);
                     return self.publish_command_response(
                         &message,
                         session,
@@ -1832,7 +1865,7 @@ impl<'a> AgentLoop<'a> {
         let checkpoint_manager = Arc::new(Mutex::new(self.sessions.clone()));
         let checkpoint_manager_capture = checkpoint_manager.clone();
         let checkpoint_execution_ledger = execution_ledger.clone();
-        let tool_context = ToolExecutionContext {
+        let mut tool_context = ToolExecutionContext {
             browser_context: Some(crate::runtime::BrowserCallContext {
                 effective_session_id: session_key.clone(),
                 permission_mode_snapshot: self.config.permission_mode_snapshot.clone(),
@@ -1883,6 +1916,7 @@ impl<'a> AgentLoop<'a> {
             deadline: None,
             permission_auto_mode_escalation: None,
         };
+        tool_context.metadata[tool_refusals::ROOT_KEY] = json!(refusal_root);
         let provider_invocation: ProviderInvocation = media_turn.invoke(|content| {
             is_builtin_command(content) || crate::tools::ask_action::is_command(content)
         });
@@ -1914,6 +1948,7 @@ impl<'a> AgentLoop<'a> {
         spec.context_block_limit = self.config.context_block_limit;
         spec.context_provider_handoff = context_provider_handoff;
         spec.auto_mode_blocks = auto_mode_turn::blocks(&session);
+        spec.tool_refusals = tool_refusals.clone();
         spec.auto_mode_classifier = turn_classifier(TurnClassifierInput {
             environment: self.config.permission_environment.as_deref(),
             context_builder: &self.context_builder,
@@ -1952,9 +1987,11 @@ impl<'a> AgentLoop<'a> {
         }
         let run_tool_outputs = Arc::new(Mutex::new(Vec::new()));
         let run_tool_outputs_capture = run_tool_outputs.clone();
+        let checkpoint_refusals = tool_refusals.clone();
         spec.checkpoint_callback = Some(Arc::new(move |checkpoint| {
             web_watch::keep_tool_outputs(&run_tool_outputs_capture, checkpoint);
             let mut session = lock(&checkpoint_capture);
+            checkpoint_refusals.store(&mut session);
             session
                 .metadata
                 .insert(RUNTIME_CHECKPOINT_KEY.to_owned(), checkpoint.clone());
@@ -1967,6 +2004,11 @@ impl<'a> AgentLoop<'a> {
 
         let auto_mode_blocks = spec.auto_mode_blocks.clone();
         let run = self.runner.run(spec);
+        if run.as_ref().is_ok_and(|result| result.interrupt.is_some()) {
+            tool_refusals.store(&mut session);
+        } else {
+            tool_refusals.finish(&mut session);
+        }
         auto_mode_turn::store_blocks(
             &self.config,
             &mut session,
@@ -3268,6 +3310,7 @@ impl<'a> AgentLoop<'a> {
                 session.metadata.remove(SESSION_PERMISSION_APPROVALS_KEY);
                 session.metadata.remove(SESSION_REMEMBERED_PERMISSIONS_KEY);
                 session.metadata.remove(auto_mode_turn::BLOCK_COUNTS_KEY);
+                tool_refusals::clear(&mut session);
                 session.metadata.remove(auto_mode_turn::SETUP_HINT_SHOWN_KEY);
                 clear_pending_proposal(&mut session);
                 crate::runtime::web_watch_conversation::clear_pending_summary(&mut session);
@@ -4602,11 +4645,11 @@ impl<'a> AgentLoop<'a> {
     fn append_approved_tool_messages(
         &self,
         message: &InboundMessage,
-        session_key: &str,
         session: &mut Session,
         execution_ledger: &Arc<Mutex<RuntimeExecutionLedger>>,
         report: RuntimeToolExecutionReport,
         tool_event_callback: Option<ToolEventCallback>,
+        tool_refusals: &ToolRefusals,
     ) -> Option<String> {
         let mut spec = AgentRunSpec::new(
             Vec::new(),
@@ -4615,12 +4658,13 @@ impl<'a> AgentLoop<'a> {
             self.config.model.clone(),
         );
         spec.fail_on_tool_error = self.config.fail_on_tool_error;
+        spec.tool_refusals = tool_refusals.clone();
         spec.tool_images = self.config.tool_images.clone();
         spec.max_tool_result_chars = self.config.max_tool_result_chars;
         spec.workspace = Some(self.config.workspace.clone());
-        spec.session_key = Some(session_key.to_owned());
+        spec.session_key = Some(session.key.clone());
         spec.execution_scope = Some(ExecutionScope::new(
-            session_key.to_owned(),
+            session.key.clone(),
             turn_id_for_message(message, session),
         ));
         spec.execution_ledger = Some(execution_ledger.clone());
@@ -4630,8 +4674,11 @@ impl<'a> AgentLoop<'a> {
         // other before the assistant reads it.
         spec.tool_context.permission_mode_snapshot = self.config.permission_mode_snapshot.clone();
         spec.tool_context.permission_environment = self.config.permission_environment.clone();
+        spec.tool_context.active_workspace = Some(self.config.workspace.clone());
+        let mut report = report;
+        crate::runtime::runner::admit_tool_report(&spec, &mut report, &spec.tool_context);
         let runtime_override = self.config.provider_runtime_override.clone();
-        let invocation = self.turn_lock.cancellation_token(session_key).map_or_else(
+        let invocation = self.turn_lock.cancellation_token(&session.key).map_or_else(
             || ProviderInvocation::uncancelled(runtime_override.clone()),
             |token| token.provider_invocation(runtime_override.clone()),
         );
@@ -4664,14 +4711,17 @@ impl<'a> AgentLoop<'a> {
             .first()
             .map(|action| action.tool_name.clone());
         let mut fatal_error = None;
-        for mut raw_message in report.messages {
+        for raw_message in report.messages {
             let tool = tool.clone().unwrap_or_else(|| raw_message.name.clone());
             let returned =
                 crate::runtime::runner::tool_returned(&report.executed_call_ids, &raw_message);
             let (tool_message, fatal) =
-                crate::runtime::runner::finalize_tool_message(&spec, &mut raw_message);
-            let event =
+                crate::runtime::runner::finalize_tool_message(&spec, &raw_message);
+            let mut event =
                 crate::runtime::runner::tool_event_for_message(&raw_message, None, None, None);
+            if spec.tool_refusals.decision(&raw_message).is_some() {
+                event.status = ToolStatus::Error;
+            }
             crate::runtime::runner::emit_events(&spec, std::slice::from_ref(&event));
             if fatal_error.is_none() && fatal {
                 fatal_error = Some(tool_message.content.clone());
@@ -4679,6 +4729,11 @@ impl<'a> AgentLoop<'a> {
             let tool_message =
                 crate::runtime::runner::checked_tool_message(&spec, &tool, tool_message, returned);
             append_session_message(session, tool_message.to_json());
+        }
+        if fatal_error.is_some() {
+            tool_refusals.finish(session);
+        } else {
+            tool_refusals.store(session);
         }
         fatal_error
     }

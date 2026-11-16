@@ -62,6 +62,16 @@ fn an_exec_skipped_after_a_fatal_tool_error_is_recorded_as_cancelled() -> Result
                 serde_json::Map::from_iter([("path".to_owned(), json!("../outside.txt"))]),
             ),
             ToolCallRequest::new(
+                "read-2",
+                "read_file",
+                serde_json::Map::from_iter([("path".to_owned(), json!("../outside.txt"))]),
+            ),
+            ToolCallRequest::new(
+                "read-3",
+                "read_file",
+                serde_json::Map::from_iter([("path".to_owned(), json!("../outside.txt"))]),
+            ),
+            ToolCallRequest::new(
                 "run-4",
                 "exec",
                 serde_json::Map::from_iter([(

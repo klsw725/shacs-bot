@@ -37,7 +37,7 @@ mod permission_rule;
 #[path = "auto_mode/protected_path.rs"]
 mod protected_path;
 #[path = "auto_mode/real_path.rs"]
-mod real_path;
+pub(crate) mod real_path;
 #[path = "auto_mode/report_review.rs"]
 pub(crate) mod report_review;
 #[path = "auto_mode/result_check.rs"]
@@ -51,9 +51,9 @@ mod secret_file;
 #[path = "auto_mode/secret_values.rs"]
 mod secret_values;
 #[path = "auto_mode/shell_command.rs"]
-mod shell_command;
+pub(crate) mod shell_command;
 #[path = "auto_mode/shell_paths.rs"]
-mod shell_paths;
+pub(crate) mod shell_paths;
 #[path = "auto_mode/shell_token.rs"]
 mod shell_token;
 #[path = "auto_mode/user_only_file.rs"]

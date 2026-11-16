@@ -29,7 +29,12 @@ fn runtime_failure_text_is_never_checked_as_report_text() -> Result<(), Box<dyn 
     std::fs::write(dir.path().join("notes.md"), "Revenue grew 10%.")?;
     let mut tools = report_tools(dir.path());
     tools.register(ViolatingLookup);
-    let provider = Provider::new(vec![read("r1", "notes.md"), call("lookup", json!({}))]);
+    let provider = Provider::new(vec![
+        read("r1", "notes.md"),
+        call("lookup", json!({})),
+        call("lookup", json!({})),
+        call("lookup", json!({})),
+    ]);
     let mut agent = runtime(dir.path(), &tools, &provider)?;
     // When
     let answer = output(agent.process_message(inbound(ASK))?);

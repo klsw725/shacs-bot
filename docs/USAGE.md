@@ -737,7 +737,7 @@ Context limits는 bounded file bytes, folder entry limit, URL byte limit, provid
 
 1. 정규화 오류, 상속 한도 위반, capability가 없는 tool은 거절합니다(`ask_user`는 허용).
 2. 비밀 파일 쓰기, data 폴더 `runtime/`의 auto mode 표시 파일 쓰기([설정 도구](#설정-도구)), `permissions.deny` 규칙, 기억된 거절은 거절합니다.
-3. tool이 실행 전에 스스로 거절할 호출은 묻지 않고 거절하며, tool이 낼 글을 그대로 돌려줍니다. file tool이 허용한 폴더(workspace, media) 밖의 대상, `exec` 안전 장치(`tools.exec`의 deny pattern과 allow pattern, 내부·사설 주소, `restrictToWorkspace`가 켜졌거나 sandbox가 없을 때의 `../`와 workspace 밖 절대 경로·`~` 경로)가 막는 명령, 격리 증명이 없는 process 실행이 여기에 듭니다. 공식 container 밖의 native 실행에서는 격리 증명이 없어 `exec`가 시작되지 않습니다.
+3. tool이 실행 전에 스스로 거절할 호출은 묻지 않고 거절하며, 거절 이유와 우회하지 말라는 안내를 어시스턴트에게 돌려주고 일을 이어 갑니다. 같은 요청에서 실제 tool·거절 종류·대상이 같은 거절의 세 번째에만 `tool_error`로 멈춥니다([도구가 스스로 거절한 뒤](#도구가-스스로-거절한-뒤)). file tool이 허용한 폴더(workspace, media) 밖의 대상, `exec` 안전 장치(`tools.exec`의 deny pattern과 allow pattern, 내부·사설 주소, `restrictToWorkspace`가 켜졌거나 sandbox가 없을 때의 `../`와 workspace 밖 절대 경로·`~` 경로)가 막는 명령, 격리 증명이 없는 process 실행이 여기에 듭니다. 공식 container 밖의 native 실행에서는 격리 증명이 없어 `exec`가 시작되지 않습니다.
 4. `permissions.json`을 읽을 수 없으면 묻습니다.
 5. 승인 질문에서 승인한 바로 그 호출은 허용합니다.
 6. 비밀 파일 읽기, `permissions.ask` 규칙, critical path 제거, symlink를 따라가면 보호 경로인 쓰기는 묻습니다. 이 질문은 한 번 승인(`1`)과 한 번 거절(`2`)만 받고, 다른 답에는 아무것도 실행하지 않고 같은 질문을 다시 보입니다.
@@ -786,7 +786,7 @@ active data 폴더(config 파일이 있는 폴더)의 `auth.json`, 그 원자적
 - `list_dir`·`glob`·`grep`이 폴더를 훑을 때 결과에 나오지 않고 내용도 읽히지 않습니다.
 - 그 파일을 지정해 읽는 action(`read_file`, `path`로 준 `grep`, `cat`, `<` 리디렉션, here-doc이나 `python3 -c` 코드 안의 이름)은 매번 한 번 승인·거절만 받는 질문이 됩니다. 승인하면 내용이 AI provider로 가고 세션 기록에 남습니다.
 - 쓰는 action(`write_file`, `edit_file`, `>`, `tee`, `rm`, `mv` 등)은 거절합니다. hard link와 symlink도 같은 파일로 봅니다.
-- 명령 분석은 셸을 실행하지 않고 글을 나누므로 셸과 똑같이 읽는다고 보장하지 않습니다. 변수로 이어 붙인 경로처럼 글에 이름이 나오지 않는 꼴은 놓칠 수 있습니다. data 폴더가 workspace 밖이면 file tool은 원래 그 파일에 닿지 못하고, sandbox가 없는 `exec`는 workspace 밖 절대 경로를 적은 명령을 막습니다.
+- 명령 분석은 셸을 실행하지 않고 글을 나누므로 셸과 똑같이 읽는다고 보장하지 않습니다. 변수로 이어 붙인 경로처럼 글에 이름이 나오지 않는 꼴은 놓칠 수 있습니다. data 폴더가 workspace 밖이면 file tool은 원래 그 파일에 닿지 못하고, sandbox가 없는 `exec`는 workspace 밖 절대 경로를 적은 명령을 막습니다. 이 거절은 어시스턴트에게 돌아가고 요청은 이어집니다. 같은 거절이 세 번째이면 멈춥니다. guard가 켜지는 조건과 접근할 수 있는 폴더는 아직 그대로입니다.
 - file tool에 `.env.json`이나 비밀 파일의 절대 경로를 줘도 묻습니다. 다만 `.`·`/`·`~`로 시작하면서 `.env`·`auth`·`token` 같은 낱말이 든 명령(`/bin/cat .env.json`)은 redaction이 명령 글을 통째로 가려 판정할 수 없으므로 묻지 않고 거절됩니다.
 - `.env.json`의 8자 이상인 값이 호출 인자나 사용자 메시지에 들어 있으면 승인 질문, diagnostics, classifier 요청에서 `[secret 이름]`으로 가려집니다. 판정은 가리기 전 인자로 합니다. 그런 호출의 질문은 한 번 승인·거절만 받고 기억되지 않습니다. 8자보다 짧은 값이나 모양을 바꾼 값은 가리지 못하고, 8자 이상이면 흔한 글(`production` 같은 env 값)도 가려집니다. turn을 시작할 때 `.env.json`을 읽지 못하면 앞서 읽은 값으로 계속 가리고, 그 turn에는 classifier를 부르지 않습니다(판정 없음).
 
@@ -838,6 +838,16 @@ shacs-bot permissions auto-mode setup [--workspace /tmp/ws] [--yes]
 - `critique`와 `setup`이 보내는 글은 `.env.json` 값 가리기와 022 redaction을 거치고 정한 몫(항목 1,000자, 목록·파일마다 정한 길이, 요청 전체 48,000자)까지만 담으며, 잘린 항목에는 ` [cut]`이나 `"truncated": true`, 빠진 항목 수에는 `[N more entries not shown]`이 붙습니다. 한 번 묻고 60초 안에 답이 없거나 provider 오류면 그 까닭을 알리고 종료 코드 1로 끝납니다. 두 명령은 어떤 파일도 바꾸지 않도록 config의 migration을 저장하지 않고, 로컬 OAuth 로그인(Codex 등)이 만료됐으면 갱신하지 않고 멈춥니다(`ask`를 한 번 돌려 갱신한 뒤 다시 실행하세요). `setup` 초안은 model이 만든 글이라 틀릴 수 있으니 보고 받아들이세요.
 
 `environment`를 적지 않은 사용자의 auto mode 세션에서 막힌 호출이 누적 3개가 되면, 그 turn 끝에 한 번 `Auto mode has stopped several calls in this conversation. If it lacks context about the places you trust, run shacs-bot permissions auto-mode setup on the host. Send /permission setup-hint off to stop this notice.`가 갑니다. 같은 세션에서는 다시 가지 않고 `/new`의 새 세션에서는 다시 셉니다. `/permission setup-hint off`는 data 폴더에 `runtime/auto-mode-setup-hint-off`를 만들어 모든 세션에서 끄고, `/permission setup-hint on`이 지웁니다. auto mode에서 어시스턴트의 호출은 이 표시 파일과 처음 알림의 표시 파일(`runtime/auto-mode-default-notice`)을 만들거나 쓰거나 지우거나 옮길 수 없고, `runtime/` 폴더를 지우거나 옮길 수도 없습니다(1번 줄과 같은 거절, allow 규칙·기억된 허용·classifier로 풀리지 않음). 그 파일에 맞을 수 있는 glob 쓰기(`rm runtime/*`)와, 명령이 코드로 돌리는 글(`python3 -c`, here-doc)에 표시 파일 이름이 든 명령도 거절합니다. 읽기는 그대로이고, 경로를 적지 않은 스크립트나 `find … -delete`처럼 명령 분석이 쓰기로 보지 않는 명령은 classifier가 봅니다. 다른 mode의 판정은 바뀌지 않습니다.
+
+#### 도구가 스스로 거절한 뒤
+
+`exec` 안전 장치나 file tool의 범위 검사로 거절되어도 어시스턴트는 실패 결과와 안내를 받고 이어서 일합니다. 안내는 같은 요청을 다시 해도 거절은 같고, symlink·인코딩·다른 도구·`working_dir` 변경으로 우회하지 말며, workspace 안에서 할 수 있으면 그렇게 하고 아니면 사용자에게 할 수 없는 일을 알리고 어떻게 할지 물으라는 내용입니다. 안내가 접근을 허용하지는 않습니다.
+
+같은 실제 도구·거절 종류·대상의 거절이 한 사용자 요청 안에서 세 번째이면 `tool_error`로 멈춥니다. 경로는 정규화해서 비교하고, 경로가 없는 deny pattern·내부 주소 거절은 종류별로 셉니다. bridge 호출도 실제 도구로 합산합니다. 승인 질문에 답해 이어 가는 실행은 재시작 뒤에도 같은 횟수를 쓰고, 다음 사용자 요청은 새로 셉니다. `fail_on_tool_error`를 쓰는 하위 작업 등은 첫 실패에서 멈춥니다. classifier 막힘의 연속·누적 횟수는 아래처럼 별개입니다.
+
+실행 전에 알 수 있는 거절이 있는 묶음은 호출 순서대로 처리하므로, 세 번째 거절 뒤의 호출은 시작하지 않습니다. 실행 전 검사에서는 통과했으나 병렬 실행 중 상태가 바뀌어 거절된 경우에는 같은 묶음의 다른 읽기 전용 호출이 이미 시작됐을 수 있습니다. 동시에 실행해도 되는 읽기 전용 호출만 함께 묶으므로 쓰기는 이 예외에 들지 않으며, 순차 실행에도 이 제한이 없습니다. 진행 이벤트 `tool_refusal`과 실행 기록에서 계속하는 실패인지 중단하는 실패인지 볼 수 있으며, 진행 이벤트에는 경로·인자를 싣지 않습니다.
+
+workspace guard 안내에는 사용자가 `tools.restrictToWorkspace`를 끌 수 있다는 설명이 들어갑니다. 다만 현재는 sandbox가 없어도 guard가 켜지므로 설정을 끄는 것만으로 밖 접근이 허용되지는 않습니다. 내부 주소 거절 안내에는 `tools.ssrfWhitelist`가 나옵니다. 반복 한도로 멈춘 일반 요청은 거절 결과가 마지막 답이고, 이미지·복합 요청은 기존처럼 원문 대신 digest만 보입니다.
 
 #### 막힌 뒤
 

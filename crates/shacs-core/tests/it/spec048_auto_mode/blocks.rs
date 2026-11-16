@@ -316,7 +316,7 @@ fn a_blocked_spawn_starts_no_child_whatever_its_reason_says() -> TestResult {
 }
 
 #[test]
-fn an_id_reused_in_one_dispatch_gets_no_special_handling() -> TestResult {
+fn reused_ids_do_not_count_classifier_block_text_as_a_tool_refusal() -> TestResult {
     // Given: the provider gives a blocked call and a call that runs the
     // same id, so neither result can be told apart by it.
     let setup = Setup::new()?;
@@ -332,19 +332,22 @@ fn an_id_reused_in_one_dispatch_gets_no_special_handling() -> TestResult {
         ],
         vec![Ok("yes"), Ok(reason), Ok("no")],
     );
-    let run_spec = spec(&setup, &registry, &provider, &Options::auto(true), "go");
+    let mut run_spec = spec(&setup, &registry, &provider, &Options::auto(true), "go");
+    let events = record_events(&mut run_spec);
 
     // When
     let result = AgentRunner::new().run(run_spec)?;
 
     // Then
-    assert_eq!(result.stop_reason, "tool_error", "{result:?}");
+    assert_eq!(result.stop_reason, "completed", "{result:?}");
     assert_eq!(recorded.launched(), ["echo fine"]);
+    assert!(named(&events, "tool_refusal").is_empty());
+    assert!(!tool_text(&result, "c1").contains("policy boundary"));
     Ok(())
 }
 
 #[test]
-fn a_later_call_with_the_same_id_that_breaks_the_workspace_still_stops_the_run() -> TestResult {
+fn later_refusals_with_the_same_id_stop_at_the_third_actual_refusal() -> TestResult {
     // Given: the provider reuses `c1`; the second time the exec guard
     // refuses it with its own violation text.
     let setup = Setup::new()?;
@@ -354,6 +357,16 @@ fn a_later_call_with_the_same_id_that_breaks_the_workspace_still_stops_the_run()
     let provider = RoutingProvider::new(
         vec![
             calls(vec![upload("c1")]),
+            calls(vec![tool_call(
+                "c1",
+                "exec",
+                json!({"command": "cat ../outside.txt"}),
+            )]),
+            calls(vec![tool_call(
+                "c1",
+                "exec",
+                json!({"command": "cat ../outside.txt"}),
+            )]),
             calls(vec![tool_call(
                 "c1",
                 "exec",

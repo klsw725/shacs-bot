@@ -84,10 +84,19 @@ fn an_approved_call_whose_output_stops_the_turn_shows_only_its_digest() -> Resul
     let dir = tempfile::tempdir()?;
     let mut tools = report_tools(dir.path());
     let stopped = "Error: blocked by safety guard. The artwork is blue";
-    add_exec(&mut tools, &[stopped.to_owned()]);
-    let provider = Provider::new(vec![exec("run-1", "python3 -c 'print(1)'")]);
+    add_exec(
+        &mut tools,
+        &[stopped.to_owned(), stopped.to_owned(), stopped.to_owned()],
+    );
+    let provider = Provider::new(vec![
+        exec("run-1", "python3 -c 'print(1)'"),
+        exec("run-2", "python3 -c 'print(1)'"),
+        exec("run-3", "python3 -c 'print(1)'"),
+    ]);
     let mut agent = runtime(dir.path(), &tools, &provider)?;
     agent.process_message(inbound(REPORT_AND_IMAGE))?;
+    agent.process_message(inbound("approve"))?;
+    agent.process_message(inbound("approve"))?;
     // When
     let answer = output(agent.process_message(inbound("approve"))?);
     // Then

@@ -156,6 +156,8 @@ cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- permissions inspect 
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- permissions revoke <rule-id-prefix> --workspace /tmp/shacs-ws
 ```
 
+`exec` 안전 장치와 file tool의 범위 거절은 실패 결과와 우회하지 말라는 안내를 어시스턴트에게 돌려주고 요청을 이어 갑니다. 같은 요청에서 실제 도구·거절 종류·대상이 같은 거절의 세 번째에 `tool_error`로 멈추며, 승인 후 재개도 같은 횟수를 씁니다. `fail_on_tool_error` 실행은 첫 실패에서 멈춥니다. 실행 전에 알 수 있는 거절은 뒤 호출을 시작하기 전에 한도를 확인하며, 실행 중 새로 생긴 거절의 병렬 실행 한계와 설정 안내는 [도구가 스스로 거절한 뒤](docs/USAGE.md#도구가-스스로-거절한-뒤)를 참고하세요. 접근 범위와 guard 활성 조건은 그대로입니다.
+
 Malformed `permissions.json`은 raw content를 출력하지 않고 fail closed됩니다. Remembered allow는 protected target, static deny, permission ceiling, containment precondition을 우회하지 않으며, 이 기능은 완전한 sandboxing/redaction이나 prompt/tool/repo content 기반 permission grant를 보장하지 않습니다.
 
 선택된 channel runtime worker를 시작합니다. 새 lifecycle workflow에서는 `runtime start`를 우선 사용하고, `run`은 같은 foreground channel runtime의 기존 호환 진입점입니다:

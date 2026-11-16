@@ -10,6 +10,8 @@ use crate::runtime::tool_execution::{
     effective_permission_rule_input, permission_decision_for_action,
     permissioned_action_input_from_context,
 };
+use crate::runtime::tool_refusal::{RefusalKind, ToolRefusal};
+use crate::runtime::tool_refusals::ToolRefusals;
 use crate::runtime::tool_search::{
     BridgeToolExecutionReport, BridgeUnderlyingMappingEvidence, ToolDescribeEvidence,
     ToolSearchActivationReason, ToolSearchDiagnosticsSummary, ToolSearchQueryEvidence,
@@ -41,7 +43,7 @@ use shacs_providers::{
     LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest, ProviderRetryMode,
     ProviderRetryWaiter, ThreadRetryWaiter,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -266,6 +268,7 @@ pub struct AgentRunSpec<'a> {
     /// The auto mode block counts the run's calls share (Spec 048 PRD 020
     /// scope 4). The agent loop starts them from the session.
     pub auto_mode_blocks: AutoModeBlocks,
+    pub(crate) tool_refusals: ToolRefusals,
     pub model: String,
     pub settings: GenerationSettings,
     pub max_iterations: usize,
@@ -317,6 +320,7 @@ impl<'a> AgentRunSpec<'a> {
             permission_classifier_client: None,
             auto_mode_classifier: None,
             auto_mode_blocks: AutoModeBlocks::default(),
+            tool_refusals: ToolRefusals::default(),
             model: model.into(),
             settings: GenerationSettings::default(),
             max_iterations: 200,
@@ -721,6 +725,7 @@ impl AgentRunner {
                     ));
                 }
                 spec.auto_mode_blocks.begin_dispatch();
+                spec.tool_refusals.begin_dispatch();
                 let report = execute_tool_dispatch(
                     executable_calls,
                     current_catalog.as_ref(),
@@ -742,10 +747,9 @@ impl AgentRunner {
                     .collect::<BTreeMap<_, _>>();
                 let mut fatal_outcome_content = None;
                 for raw_message in &report.messages {
-                    let mut raw_message = raw_message.clone();
-                    let (normalized, fatal) = finalize_tool_message(&spec, &mut raw_message);
+                    let (normalized, fatal) = finalize_tool_message(&spec, raw_message);
                     let mut event = tool_event_for_message(
-                        &raw_message,
+                        raw_message,
                         executable_calls_by_id.get(&raw_message.tool_call_id),
                         current_catalog.as_ref(),
                         resolved_bridge_calls_by_id
@@ -754,10 +758,12 @@ impl AgentRunner {
                     );
                     // A call auto mode did not run reads like any refusal,
                     // whatever words the classifier's reason has.
-                    if spec.auto_mode_blocks.did_not_run(&raw_message.tool_call_id) {
+                    if spec.tool_refusals.decision(raw_message).is_some() {
+                        event.status = ToolStatus::Error;
+                    } else if classifier_did_not_run(&spec, raw_message) {
                         event.status = ToolStatus::Ok;
                     }
-                    if fatal {
+                    if fatal && fatal_outcome_content.is_none() {
                         fatal_outcome_content = Some(normalized.content.clone());
                     }
                     emit_events(&spec, std::slice::from_ref(&event));
@@ -767,23 +773,23 @@ impl AgentRunner {
                         .map_or(raw_message.name.as_str(), |resolved| {
                             resolved.underlying_name.as_str()
                         });
-                    let returned = tool_returned(&report.executed_call_ids, &raw_message);
+                    let returned = tool_returned(&report.executed_call_ids, raw_message);
                     let normalized = checked_tool_message(&spec, tool, normalized, returned);
                     completed_tool_results.push(normalized.to_json());
                     completed_tool_messages.push(normalized.clone());
                     messages.push(normalized.to_json());
                 }
-                for skipped_call in &report.skipped_tool_calls {
-                    record_tool_call_outcome(
-                        &spec,
-                        skipped_call,
-                        ToolOutcomeKind::Skipped {
-                            reason: "tool dispatch skipped after interrupt".to_owned(),
-                        },
-                        None,
-                        None,
-                    );
-                    if report.interrupt.is_some() {
+                if report.interrupt.is_some() {
+                    for skipped_call in &report.skipped_tool_calls {
+                        record_tool_call_outcome(
+                            &spec,
+                            skipped_call,
+                            ToolOutcomeKind::Skipped {
+                                reason: "tool dispatch skipped after interrupt".to_owned(),
+                            },
+                            None,
+                            None,
+                        );
                         emit_events(
                             &spec,
                             &[skipped_tool_event(skipped_call, INTERRUPT_SKIP_CONTENT)],
@@ -1386,18 +1392,6 @@ fn dispatch_bridge_segment(
                 run_messages,
             )
         };
-    if !spec.fail_on_tool_error {
-        return dispatch_bridge_tool_calls_with_context_resolver(
-            calls,
-            Some(catalog),
-            spec.tools,
-            executor,
-            &spec.tool_context,
-            spec.concurrent_tools,
-            Some(&bridge_context_resolver),
-        );
-    }
-
     let mut combined = BridgeToolExecutionReport {
         results: Vec::new(),
         interrupt: None,
@@ -1418,6 +1412,20 @@ fn dispatch_bridge_segment(
             false,
             Some(&bridge_context_resolver),
         );
+        for result in &mut report.results {
+            super::tool_images::persist(spec.tool_images.as_ref(), &mut result.message);
+            if let Some(action) = report.permissioned_actions.iter().find(|action| {
+                action.provider_tool_call_id.as_deref() == Some(&result.message.tool_call_id)
+            }) {
+                admit_tool_refusal(
+                    spec,
+                    action,
+                    &mut result.message,
+                    &spec.tool_context,
+                    &report.executed_call_ids,
+                );
+            }
+        }
         let fatal = report
             .results
             .iter()
@@ -1447,6 +1455,9 @@ fn dispatch_bridge_segment(
             break;
         }
         if fatal {
+            combined
+                .skipped_tool_calls
+                .extend_from_slice(&calls[index + 1..]);
             break;
         }
     }
@@ -1487,24 +1498,47 @@ fn direct_runtime_report(
     {
         return direct_runtime_report_with_classifier(calls, spec, executor, run_messages);
     }
-    if spec.fail_on_tool_error {
-        return direct_runtime_report_fail_fast(calls, spec, executor);
-    }
-    if spec.concurrent_tools {
-        executor.execute_tool_calls_concurrent(calls, &spec.tool_context)
-    } else {
-        executor.execute_tool_calls(calls, &spec.tool_context)
-    }
+    direct_runtime_report_in_order(calls, spec, executor)
 }
 
-fn direct_runtime_report_fail_fast(
+fn direct_runtime_report_in_order(
     calls: Vec<RuntimeToolCall>,
     spec: &AgentRunSpec<'_>,
     executor: &RuntimeToolExecutor<'_>,
 ) -> RuntimeToolExecutionReport {
+    // A known refusal is an admission boundary, before any worker starts.
+    // Do not count here: permissions may refuse or ask before the tool does.
+    let has_preflight_refusal = calls.iter().any(|call| {
+        spec.tools.get(&call.name).is_some_and(|tool| {
+            call.arguments
+                .as_object()
+                .and_then(|params| tool.preflight_refusal(params))
+                .is_some()
+        })
+    });
+    let concurrent = spec.concurrent_tools && !spec.fail_on_tool_error && !has_preflight_refusal;
+    let can_batch = |call: &RuntimeToolCall| {
+        spec.tools
+            .get(&call.name)
+            .is_some_and(|tool| tool.concurrency_safe())
+    };
     let mut combined = RuntimeToolExecutionReport::completed(Vec::new());
-    for (index, call) in calls.iter().cloned().enumerate() {
-        let mut report = executor.execute_tool_calls(vec![call], &spec.tool_context);
+    let mut index = 0;
+    while index < calls.len() {
+        let start = index;
+        index += 1;
+        if concurrent && can_batch(&calls[start]) {
+            while index < calls.len() && can_batch(&calls[index]) {
+                index += 1;
+            }
+        }
+        let batch = calls[start..index].to_vec();
+        let mut report = if index - start > 1 {
+            executor.execute_tool_calls_concurrent(batch, &spec.tool_context)
+        } else {
+            executor.execute_tool_calls(batch, &spec.tool_context)
+        };
+        admit_tool_report(spec, &mut report, &spec.tool_context);
         let fatal = report
             .messages
             .iter()
@@ -1529,10 +1563,13 @@ fn direct_runtime_report_fail_fast(
             combined.interrupt = Some(interrupt);
             combined
                 .skipped_tool_calls
-                .extend_from_slice(&calls[index + 1..]);
+                .extend_from_slice(&calls[index..]);
             break;
         }
         if fatal {
+            combined
+                .skipped_tool_calls
+                .extend_from_slice(&calls[index..]);
             break;
         }
     }
@@ -1592,6 +1629,7 @@ fn direct_runtime_report_with_classifier(
             }
         }
         let mut report = executor.execute_tool_calls(vec![call], &context);
+        admit_tool_report(spec, &mut report, &context);
         messages.append(&mut report.messages);
         skipped_tool_calls.append(&mut report.skipped_tool_calls);
         permissioned_actions.append(&mut report.permissioned_actions);
@@ -1610,11 +1648,11 @@ fn direct_runtime_report_with_classifier(
                 executed_call_ids,
             };
         }
-        if spec.fail_on_tool_error
-            && messages
-                .last()
-                .is_some_and(|message| fatal_tool_message(spec, message))
+        if messages
+            .last()
+            .is_some_and(|message| fatal_tool_message(spec, message))
         {
+            skipped_tool_calls.extend_from_slice(&calls[index + 1..]);
             break;
         }
     }
@@ -1628,6 +1666,97 @@ fn direct_runtime_report_with_classifier(
         recent_auto_mode_retry_tokens,
         executed_call_ids,
     }
+}
+
+/// Admit at the execution boundary while the original (possibly underlying
+/// bridge) action still holds its arguments. Convert image arrays before
+/// freezing a refusal or appending guidance to the resulting text.
+/// Classification never counts or changes the admitted presentation.
+pub(super) fn admit_tool_report(
+    spec: &AgentRunSpec<'_>,
+    report: &mut RuntimeToolExecutionReport,
+    context: &ToolExecutionContext,
+) {
+    let mut actions: BTreeMap<&str, VecDeque<&PermissionedAction>> = BTreeMap::new();
+    for action in &report.permissioned_actions {
+        if let Some(id) = action.provider_tool_call_id.as_deref() {
+            actions.entry(id).or_default().push_back(action);
+        }
+    }
+    for message in &mut report.messages {
+        super::tool_images::persist(spec.tool_images.as_ref(), message);
+        if let Some(action) = actions
+            .get_mut(message.tool_call_id.as_str())
+            .and_then(VecDeque::pop_front)
+        {
+            admit_tool_refusal(spec, action, message, context, &report.executed_call_ids);
+        }
+    }
+}
+
+fn admit_tool_refusal(
+    spec: &AgentRunSpec<'_>,
+    action: &PermissionedAction,
+    message: &mut RuntimeToolMessage,
+    context: &ToolExecutionContext,
+    executed_call_ids: &[String],
+) {
+    let decision = (!executed_call_ids.contains(&message.tool_call_id))
+        .then(|| permission_decision_for_action(spec.tools, action, context));
+    if auto_mode_run(context)
+        && decision.as_ref().is_some_and(|decision| {
+            decision.kind == PermissionPolicyDecisionKind::Deny
+                && matches!(
+                    decision.reason,
+                    PermissionPolicyReason::EvaluatorUncertain
+                        | PermissionPolicyReason::EvaluatorUnavailable
+                )
+        })
+    {
+        spec.tool_refusals.mark_classifier_block(message);
+        return;
+    }
+    let kind = RefusalKind::from_text(&message.content).or_else(|| {
+        decision
+            .is_some_and(|decision| decision.reason == PermissionPolicyReason::ToolRefusal)
+            .then_some(RefusalKind::ToolPreflight)
+    });
+    let Some(kind) = kind else { return };
+    let refusal = ToolRefusal::for_action(action, kind, context);
+    let decision = spec.tool_refusals.admit(
+        &refusal,
+        message,
+        if spec.fail_on_tool_error {
+            ToolFailureClass::Fatal
+        } else {
+            ToolFailureClass::Recoverable
+        },
+    );
+    emit_events(
+        spec,
+        &[ToolEvent {
+            name: "tool_refusal".to_owned(),
+            status: ToolStatus::Waiting,
+            detail: format!(
+                "`{}` refused ({}/3); {}",
+                refusal.tool,
+                decision.count,
+                if decision.fatal {
+                    "stopping"
+                } else {
+                    "continuing"
+                },
+            ),
+            call_id: Some(message.tool_call_id.clone()),
+            arguments: None,
+            result: Some(json!({
+                "tool": refusal.tool,
+                "kind": decision.kind,
+                "count": decision.count,
+                "fatal": decision.fatal,
+            })),
+        }],
+    );
 }
 
 /// A run that decides by the auto mode table (Spec 048 PRD 000): auto mode
@@ -3145,7 +3274,15 @@ fn tool_outcome_for_message(
     spec: &AgentRunSpec<'_>,
     message: &RuntimeToolMessage,
 ) -> ToolOutcomeKind {
-    if spec.auto_mode_blocks.did_not_run(&message.tool_call_id) {
+    if let Some(decision) = spec.tool_refusals.decision(message) {
+        ToolOutcomeKind::Failed {
+            class: if decision.fatal {
+                ToolFailureClass::Fatal
+            } else {
+                ToolFailureClass::Recoverable
+            },
+        }
+    } else if classifier_did_not_run(spec, message) {
         ToolOutcomeKind::Completed
     } else if is_tool_cancelled_message(message) {
         ToolOutcomeKind::Cancelled
@@ -3558,14 +3695,13 @@ fn external_lookup_signature(call: &RuntimeToolCall) -> Option<String> {
 
 pub(super) fn finalize_tool_message(
     spec: &AgentRunSpec<'_>,
-    raw_message: &mut RuntimeToolMessage,
+    raw_message: &RuntimeToolMessage,
 ) -> (RuntimeToolMessage, bool) {
-    super::tool_images::persist(spec.tool_images.as_ref(), raw_message);
     let fatal = fatal_tool_message(spec, raw_message);
     let outcome = tool_outcome_for_message(spec, raw_message);
     // A `spawn` auto mode did not run started nothing, whatever its text says.
-    let spawn_completed = matches!(outcome, ToolOutcomeKind::Completed)
-        && !spec.auto_mode_blocks.did_not_run(&raw_message.tool_call_id);
+    let spawn_completed =
+        matches!(outcome, ToolOutcomeKind::Completed) && !classifier_did_not_run(spec, raw_message);
     let normalized = normalize_tool_message(spec, raw_message.clone());
     record_tool_message_outcome(
         spec,
@@ -3861,9 +3997,17 @@ fn fatal_tool_error(spec: &AgentRunSpec<'_>, messages: &[RuntimeToolMessage]) ->
 /// A call auto mode did not run never stops the run: its text is auto
 /// mode's, and a classifier reason may use a tool's violation words.
 fn fatal_tool_message(spec: &AgentRunSpec<'_>, message: &RuntimeToolMessage) -> bool {
-    !spec.auto_mode_blocks.did_not_run(&message.tool_call_id)
-        && (is_workspace_violation(&message.content)
-            || (spec.fail_on_tool_error && is_tool_unsuccessful_message(message)))
+    if let Some(decision) = spec.tool_refusals.decision(message) {
+        return decision.fatal;
+    }
+    !classifier_did_not_run(spec, message)
+        && spec.fail_on_tool_error
+        && is_tool_unsuccessful_message(message)
+}
+
+fn classifier_did_not_run(spec: &AgentRunSpec<'_>, message: &RuntimeToolMessage) -> bool {
+    spec.tool_refusals.is_classifier_block(message)
+        || spec.auto_mode_blocks.did_not_run(&message.tool_call_id)
 }
 
 pub(super) fn is_tool_unsuccessful_message(message: &RuntimeToolMessage) -> bool {
@@ -3886,18 +4030,7 @@ fn mcp_outcome_starts_with(content: &str, outcome: &str) -> bool {
 }
 
 fn is_workspace_violation(text: &str) -> bool {
-    let lowered = text.to_ascii_lowercase();
-    [
-        "blocked by safety guard",
-        "outside the configured workspace",
-        "outside allowed directory",
-        "working_dir is outside",
-        "working_dir could not be resolved",
-        "path traversal detected",
-        "path outside working dir",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker))
+    RefusalKind::from_text(text).is_some()
 }
 
 fn finalization_retry_messages(messages: &[Value]) -> Vec<Value> {
