@@ -2,6 +2,56 @@
 
 Status: Planned
 
+2026-11-12 PRD 010 구현 연결: 대화의 제안·요약·확인 재읽기와 변경 판단에 읽기 방식과
+로그인 선택을 결속한다. 기존 browser 감시의 대화형 수정을 CLI/API로 제한했던 임시
+안내를 제거한다. 자동 browser 미리보기는 후보 생성부터 보존한 `value_absent`에만
+한 번이며 최초 요청은 임시 프로필이다. 저장 로그인 감시는 기존 `browser_lock::acquire`
+및 `BrowserManager::quit`를 소비하고, 정리 뒤에만 잠금과 감시 점유를 해제한다.
+새 token은 v3, 기존 v1/v2는 로그인 미사용으로만 해석하며 false 계획의 digest는 유지한다.
+Docker 실행은 사용자의 2026-11-12 지시에 따라 하지 않고 스크립트·fixture의 문법만 검사한다.
+
+2026-11-12 PRD 010 구현 기록: 대화 자동 제안·명시 로그인 선택·재확인, token v3,
+저장 로그인 감시와 기존 050 종료 절차, CLI/API·worker·알림 표면을 구현했다.
+저장 generation은 Browser.close의 최대 5초 뒤 별도의 탭 닫기 대기를 더하지 않고
+정리한다. 기존 050의 잠금 순서·identity·SingletonLock·maintenance·공통 15초 예산은
+바꾸지 않았다. [IMPLEMENTATION-010.md](IMPLEMENTATION-010.md)에 계약별 근거,
+14개 보호의 실패 확인과 복원, 최종 그룹별 10회 반복, Cargo 결과와 미검증 범위를 남겼다.
+PRD 010 상태는 `Implemented (independent review pending)`이며 독립 검토 완료나
+실제 Docker 수용 조건의 통과를 뜻하지 않는다.
+
+2026-11-12 PRD 010 시험 배치 보완: API는 CLI가 의존하는 package이고 실제
+`AgentLoopChatCompletionAdapter::from_bundle`, 브라우저 manager, gateway worker는
+CLI가 소유한다. 새 의존성과 Cargo.lock 변경 없이 수용 조건 8을 검증하기 위해
+`shacs-api/tests/it/spec051_web_watch_api.rs`는 실제 API route의 preview·confirm·status와
+token/선택 불일치 거절을 확인한다. 실제 대화 API 등록과 동일 manager의 예정 확인,
+provider 추가 호출 없음 및 외부 ingress takeover의 즉시 busy는
+`shacs-cli/tests/it/spec051_web_watch_cli.rs`의 production 구성 시험에서 확인한다.
+API 시험의 가짜 adapter만으로 운영 배선을 통과했다고 보지 않으며,
+worker에 reader를 직접 끼워 넣지 않는다. 제품 계약은 그대로이고 시험 소유 위치를
+명시한 보완이다.
+
+2026-11-12 PRD 000 시험 연결 보완: Docker를 쓰지 않는 Cargo 시험은 049의 가짜
+process 실행기·DevTools·시계와 관측된 containment fixture를 재사용한다. 허용/거절은
+`browser_start_input`과 실제 `ProcessGate`가 결정한다. 기존 `spec031-test-fixture`
+feature 아래의 fixture가 process singleton에 이 실제 manager를 먼저 설치하고,
+실제 `from_bundle` → production registry → gateway worker를 호출한다. worker의 reader를
+별도로 덧꽂지 않는다. CLI 등록과 gateway 연결 시험은 각자 같은 `tests/it` 실행 파일의
+별도 process에서 실행해 singleton을 격리한다. 새 crate·feature·lockfile 변경은 없다.
+브라우저로 보내는 고정 DOM 제한 식은 core의 기존 Boa 의존성으로도 실행해 UTF-8 경계를
+확인한다. 실제 Chromium과 Docker 렌더링 검증은 PRD 010 소유로 남는다.
+
+2026-11-12 PRD 000 구현 기록: 비로그인 reader, mode/token/revision, 실제 production
+배선, CLI/API, 동시 점유·취소·정리를 구현하고 사용 문서를 맞췄다.
+[구현 검증 기록](IMPLEMENTATION-000.md)에 계약별 근거와 실행 결과를 남겼다.
+전체 패키지 명령은 종료 코드 0이었다. 기존 시험 내부의 자식 Cargo는 허용되고,
+별도의 Cargo 명령을 동시에 시작하지 않는다는 검증 범위를 확인했다. 보류했던
+core `spec033_release_runner`를 단독 전경 명령과 `--test-threads=1`로 재실행해
+15개 통과(기존 수동 fixture 1개 ignored), 종료 코드 0을 확인했다.
+PRD 000은 `Implemented (independent review pending)`으로 표시한다.
+최종 core 그룹 7개와 CLI 그룹 11개는 각각 10회 연속 통과했고, 15종류의
+보호 장치 비활성화 실패 확인과 시작 전 점유 경합 재현·수정을 기록했다.
+PRD 010은 구현하지 않았고 SPEC 051 전체를 닫은 기록은 아니다.
+
 Consumes: 010 network guard, 029 durable wake·lease, 036 위임·관측·판정 fact, 042 웹페이지 source·추출 기준·조건·실패 구간·알림·대화형 요약, 049 container 브라우저·SOCKS5 proxy·process gate, 050 로그인 유지 프로필과 조작 상태
 
 ## 목적과 완료 경계
@@ -50,6 +100,7 @@ Consumes: 010 network guard, 029 durable wake·lease, 036 위임·관측·판정
    - 알림마다 붙는 확인 한계 글(지금은 "정적 페이지 글만, JavaScript·로그인·cookie 없음")은 저장된 읽기 방식과 로그인 여부에 맞게 적는다. 알림의 때와 중복 막기는 그대로다.
 6. **대화형 등록:**
    - 042 요약의 미리보기가 `static_content_unavailable`이면, 브라우저를 쓸 수 있는 설정에서 같은 URL을 브라우저로 한 번 읽어 후보를 다시 만들고 요약에 "브라우저로 읽기"와 그 값을 보인다. 사용자가 처음부터 브라우저로 읽어 달라고 하면 바로 브라우저로 읽는다.
+   - 2026-11-12 구현 연결 보완(독립 검토 반영): 현재 `web_watch_extract.rs::candidates`의 빈 목록은 값 부재뿐 아니라 숫자 형식·부호·범위 값·추출 기준 검증 실패도 뜻하므로 자동 전환의 근거로 쓰지 않는다. PRD 010이 후보 생성 결과에 실패 이유를 보존하고 `preview_page` → `WebPreview` → `read_target`까지 전달한다. 정적 성공 응답에서 실제 값 부재(`value_absent`)가 확인된 경우만 위의 미리보기 `static_content_unavailable`로 취급하여 같은 URL·target의 비로그인 browser 미리보기를 한 번 한다. 지원하지 않는 숫자·모호함·추출 검증 실패·읽기/검색 한도·사유 미상에는 자동 browser 읽기가 없다. HTTP·guard 오류 우회와 주기 확인의 자동 방식 전환도 하지 않는다.
    - `persistLogin`이 켜져 있으면 요약에서 "로그인한 상태로 보기"를 고를 수 있다. 요약은 로그인한 계정의 내용을 읽는다는 것, 읽은 값이 042처럼 저장되고 확인한 알림 대상으로 보내진다는 것, 페이지 글 전체·화면·cookie·로그인 정보는 관측 fact·알림·상태 조회·diagnostics에 남기거나 보내지 않지만 로그인 기록 폴더(050 `browser/profile/`)에는 cookie가 남고 페이지 내용을 담은 방문 기록·사이트 자료가 남을 수 있으며 그 폴더 전체가 050의 비밀 파일로 다뤄진다는 것, 로그인이 풀리면 확인 실패가 된다는 것을 적는다. 사용자가 확인한 로그인 여부가 계획에 저장된다(소유 범위 1).
    - 확인 순간 다시 읽기(042)는 같은 방식으로 한다. 브라우저를 다른 쪽이 쓰고 있으면 기다리지 않고 다시 확인을 요청한다.
    - 042의 등록 후보 규칙(결정적 파서, 페이지 글이 요약을 바꾸지 못함)은 그대로다.
@@ -74,13 +125,18 @@ Consumes: 010 network guard, 029 durable wake·lease, 036 위임·관측·판정
 |---|---|---|---|
 | 042 | SPEC "반드시 지킬 것": 로그인·cookie·credential이 필요한 요청과 JavaScript 실행은 지원하지 않는다. 한 번의 확인에서 redirect 경로 하나만 요청한다. PRD 000 Non Scope도 같다 | 읽기 방식 `browser`는 페이지의 자바스크립트를 실행하고, 그 페이지가 부르는 하위 자원을 함께 받는다. 로그인 감시는 050 프로필의 cookie를 쓴다. `fetch` 방식은 지금과 같다. 접근 차단·이용 제한 우회 금지, 즉시 재시도 금지, `Retry-After` 우선은 두 방식 모두 그대로다(소유 범위 2, 3) | 000, 010 |
 | 042 | PRD 000 범위 3: 추출 기준은 `normalized_static_text_v1` 하나다 | `rendered_text_v1`을 더한다(소유 범위 2) | 000 |
-| 042 | PRD 000 범위 1: cookie·인증 header·credential을 보내거나 저장하지 않는다 | 로그인 감시만 050 프로필의 cookie를 보낸다. 042 관측 fact에는 지금처럼 cookie와 credential을 남기지 않는다(소유 범위 3) | 010 |
+| 042 | PRD 000 범위 1: cookie·인증 header·credential을 보내거나 저장하지 않는다. 범위 6: 응답 본문과 주변 문구를 영속 저장하지 않는다 | 비로그인 browser 감시는 049의 generation 임시 프로필에서 익명 cookie를 생성·저장·전송할 수 있고, 브라우저의 방문 기록·사이트 자료에 페이지 내용이 남을 수 있다. 정상 종료 때 임시 프로필과 함께 버린다. 이 저장은 042의 무저장 계약의 예외이며 임시 프로필은 050의 `browser/profile/` 비밀 파일 보호 밖이다. 관측 fact·알림·조회·진단에는 cookie와 페이지 원문을 남기지 않고, fetch는 기존 계약 그대로다 | 000 |
+| 042 | PRD 000 범위 1: cookie·인증 header·credential을 보내거나 저장하지 않는다 | 로그인 browser 감시는 050의 `browser/profile/`에서 cookie를 생성·저장·전송한다. 저장 프로필 전체는 050의 비밀 파일 보호를 받으며 정상 종료 뒤에도 남는다. 관측 fact·알림·조회·진단에는 cookie와 credential을 남기지 않는다(소유 범위 3) | 010 |
 | 042 | PRD 000 범위 7의 실패 분류 7개 | `browser_unavailable`, `browser_busy`, `rendered_content_unavailable`을 더한다(소유 범위 5) | 000 |
 | 042 | PRD 030 범위 1과 Required Contract 4의 요약: 볼 곳, 볼 값과 지금 값, 조건, 주기, 알림 대상, 기준 시간, 마감 | 읽기 방식과 로그인 여부와, 로그인 감시의 저장·발송 안내를 더한다. 저장된 값과 요약의 값이 같아야 하는 목록에 읽기 방식과 로그인 여부도 들어간다(소유 범위 1, 6) | 010 |
 | 042 | PRD 000 범위 6: 응답 본문과 주변 문구를 영속 저장하지 않는다 | 감시의 관측 fact·알림·조회·진단은 지금처럼 그려진 글 전체와 화면을 남기지 않는다. 다만 로그인 감시가 쓰는 050 프로필에는 브라우저가 관리하는 방문 기록과 사이트 저장 자료가 남고 페이지 내용을 담을 수 있다. 이 프로필은 이 규칙의 예외이며 050의 비밀 파일로 다룬다(소유 범위 3) | 010 |
+| 042 | PRD 000 범위 6: 응답 본문과 주변 문구를 영속 저장하지 않는다 | browser 감시의 HTTP cache는 응답 내용(로그인 감시의 계정 내용 포함)을 generation 임시 폴더에 저장할 수 있다. 050 결정 (라)의 저장 프로필 밖 cache(`--disk-cache-dir=<generation root>/cache`)와 049의 비로그인 임시 프로필 실행 인자를 그대로 소비한다. 정상 종료 때 generation 폴더와 함께 지우지만 강제 종료 뒤 남을 수 있고, 임시 cache는 050 비밀 파일 보호 밖이다. cache를 끄거나 감시 전용 보존 제한을 추가하지 않는다. 관측 fact·알림·조회·진단의 원문 비저장은 그대로다 | 000 (첫 감시 브라우저 시작), 010은 소비 |
 | 042 | PRD 010 범위 2: 알림의 확인 한계(코드 `web_watch_notify_render.rs`의 "static page text only … no JavaScript, login or cookies") | 저장된 읽기 방식과 로그인 여부에 맞는 한계 글을 적는다. 로그인 감시의 `rendered_content_unavailable`에는 다시 로그인하라는 글을 붙인다. 알림의 때와 중복 막기는 그대로다(소유 범위 5) | 000, 010 |
 | 049 | 소유 범위 2: 브라우저는 대화의 `browser` tool이 띄우고, 다른 세션이 쓰는 중이면 그 사실을 돌려준다. 소유 범위 3: proxy는 `NetworkGuard`(사용자의 `tools.ssrfWhitelist`)로 확인한다 | watcher도 같은 한 브라우저 자리를 쓴다. 감시용 브라우저의 proxy는 042의 공개 주소 규칙으로 확인한다(소유 범위 3, 4) | 000 |
 | 049 | 소유 범위 2: 페이지가 새 탭을 열면 그 탭으로 옮긴다 | 감시용 브라우저는 새 탭을 닫고 따라가지 않는다. 대화용 브라우저는 그대로다(소유 범위 3) | 000 |
+| 050 | 소유 범위 5와 PRD 010의 넘겨받기: 다른 대화의 브라우저 동작이 실행 중이면 끝난 뒤 넘긴다. 코드 `browser_manager.rs::reserve`는 slot을 기다린다 | 감시가 시작·읽기·정리 중일 때만 기다림과 예약 없이 `browser_busy`를 돌려준다. 대화 동작을 기다리는 기존 넘겨받기는 그대로다(051 소유 범위 4). 2026-11-12: 이미 정한 감시 공유 계약을 실제 050 진입점에도 적용하도록 소비 표에 명시했다 | 000 |
+
+2026-11-12 저장 예외 결정: 사용자에게 결정을 요청했으나 답이 없어 권장 기본값으로 결정했다. 049·050의 브라우저 동작을 그대로 소비하며 감시 전용 cookie·cache 제한은 추가하지 않는다. 비로그인 임시 프로필의 익명 cookie와 사이트 자료는 PRD 000, 저장 프로필의 cookie와 사이트 자료는 PRD 010, generation HTTP cache 예외는 브라우저 감시를 처음 시작하는 PRD 000이 소유한다. 저장 프로필만 050 비밀 파일 보호를 받으며 임시 프로필·임시 cache는 그 보호 밖이다. 현재 코드의 비로그인 `chromium`은 cache 경로를 별도 지정하지 않아 임시 프로필 안에 생길 수 있지만 generation 폴더 안이며, 로그인 `chromium_on`의 cache는 저장 프로필 밖이다. 두 경우 모두 정상 종료 시 임시 자료를 지우고 강제 종료 시 남을 수 있다. 이후 사용자가 다르게 결정하면 이 계약과 PRD를 수정한다.
 
 ## 반드시 지킬 것
 
@@ -89,7 +145,7 @@ Consumes: 010 network guard, 029 durable wake·lease, 036 위임·관측·판정
 - 감시용 브라우저는 `tools.ssrfWhitelist`와 관계없이 공개 주소만 연다(시험용 profile 빼고).
 - 브라우저가 이미 떠 있으면 감시는 그 브라우저를 쓰거나 닫지 않는다.
 - 로그인하지 않는 감시는 050 프로필을 쓰지 않는다. 로그인 감시는 사용자가 요약에서 고른 것만이다.
-- 042의 저장 범위를 지킨다. 그려진 글 전체, 화면 캡처, cookie를 관측 fact와 알림·조회·진단 출력에 남기지 않는다. 감시는 화면을 캡처하지 않는다. 확인한 추출 값과 근거는 042처럼 남고 알림으로 간다. 050 프로필에 브라우저가 남기는 자료는 이 규칙의 예외다(앞선 스펙에서 바꾸는 것).
+- 042의 관측 저장 범위를 지킨다. 그려진 글 전체, 화면 캡처, cookie를 관측 fact와 알림·조회·진단 출력에 남기지 않는다. 감시는 화면을 캡처하지 않는다. 확인한 추출 값과 근거는 042처럼 남고 알림으로 간다. 브라우저 자체의 임시 프로필·저장 프로필·generation HTTP cache에 남는 자료는 위 표에 명시한 무저장 계약의 예외다. 050의 비밀 파일 보호는 저장 프로필에만 적용되고 임시 프로필·임시 cache에는 적용되지 않는다.
 - 글을 읽기 직전과 직후의 주 문서가 같은 `http:`·`https:` 문서가 아니면 그 결과로 값을 남기지 않는다.
 - 값을 찾지 못하면 추측하지 않는다(042 그대로). 브라우저로 읽기는 `fetch`로 찾지 못한 값을 다른 위치에서 대신 고르지 않는다.
 - `Cargo.lock`에 새 crate를 더하지 않는다. 필요해지면 멈추고 사용자에게 묻는다.
@@ -125,7 +181,9 @@ PRD 문서는 049와 050이 닫힌 뒤 쓴다(사용자 결정 2026-11-08). 각 
 
 | PRD | 유일하게 소유하는 결과 | 앞선 PRD 소비 | 자체 완료 표면 |
 |---|---|---|---|
-| 000 브라우저로 읽는 관측 | 소유 범위 1 중 읽기 방식의 계획·token·digest와 첫 기준 다시 잡기, 2–5(로그인 감시 빼고), 7 중 읽기 방식 | 없음 | 수용 조건 1·2(로그인 감시에만 해당하는 것 빼고), 3, 6 |
-| 010 대화형 등록과 로그인 감시 | 소유 범위 1 중 로그인 여부의 저장·token·digest·revision과 대화형 다시 확인, 3·5의 로그인 감시, 6, 7 중 로그인 | 000 | 수용 조건 1·2의 로그인 감시에만 해당하는 것, 4, 5, 6 |
+| [000 브라우저로 읽는 관측](prds/000-rendered-observation.md) | 소유 범위 1 중 읽기 방식의 계획·token·digest와 첫 기준 다시 잡기, 2–5(로그인 감시 빼고), 7 중 읽기 방식 | 없음 | 수용 조건 1·2(로그인 감시에만 해당하는 것 빼고), 3, 6 |
+| [010 대화형 등록과 로그인 감시](prds/010-registration-and-login-watch.md) | 소유 범위 1 중 로그인 여부의 저장·token·digest·revision과 대화형 다시 확인, 3·5의 로그인 감시, 6, 7 중 로그인 | 000 | 수용 조건 1·2의 로그인 감시에만 해당하는 것, 4, 5, 6 |
 
 수용 조건 6은 각 PRD가 자기 변경에 대해 확인한다.
+
+2026-11-12: 049·050의 닫힌 결과와 현재 코드에 근거해 위 두 실행 PRD를 작성했다. 두 PRD와 이 SPEC의 상태는 `Planned`다. 000은 비로그인 감시의 CLI/API 등록·관측·공유·실패 알림까지 독립 종료하고, 010은 대화형 등록·로그인 감시와 수용 조건 5의 `scripts/spec051-web-watch-check.sh --approved` 및 로컬 SMTP 확인을 소유한다. 이 기록은 구현이나 시험 실행의 완료 기록이 아니다.
