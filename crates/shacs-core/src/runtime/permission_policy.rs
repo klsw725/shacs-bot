@@ -57,6 +57,12 @@ pub enum PermissionPolicyReason {
     /// Nobody can approve workspace-outside access in an unattended run
     /// (Spec 053 PRD 010 scope 7).
     OutsideWorkspaceUnattended,
+    /// A `cron add` with a permission list asks the user once, in every
+    /// interactive mode (Spec 053 PRD 030 scope 2).
+    CronPermissionList,
+    /// The list names a secret file or a protected write, cannot be checked,
+    /// or nobody is there to approve it (Spec 053 PRD 030 scope 2).
+    CronPermissionListRefused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,7 +163,8 @@ pub struct PromptInjectionSignal {
 
 pub fn decide_permission(input: PermissionPolicyInput) -> PermissionPolicyDecision {
     let decision = decide_before_outside_access(input.clone());
-    outside_access::decide(&input, decision)
+    let decision = outside_access::decide(&input, decision);
+    outside_access::decide_cron_list(&input, decision)
 }
 
 fn decide_before_outside_access(input: PermissionPolicyInput) -> PermissionPolicyDecision {
@@ -308,7 +315,9 @@ fn decide_without_user_rules(input: PermissionPolicyInput) -> PermissionPolicyDe
         }
     }
 
-    if input.static_rule_decision.kind == StaticRuleDecisionKind::AskRequired {
+    if input.static_rule_decision.kind == StaticRuleDecisionKind::AskRequired
+        && !narrow_allow_fills_summary(&input)
+    {
         return ask_or_deny(input.interactive, PermissionPolicyReason::StaticAskRequired);
     }
 
@@ -400,8 +409,28 @@ pub(crate) fn unattended_browser_act_denial(
     ))
 }
 
+/// A narrow `exec` allow rule, the user's own or a cron job's approved
+/// command entry, stands in for the summary the static rules could not make,
+/// in a contained run only: the summary is checked before containment, so
+/// skipping it must not skip that. Auto mode keeps its own table (Spec 053
+/// PRD 030 scope 8).
+fn narrow_allow_fills_summary(input: &PermissionPolicyInput) -> bool {
+    input.static_rule_decision.reason == StaticRuleReason::ProcExecSummaryUnavailable
+        && input.action.permission_mode_snapshot.mode != PermissionMode::Auto
+        && input
+            .action
+            .containment_snapshot
+            .as_ref()
+            .is_some_and(|containment| containment.contained == Some(true))
+        && input
+            .materials
+            .as_ref()
+            .is_some_and(|materials| materials.narrow_exec_allow)
+}
+
 fn static_ask_blocks_approval(input: &PermissionPolicyInput) -> bool {
-    !input.interactive
+    !narrow_allow_fills_summary(input)
+        && !input.interactive
         && input.static_rule_decision.kind == StaticRuleDecisionKind::AskRequired
         && matches!(
             input.static_rule_decision.reason,

@@ -12,6 +12,7 @@ use super::secret_file::SecretFiles;
 use super::secret_values::SecretValues;
 use super::user_only_file::UserOnlyFiles;
 use super::{real_path, shell_command};
+use shacs_cron::{CronAccess, CronPermission};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy)]
@@ -56,6 +57,9 @@ pub struct PermissionEnvironment {
     /// The classifier is not called when the values could not be read for
     /// this turn (Spec 048 PRD 010 scope 10).
     pub(crate) secret_values_current: bool,
+    /// A cron run's approved path entries, used only to check redirect
+    /// targets (Spec 053 PRD 030 scope 7).
+    pub(crate) cron_paths: Vec<(PathBuf, CronAccess)>,
 }
 
 impl PermissionEnvironment {
@@ -87,7 +91,49 @@ impl PermissionEnvironment {
             classifier_model: input.classifier_model.map(str::to_owned),
             secret_values: SecretValues::new(input.env_file),
             secret_values_current: input.env_file_current,
+            cron_paths: Vec::new(),
         }
+    }
+
+    /// This environment for a cron run whose approved list is valid now:
+    /// command entries become `exec` allow rules, and path entries may
+    /// stand in for `read` and `edit` allow rules on redirect targets
+    /// (Spec 053 PRD 030 scope 7).
+    pub(crate) fn with_cron_grant(&self, items: &[CronPermission]) -> Self {
+        let commands: Vec<String> = items
+            .iter()
+            .filter_map(|item| match item {
+                CronPermission::Command { command } => Some(format!("exec({command})")),
+                CronPermission::Path { .. } => None,
+            })
+            .collect();
+        Self {
+            user_rules: self.user_rules.with_allow_rules(&commands),
+            cron_paths: items
+                .iter()
+                .filter_map(|item| match item {
+                    CronPermission::Path { path, access } => Some((PathBuf::from(path), *access)),
+                    CronPermission::Command { .. } => None,
+                })
+                .collect(),
+            ..self.clone()
+        }
+    }
+
+    /// Whether an approved path entry covers `pair` for `access`: both the
+    /// path as written and where it leads.
+    pub(crate) fn cron_path_covers(&self, access: rule_match::FileAccess, pair: &PathPair) -> bool {
+        let needed = match access {
+            rule_match::FileAccess::Read => CronAccess::Read,
+            rule_match::FileAccess::Write => CronAccess::Write,
+        };
+        let inside = |path: &Path| {
+            self.cron_paths.iter().any(|(item, granted)| {
+                *granted >= needed
+                    && (path.starts_with(item) || path.starts_with(real_path::real_path(item)))
+            })
+        };
+        inside(&pair.requested) && inside(&pair.real)
     }
 
     /// The `.env.json` values this environment masks.

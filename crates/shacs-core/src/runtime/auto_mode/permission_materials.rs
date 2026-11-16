@@ -27,6 +27,10 @@ pub struct PermissionMaterials {
     pub ask_rule: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_rule: Option<String>,
+    /// Every part of the command matches an `exec` allow rule that is not
+    /// broad (Spec 053 PRD 030 scope 8).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub narrow_exec_allow: bool,
     /// The allow rule, remembered allow or session approval that approves the
     /// action in auto mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,6 +166,18 @@ pub(crate) fn permission_materials(input: MaterialsInput<'_>) -> PermissionMater
             classify_all_shell: input.auto_mode && environment.classify_all_shell,
         },
     );
+    let narrow_exec_allow = subject.command.is_some()
+        && rule_match::match_rules(
+            &environment.user_rules,
+            &subject,
+            environment.bases(),
+            AllowOptions {
+                suspend_broad: true,
+                classify_all_shell: false,
+            },
+        )
+        .allow
+        .is_some();
     let (reads, writes) = touched(&subject);
     let secrets = &environment.secret_files;
     let text_name = subject.command.as_ref().and_then(|command| {
@@ -193,6 +209,7 @@ pub(crate) fn permission_materials(input: MaterialsInput<'_>) -> PermissionMater
         deny_rule: matches.deny,
         ask_rule: matches.ask,
         allow_rule: matches.allow,
+        narrow_exec_allow,
         auto_allow: None,
         secret_read: text_name.is_some() || secret_path.is_some(),
         secret_read_by_text: secret_path.is_none() && text_name.is_some(),
@@ -390,6 +407,7 @@ fn target_allowed(target: &RedirectTarget, environment: &PermissionEnvironment) 
         && !target.pairs.is_empty()
         && target.pairs.iter().all(|pair| {
             environment.inside_workspace(&pair.requested, &pair.real)
+                || environment.cron_path_covers(access, pair)
                 || rule_match::allow_covers_path(
                     &environment.user_rules,
                     access,

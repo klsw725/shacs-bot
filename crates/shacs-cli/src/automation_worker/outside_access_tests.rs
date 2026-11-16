@@ -9,6 +9,10 @@ use shacs_core::runtime::{
     ContainmentSnapshotRef, PermissionMode,
 };
 use shacs_core::tools::{JsonMap, PathContext, ReadFileTool, Tool, ToolRegistry, ToolResult};
+use shacs_cron::{
+    grants_path, permissions_digest, record_grant, AddCronJob, CronAccess, CronGrant,
+    CronPermission, CronSchedule, CronService, PersistentCronService, RemoveJobResult,
+};
 use shacs_eval::evaluator::{
     AutomationExecutionMode, AutomationRunRequest, AutomationRunTriggerKind, AutomationTriggerRef,
 };
@@ -121,6 +125,17 @@ fn run_automation(
     };
     fs::create_dir_all(&workspace)?;
     fs::write(&path, "outside note")?;
+    run_automation_at(root.path(), source, tool, &path)
+}
+
+/// As `run_automation`, in the data folder `root` on `path`.
+fn run_automation_at(
+    root: &Path,
+    source: AutomationRunSource,
+    tool: &str,
+    path: &Path,
+) -> Result<Run, Box<dyn Error>> {
+    let workspace = root.join("workspace");
     let written = Arc::new(Mutex::new(Vec::new()));
     let mut tools = ToolRegistry::new();
     tools.register(PathWriter {
@@ -153,7 +168,7 @@ fn run_automation(
         },
     ];
     let mut adapter = scripted_agent_loop_adapter(
-        root.path(),
+        root,
         json!({"permissions": {"mode": "bypass_permissions"}}),
         tools,
         responses,
@@ -196,6 +211,7 @@ fn tool_results(sessions: &Path) -> Result<Vec<String>, Box<dyn Error>> {
 fn cron() -> AutomationRunSource {
     AutomationRunSource::Cron {
         job_id: Some("job-1".to_owned()),
+        grant_digest: None,
         work_id: "automation-work-1".to_owned(),
     }
 }
@@ -277,5 +293,137 @@ fn a_cron_run_inside_the_workspace_is_unchanged() -> TestResult {
 
     // Then
     assert_eq!(run.written.len(), 1, "{:?}", run.tool_results);
+    Ok(())
+}
+
+/// The paths the writer was let to write.
+type Written = Arc<Mutex<Vec<String>>>;
+
+/// A writer adapter whose provider asks to write each of `paths` in turn,
+/// one automation run per path.
+fn writer_adapter(
+    root: &Path,
+    paths: &[PathBuf],
+) -> Result<(crate::AgentLoopChatCompletionAdapter, Written), Box<dyn Error>> {
+    let workspace = root.join("workspace");
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register(PathWriter {
+        workspace,
+        written: written.clone(),
+    });
+    let responses = paths
+        .iter()
+        .enumerate()
+        .flat_map(|(index, path)| {
+            let call = ToolCallRequest::new(
+                format!("call-{index}"),
+                WRITER,
+                json!({"path": path.display().to_string()})
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            [
+                LlmResponse {
+                    finish_reason: "tool_calls".to_owned(),
+                    tool_calls: vec![call],
+                    ..LlmResponse::default()
+                },
+                LlmResponse {
+                    content: Some("done".to_owned()),
+                    finish_reason: "stop".to_owned(),
+                    ..LlmResponse::default()
+                },
+            ]
+        })
+        .collect();
+    let mut adapter = scripted_agent_loop_adapter(
+        root,
+        json!({"permissions": {"mode": "bypass_permissions"}}),
+        tools,
+        responses,
+        PermissionMode::BypassPermissions,
+    )?;
+    adapter.containment_snapshot = Some(ContainmentSnapshotRef {
+        contained: Some(true),
+        backend: Some("official-container+test".to_owned()),
+        digest: Some("test-containment".to_owned()),
+        summary: Some("test containment".to_owned()),
+    });
+    CONFIRMED_CONTAINMENT.set(true);
+    Ok((adapter, written))
+}
+
+#[test]
+fn a_fired_cron_job_uses_its_approved_list_until_the_job_is_removed() -> TestResult {
+    // Given: a job whose approved list may write `out`.
+    let root = tempfile::tempdir()?;
+    let out = root.path().join("out");
+    fs::create_dir_all(&out)?;
+    fs::create_dir_all(root.path().join("workspace"))?;
+    let store = crate::cron_store_path(root.path());
+    let scheduler = PersistentCronService::new(&store)?;
+    scheduler.start()?;
+    let items = vec![CronPermission::Path {
+        path: out.display().to_string(),
+        access: CronAccess::Write,
+    }];
+    let job = scheduler.add_job(AddCronJob {
+        permissions: items.clone(),
+        name: "notes".to_owned(),
+        schedule: CronSchedule::every(60_000),
+        message: "write the note".to_owned(),
+        deliver: false,
+        channel: None,
+        to: None,
+        delete_after_run: false,
+        channel_meta: Value::Null,
+        session_key: Some("automation:job-1".to_owned()),
+    });
+    record_grant(
+        &grants_path(&store),
+        CronGrant {
+            job_id: job.id.clone(),
+            digest: permissions_digest(&items),
+            items,
+            approved_at_ms: 1,
+            revoked_at_ms: None,
+        },
+    )?;
+    let (adapter, written) = writer_adapter(root.path(), &[out.join("a.txt"), out.join("b.txt")])?;
+    let mut worker = crate::automation_producer::open_dispatcher(root.path())?;
+    let mut fire = |wake: i64| -> TestResult {
+        let mut firing = job.clone();
+        firing.state.next_run_at_ms = Some(wake);
+        crate::automation_producer::enqueue_cron(&adapter, &firing)?;
+        super::process_due_automation(&mut worker, root.path(), &adapter)?;
+        Ok(())
+    };
+
+    // When: it fires, the user removes it, and a firing queued earlier runs.
+    fire(1)?;
+    let after_first = written.lock().map_err(|_| "lock")?.len();
+    assert_eq!(
+        PersistentCronService::new(&store)?.remove_job(&job.id),
+        RemoveJobResult::Removed
+    );
+    fire(2)?;
+
+    // Then
+    let written = written.lock().map_err(|_| "lock")?.clone();
+    assert_eq!(after_first, 1, "{written:?}");
+    assert_eq!(
+        written.len(),
+        1,
+        "the run after the removal wrote nothing: {written:?}"
+    );
+    let results = tool_results(&root.path().join("workspace").join("sessions"))?;
+    assert!(
+        results
+            .iter()
+            .any(|result| result.contains("reaches outside the workspace in an unattended run")),
+        "{results:?}"
+    );
     Ok(())
 }

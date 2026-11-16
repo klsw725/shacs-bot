@@ -6,10 +6,12 @@ use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use serde_json::Value;
 use shacs_cron::{
-    AddCronJob, CronJob, CronJobState, CronPayloadKind, CronRunStatus, CronSchedule,
-    CronScheduleKind, CronService, RemoveJobResult,
+    normalize_permissions, permissions_digest, record_grant, AddCronJob, CronGrant, CronJob,
+    CronJobState, CronPayloadKind, CronPermission, CronRunStatus, CronSchedule, CronScheduleKind,
+    CronService, RemoveJobResult,
 };
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 thread_local! {
@@ -114,6 +116,14 @@ impl Tool for CronTool {
             .property("at", StringSchema::new("ISO datetime for one-time execution"))
             .property("deliver", BooleanSchema::new("Whether to deliver the execution result to the user channel").default(true))
             .property("job_id", StringSchema::new("Required when action='remove'. Job ID to remove"))
+            .raw_property(
+                "permissions",
+                serde_json::json!({
+                    "type": "array",
+                    "description": "Optional for action='add'. What the job may use when it runs with nobody watching: paths outside the workspace ({\"path\": \"/abs/or/~/path\", \"access\": \"read\"|\"write\"}) and commands ({\"command\": \"<exec rule pattern>\"}). The user is asked to approve the whole list.",
+                    "items": {"type": "object"}
+                }),
+            )
             .required(["action"])
             .to_json_schema()
     }
@@ -140,6 +150,11 @@ impl Tool for CronTool {
                 "message",
                 "is required when action='add'",
             ));
+        }
+        if action == "add" {
+            if let Err(error) = requested_permissions(params) {
+                errors.push(ValidationError::new("permissions", &error));
+            }
         }
         if action == "remove"
             && params
@@ -236,7 +251,16 @@ impl CronTool {
             .get("deliver")
             .and_then(Value::as_bool)
             .unwrap_or(true);
+        let permissions = match requested_permissions(&params) {
+            Ok(permissions) => permissions,
+            Err(error) => return format!("Error: {error}"),
+        };
+        let grants = self.cron.grants_path();
+        if !permissions.is_empty() && grants.is_none() {
+            return "Error: this cron service cannot keep approved permission lists".to_owned();
+        }
         let job = self.cron.add_job(AddCronJob {
+            permissions: permissions.clone(),
             name,
             schedule,
             message: message.to_owned(),
@@ -251,6 +275,22 @@ impl CronTool {
                 Some(context.session_key)
             },
         });
+        // Only a call the user approved reaches here with a list: the
+        // permission decision asks for every `add` that carries one (Spec
+        // 053 PRD 030 scopes 2 and 3).
+        if let (false, Some(grants)) = (permissions.is_empty(), grants) {
+            let grant = CronGrant {
+                job_id: job.id.clone(),
+                digest: permissions_digest(&permissions),
+                items: permissions,
+                approved_at_ms: chrono::Utc::now().timestamp_millis(),
+                revoked_at_ms: None,
+            };
+            if let Err(error) = record_grant(&grants, grant) {
+                let _ = self.cron.remove_job(&job.id);
+                return format!("Error: could not keep the approved permission list: {error}");
+            }
+        }
         format!("Created job '{}' (id: {})", job.name, job.id)
     }
 
@@ -267,6 +307,16 @@ impl CronTool {
                 parts.push(format!("  Purpose: {}", system_job_purpose(&job)));
                 parts
                     .push("  Protected: visible for inspection, but cannot be removed.".to_owned());
+            }
+            if !job.permissions.is_empty() {
+                parts.push(format!(
+                    "  Permissions: {}",
+                    job.permissions
+                        .iter()
+                        .map(cron_permission_text)
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                ));
             }
             parts.extend(self.format_state(&job.state, &job.schedule));
             lines.push(parts.join("\n"));
@@ -292,6 +342,9 @@ impl CronTool {
                 }
             }
             RemoveJobResult::NotFound => format!("Job {job_id} not found"),
+            RemoveJobResult::RevokeFailed => format!(
+                "Error: could not revoke the approved permission list of job {job_id}, so it was not removed"
+            ),
         }
     }
 
@@ -340,6 +393,38 @@ impl CronTool {
             ));
         }
         lines
+    }
+}
+
+/// The `permissions` of an `add`, normalized; empty when there are none.
+fn requested_permissions(params: &JsonMap) -> Result<Vec<CronPermission>, String> {
+    let Some(value) = params.get("permissions").filter(|value| !value.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let items: Vec<CronPermission> = serde_json::from_value(value.clone()).map_err(|_| {
+        "each entry needs {\"path\", \"access\": \"read\"|\"write\"} or {\"command\"}".to_owned()
+    })?;
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let items = normalize_permissions(&items, &home)?;
+    if let Some(problem) = crate::runtime::cron_command_problem(&items) {
+        return Err(problem);
+    }
+    Ok(items)
+}
+
+/// How `list` and the approval question show one entry.
+pub(crate) fn cron_permission_text(item: &CronPermission) -> String {
+    match item {
+        CronPermission::Path { path, access } => format!(
+            "{} {path}",
+            match access {
+                shacs_cron::CronAccess::Read => "read",
+                shacs_cron::CronAccess::Write => "write",
+            }
+        ),
+        CronPermission::Command { command } => format!("run `{command}`"),
     }
 }
 

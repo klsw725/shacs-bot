@@ -262,6 +262,7 @@ fn cron_job(id: &str, instruction: &str) -> CronJob {
         created_at_ms: 0,
         updated_at_ms: 0,
         delete_after_run: true,
+        permissions: Vec::new(),
     }
 }
 

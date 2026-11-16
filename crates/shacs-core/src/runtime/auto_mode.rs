@@ -1,5 +1,11 @@
 #[path = "auto_mode/action_materials.rs"]
 pub(crate) mod action_materials;
+
+/// Whether an `exec` rule pattern is broad, as auto mode sets such allow
+/// rules aside; `None` when it is not a pattern.
+pub(crate) fn broad_exec_pattern(pattern: &str) -> Option<bool> {
+    exec_pattern::ExecPattern::parse(pattern).map(|pattern| pattern.is_broad())
+}
 #[path = "auto_mode/action_secrets.rs"]
 pub(crate) mod action_secrets;
 #[path = "auto_mode/approval_why.rs"]

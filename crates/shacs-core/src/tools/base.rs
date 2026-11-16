@@ -104,6 +104,10 @@ pub struct ToolCallExecutionContext {
     provider_invocation: Option<ProviderInvocation>,
     hidden_paths: Option<Arc<PermissionEnvironment>>,
     approved_outside: Vec<PathBuf>,
+    /// The cron approval record this call's decision relied on: (record
+    /// file, job id, digest). Read again right before the call runs (Spec 053
+    /// PRD 030 scope 5).
+    cron_grant: Option<(PathBuf, String, String)>,
 }
 
 impl ToolCallExecutionContext {
@@ -117,7 +121,23 @@ impl ToolCallExecutionContext {
             provider_invocation: None,
             hidden_paths: None,
             approved_outside: Vec::new(),
+            cron_grant: None,
         }
+    }
+
+    pub(crate) fn with_cron_grant(mut self, grant: Option<(PathBuf, String, String)>) -> Self {
+        self.cron_grant = grant;
+        self
+    }
+
+    /// The decision relied on a cron approval record that is no longer
+    /// valid, so the call must not start.
+    pub(crate) fn cron_grant_lapsed(&self) -> bool {
+        self.cron_grant
+            .as_ref()
+            .is_some_and(|(store, job_id, digest)| {
+                shacs_cron::valid_grant(store, job_id, digest).is_none()
+            })
     }
 
     /// The workspace-outside paths the permission decision allowed this call

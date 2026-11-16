@@ -107,6 +107,7 @@ mod process_gate;
 mod provider_credentials;
 pub use browser_host::*;
 pub use browser_start_evidence::BrowserStartEvidence;
+pub(crate) mod cron_grant;
 mod outside_access;
 mod quiet_tools;
 mod rendered_web_reader;
@@ -309,6 +310,7 @@ pub use context_safety::{
     replay_context_artifact_from_evidence, trust_label_for_kind, ContextPermissionDecision,
     ContextReplayEvidence, ContextSafetyDiagnostic, ContextSafetyReport, ContextTrustLabel,
 };
+pub(crate) use cron_grant::cron_command_problem;
 pub use diagnostics::{
     build_core_diagnostics_aggregate, ClassifierDiagnosticsDto, ClassifierEvidenceDiagnostic,
     ContainmentDiagnosticsDto, ContainmentProofDiagnostic, CoreDiagnosticsAggregate,
@@ -428,7 +430,7 @@ pub use memory_skill_curator::{
     runtime_skill_reference_evidence, runtime_skill_view_disclosure,
     MemorySkillCuratorRuntimeError, RuntimeMemoryEvidenceRequestInput,
 };
-pub use outside_access::OutsideAccess;
+pub use outside_access::{CronListRequest, OutsideAccess};
 pub use permission_action::{
     normalize_resolved_deferred_tool_call, normalize_runtime_tool_call, ActionNormalizationError,
     ActionNormalizationState, ContainmentSnapshotRef, DecisionArguments, IntentSnapshotRef,

@@ -67,7 +67,7 @@ pub(crate) fn production_tool_registry(
         registry.register(BrowserTool::new(host.clone()));
     }
     let cron_service = Arc::new(
-        PersistentCronService::new(bundle.context.runtime_subdir("cron").join("jobs.json"))
+        PersistentCronService::new(crate::cron_store_path(&bundle.context.data_dir))
             .map_err(CliError::Io)?,
     );
     registry.register(CronTool::with_timezone(

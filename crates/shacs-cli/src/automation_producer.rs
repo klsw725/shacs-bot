@@ -86,6 +86,7 @@ pub(super) fn enqueue_cron(
         CronScheduleKind::At => AutomationScheduleKind::OneShot,
         CronScheduleKind::Every | CronScheduleKind::Cron => AutomationScheduleKind::Recurring,
     };
+    let rule_ref = cron_rule_ref(adapter.config_path.parent(), &job.id);
     enqueue(
         adapter,
         job.payload
@@ -93,7 +94,7 @@ pub(super) fn enqueue_cron(
             .clone()
             .ok_or_else(|| "cron automation lacks session key".to_owned())?,
         AutomationSourceEventKind::Cron {
-            approved_automation_rule_ref: Some(format!("cron-job:{}", job.id)),
+            approved_automation_rule_ref: Some(rule_ref),
         },
         schedule,
         job.state
@@ -103,6 +104,22 @@ pub(super) fn enqueue_cron(
         &job.payload.message,
     )
     .map(|_| ())
+}
+
+/// The firing's rule reference: the job, and the approved list valid when it
+/// was queued. A removal before the run still takes effect at each tool call
+/// (Spec 053 PRD 030 scopes 4 and 5).
+pub(crate) fn cron_rule_ref(data_dir: Option<&Path>, job_id: &str) -> String {
+    let grant = data_dir.and_then(|data_dir| {
+        shacs_cron::current_grant(
+            &shacs_cron::grants_path(&super::cron_store_path(data_dir)),
+            job_id,
+        )
+    });
+    match grant {
+        Some(grant) => format!("cron-job:{job_id}#{}", grant.digest),
+        None => format!("cron-job:{job_id}"),
+    }
 }
 
 fn enqueue(

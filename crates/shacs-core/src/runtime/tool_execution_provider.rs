@@ -20,6 +20,7 @@ pub(super) fn tool_call_execution_context(
     if let Some(deadline) = context.deadline {
         provider_invocation = provider_invocation.with_deadline(deadline);
     }
+    let cron_grant = evaluation.cron_grant_used();
     let approved_outside = evaluation
         .outside_targets()
         .iter()
@@ -65,7 +66,8 @@ pub(super) fn tool_call_execution_context(
         }
     }))
     .with_hidden_paths(context.permission_environment.clone())
-    .with_approved_outside(approved_outside);
+    .with_approved_outside(approved_outside)
+    .with_cron_grant(cron_grant);
     match (
         action.capabilities.contains(&SafetyCapability::ProcExec),
         context.cancellation_token.as_ref(),

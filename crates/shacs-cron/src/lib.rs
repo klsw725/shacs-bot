@@ -11,6 +11,13 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
+mod grants;
+
+pub use grants::{
+    current_grant, grants_path, normalize_permissions, permissions_digest, record_grant,
+    revoke_grants, valid_grant, CronAccess, CronGrant, CronPermission, GRANTS_FILE,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CronScheduleKind {
@@ -157,10 +164,16 @@ pub struct CronJob {
     pub updated_at_ms: i64,
     #[serde(alias = "delete_after_run")]
     pub delete_after_run: bool,
+    /// What `list` shows. A run never reads it: the approved list lives in
+    /// the approval record (Spec 053 PRD 030 scope 4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions: Vec<CronPermission>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AddCronJob {
+    /// Normalized; empty when the job asks for no permissions.
+    pub permissions: Vec<CronPermission>,
     pub name: String,
     pub schedule: CronSchedule,
     pub message: String,
@@ -193,6 +206,9 @@ pub enum RemoveJobResult {
     Removed,
     Protected,
     NotFound,
+    /// The job's approved list could not be marked revoked, so the job was
+    /// kept (Spec 053 PRD 030 scope 5).
+    RevokeFailed,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -283,6 +299,12 @@ pub trait CronService: Send + Sync {
     fn remove_job(&self, job_id: &str) -> RemoveJobResult;
     fn get_job(&self, job_id: &str) -> Option<CronJob>;
 
+    /// Where approved permission lists are kept, for a service that keeps
+    /// them.
+    fn grants_path(&self) -> Option<PathBuf> {
+        None
+    }
+
     fn register_system_job(&self, job: CronJob) -> CronJob {
         job
     }
@@ -355,6 +377,7 @@ impl CronService for InMemoryCronService {
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
             delete_after_run: request.delete_after_run,
+            permissions: request.permissions,
         };
         lock(&self.jobs).push(job.clone());
         job
@@ -806,6 +829,7 @@ impl CronService for PersistentCronService {
             created_at_ms: now,
             updated_at_ms: now,
             delete_after_run: request.delete_after_run,
+            permissions: request.permissions,
         };
         let _ = self.mutate_store(job.clone(), CronActionKind::Add);
         job
@@ -828,11 +852,20 @@ impl CronService for PersistentCronService {
         if job.payload.kind == CronPayloadKind::SystemEvent {
             return RemoveJobResult::Protected;
         }
+        // The list stops working before the removal is reported, for every
+        // service instance that reads the record next.
+        if revoke_grants(&grants_path(&self.store_path), job_id, now_ms()).is_err() {
+            return RemoveJobResult::RevokeFailed;
+        }
         if self.mutate_store(job, CronActionKind::Delete).is_ok() {
             RemoveJobResult::Removed
         } else {
             RemoveJobResult::NotFound
         }
+    }
+
+    fn grants_path(&self) -> Option<PathBuf> {
+        Some(grants_path(&self.store_path))
     }
 
     fn get_job(&self, job_id: &str) -> Option<CronJob> {
@@ -938,6 +971,7 @@ pub fn system_job(
         created_at_ms: 0,
         updated_at_ms: 0,
         delete_after_run: false,
+        permissions: Vec::new(),
     }
 }
 
@@ -1344,6 +1378,7 @@ mod tests {
                 created_at_ms: 1,
                 updated_at_ms: 2,
                 delete_after_run: false,
+                permissions: Vec::new(),
             }],
         };
 
@@ -1408,6 +1443,7 @@ mod tests {
             channel: Some("telegram".to_owned()),
             to: Some("chat".to_owned()),
             delete_after_run: false,
+            permissions: Vec::new(),
             channel_meta: json!({"thread": "t1"}),
             session_key: Some("telegram:chat".to_owned()),
         });
@@ -1466,6 +1502,7 @@ mod tests {
             channel: None,
             to: None,
             delete_after_run: false,
+            permissions: Vec::new(),
             channel_meta: Value::Object(Default::default()),
             session_key: None,
         });
@@ -1495,6 +1532,7 @@ mod tests {
             channel: None,
             to: None,
             delete_after_run: false,
+            permissions: Vec::new(),
             channel_meta: Value::Object(Default::default()),
             session_key: None,
         });
@@ -1534,6 +1572,7 @@ mod tests {
             channel: None,
             to: None,
             delete_after_run: false,
+            permissions: Vec::new(),
             channel_meta: Value::Object(Default::default()),
             session_key: None,
         });
@@ -1545,6 +1584,7 @@ mod tests {
             channel: None,
             to: None,
             delete_after_run: true,
+            permissions: Vec::new(),
             channel_meta: Value::Object(Default::default()),
             session_key: None,
         });
@@ -1602,6 +1642,7 @@ mod tests {
             channel: None,
             to: None,
             delete_after_run: false,
+            permissions: Vec::new(),
             channel_meta: Value::Object(Default::default()),
             session_key: None,
         });
@@ -1646,6 +1687,7 @@ mod tests {
             channel: None,
             to: None,
             delete_after_run: false,
+            permissions: Vec::new(),
             channel_meta: Value::Object(Default::default()),
             session_key: None,
         });
@@ -1729,6 +1771,7 @@ mod tests {
             channel: None,
             to: None,
             delete_after_run: false,
+            permissions: Vec::new(),
             channel_meta: Value::Object(Default::default()),
             session_key: None,
         });
@@ -1755,6 +1798,7 @@ mod tests {
             channel: None,
             to: None,
             delete_after_run: false,
+            permissions: Vec::new(),
             channel_meta: Value::Object(Default::default()),
             session_key: None,
         });
@@ -1769,6 +1813,7 @@ mod tests {
             channel: None,
             to: None,
             delete_after_run: false,
+            permissions: Vec::new(),
             channel_meta: Value::Object(Default::default()),
             session_key: None,
         });

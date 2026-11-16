@@ -504,6 +504,7 @@ fn dispatched_automation_carries_its_stored_source() -> Result<(), Box<dyn Error
             },
             AutomationRunSource::Cron {
                 job_id: Some("job-7".to_owned()),
+                grant_digest: None,
                 work_id: "automation-work-1".to_owned(),
             },
         ),

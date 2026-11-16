@@ -2236,6 +2236,7 @@ fn outside_input(
     input.outside_access = OutsideAccess {
         targets: vec!["/tmp/x.txt".to_owned()],
         automation_source: source,
+        ..OutsideAccess::default()
     };
     input
 }
@@ -2249,6 +2250,7 @@ fn workspace_outside_access_needs_a_user_grant_and_is_refused_unattended(
     };
     let cron = AutomationRunSource::Cron {
         job_id: Some("job-1".to_owned()),
+        grant_digest: None,
         work_id: "work-2".to_owned(),
     };
     let read = |interactive, source| {

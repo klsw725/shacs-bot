@@ -8,13 +8,13 @@ use crate::runtime::permission_pattern::{
 use crate::runtime::permission_remembered::remembered_permission_matcher_matches;
 use crate::runtime::{
     approval_decision_options, containment_permission_proof_for_process_gate, correlate_approval,
-    correlate_policy_safety_snapshot_ref, decide_permission, evaluate_static_rules,
+    correlate_policy_safety_snapshot_ref, cron_grant, decide_permission, evaluate_static_rules,
     normalize_runtime_tool_call, ActionNormalizationError, ApprovalCacheEntry, ApprovalCorrelation,
     ApprovalCorrelationError, ApprovalDecisionKind, ApprovalExplanation, ApprovalRequest,
     AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, AutoModeEscalation, AutomationRunSource,
-    ContainmentSnapshotRef, EvaluatorConfidence, EvaluatorScopeMatch, InheritedPermissionContext,
-    OutsideAccess, PermissionCeilingSnapshot, PermissionEnvironment, PermissionMode,
-    PermissionModeSnapshot, PermissionPolicyDecision, PermissionPolicyDecisionKind,
+    ContainmentSnapshotRef, CronListRequest, EvaluatorConfidence, EvaluatorScopeMatch,
+    InheritedPermissionContext, OutsideAccess, PermissionCeilingSnapshot, PermissionEnvironment,
+    PermissionMode, PermissionModeSnapshot, PermissionPolicyDecision, PermissionPolicyDecisionKind,
     PermissionPolicyInput, PermissionPolicyReason, PermissionRuleInput, PermissionedAction,
     PermissionedActionInput, PermissionedActionOrigin, ProcExecSummary, ProcessAdapterKind,
     ProcessContainmentProofCandidate, ProcessEnvelopeAdmission, ProcessExecutionEnvelope,
@@ -246,6 +246,10 @@ pub struct ToolExecutionContext {
     /// from stored or model-supplied data (Spec 053 PRD 010 scope 8).
     #[serde(skip, default)]
     pub automation_source: Option<AutomationRunSource>,
+    /// Where cron jobs' approval records are kept (Spec 053 PRD 030 scope
+    /// 5). Read again for every call.
+    #[serde(skip, default)]
+    pub cron_grant_store: Option<PathBuf>,
     pub record_channel_delivery: bool,
     #[serde(skip, default)]
     pub cancellation_token: Option<crate::runtime::CancellationToken>,
@@ -279,6 +283,7 @@ impl Default for ToolExecutionContext {
             permission_environment: None,
             in_cron_context: false,
             automation_source: None,
+            cron_grant_store: None,
             record_channel_delivery: false,
             cancellation_token: None,
             deadline: None,
@@ -692,6 +697,11 @@ pub(crate) struct PermissionEvaluation {
     /// The outside targets as a question shows them: `.env.json` values
     /// masked. The decision keeps the raw ones (Spec 053 PRD 010 scope 7).
     shown_outside_targets: Vec<String>,
+    /// What a `cron add` question says about the job and its list, masked.
+    shown_cron_list: Option<String>,
+    /// The cron approval record this decision used, checked again before
+    /// the call runs.
+    cron_grant_used: Option<(PathBuf, String, String)>,
     pub(crate) decision: PermissionPolicyDecision,
 }
 
@@ -735,12 +745,17 @@ impl PermissionEvaluation {
         &self.policy_materials.outside_access.targets
     }
 
+    pub(crate) fn cron_grant_used(&self) -> Option<(PathBuf, String, String)> {
+        self.cron_grant_used.clone()
+    }
+
     pub(crate) fn approval_explanation(&self) -> ApprovalExplanation {
         approval_why::approval_explanation(
             &self.decision,
             self.policy_materials.materials.as_ref(),
             self.evaluator.as_ref(),
             &self.shown_outside_targets,
+            self.shown_cron_list.as_deref(),
         )
     }
 }
@@ -780,6 +795,20 @@ pub(crate) fn permission_evaluation_for_action(
     action: &PermissionedAction,
     context: &ToolExecutionContext,
 ) -> PermissionEvaluation {
+    // A cron run's approved list, read now: a removal between two calls
+    // takes effect on the second (Spec 053 PRD 030 scopes 5 and 7).
+    let cron_grant = cron_grant::current_grant(
+        context.automation_source.as_ref(),
+        context.cron_grant_store.as_deref(),
+    );
+    let granted_context = cron_grant
+        .as_ref()
+        .zip(context.permission_environment.as_ref())
+        .map(|(grant, environment)| ToolExecutionContext {
+            permission_environment: Some(Arc::new(environment.with_cron_grant(&grant.items))),
+            ..context.clone()
+        });
+    let context = granted_context.as_ref().unwrap_or(context);
     let rule_input = effective_permission_rule_input(action, context);
     let static_rule_decision = evaluate_static_rules(action, &rule_input);
     let user_rules_apply = context.permission_environment.is_some();
@@ -835,8 +864,17 @@ pub(crate) fn permission_evaluation_for_action(
                 }),
         },
     );
+    let targets = outside_workspace_targets(registry, action);
+    let environment = context.permission_environment.as_deref();
+    let read_only_tool = registry
+        .get(&action.tool_name)
+        .is_some_and(|tool| tool.read_only());
     let outside_access = OutsideAccess {
-        targets: outside_workspace_targets(registry, action),
+        cron_list_covers: cron_grant.as_ref().is_some_and(|grant| {
+            cron_grant::covers(grant, action, read_only_tool, &targets, environment)
+        }),
+        cron_list_request: cron_grant::add_request(action, environment),
+        targets,
         automation_source: context.automation_source.clone(),
     };
     let policy_materials = ProcessGatePolicyMaterials {
@@ -892,6 +930,14 @@ pub(crate) fn permission_evaluation_for_action(
         .iter()
         .map(|target| mask_shown(environment, target))
         .collect();
+    let cron_grant_used = cron_grant
+        .as_ref()
+        .zip(context.cron_grant_store.clone())
+        .map(|(grant, store)| (store, grant.job_id.clone(), grant.digest.clone()));
+    let shown_cron_list = match &policy_materials.outside_access.cron_list_request {
+        Some(CronListRequest::Ask(text)) => Some(mask_shown(environment, text)),
+        _ => None,
+    };
     PermissionEvaluation {
         rule_input,
         evaluator,
@@ -899,6 +945,8 @@ pub(crate) fn permission_evaluation_for_action(
         inherited_context,
         interactive: context.permission_interactive,
         shown_outside_targets,
+        shown_cron_list,
+        cron_grant_used,
         policy_materials,
         browser_refusal,
         decision,
@@ -1687,6 +1735,7 @@ fn execute_concurrent_batch(
             );
             let handle = thread::spawn(move || {
                 let outcome = match prepared {
+                    _ if context.cron_grant_lapsed() => unattended_outside_block_text().into(),
                     Ok(prepared) => prepared
                         .tool
                         .execute_with_context(prepared.params, &context),
@@ -1722,6 +1771,11 @@ fn execute_one_tool(
     call: &RuntimeToolCall,
     context: &ToolCallExecutionContext,
 ) -> ToolResult {
+    // A cron job removed after this call was decided takes its list away
+    // before the call starts (Spec 053 PRD 030 scope 5).
+    if context.cron_grant_lapsed() {
+        return unattended_outside_block_text().into();
+    }
     match executor.take_prepared(call).map_or_else(
         || {
             executor

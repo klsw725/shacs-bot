@@ -16,6 +16,7 @@ mod spec050_login_profile_secret;
 mod spec050_runnable_work;
 mod spec051_registration_and_login;
 mod spec051_rendered_observation;
+mod spec053_cron_list;
 mod spec053_outside_exec;
 mod spec053_outside_files;
 mod spec053_refusals;

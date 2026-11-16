@@ -8441,14 +8441,19 @@ fn start_heartbeat_runtime(
         .map_err(|error| CliError::Api(ApiError::internal(error.to_string())))
 }
 
+/// The one cron job store: the scheduler, the `cron` tool and the approval
+/// records beside it all use this file, so a job the assistant adds is the
+/// job that fires (Spec 053 PRD 030 scope 5).
+pub(crate) fn cron_store_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("runtime").join("cron").join("jobs.json")
+}
+
 fn start_automation_cron_runtime(
     adapter: Arc<AgentLoopChatCompletionAdapter>,
     data_dir: &Path,
 ) -> Result<CronSupervisor, CliError> {
-    let service = Arc::new(
-        PersistentCronService::new(data_dir.join("runtime").join("cron").join("jobs.json"))
-            .map_err(CliError::Io)?,
-    );
+    let service =
+        Arc::new(PersistentCronService::new(cron_store_path(data_dir)).map_err(CliError::Io)?);
     let executor = Arc::new(move |job: &shacs_cron::CronJob| {
         automation_producer::enqueue_cron(adapter.as_ref(), job).map(|_| None)
     });
@@ -19936,6 +19941,10 @@ impl AgentLoopChatCompletionAdapter {
             .config_path
             .parent()
             .map(|data_dir| data_dir.join("runtime").join("durable-events"));
+        config.cron_grant_store = self
+            .config_path
+            .parent()
+            .map(|data_dir| shacs_cron::grants_path(&cron_store_path(data_dir)));
         config.clock_ms = Some(Arc::new(now_millis));
         config.web_watch = self.config_path.parent().map(|data_dir| {
             shacs_core::runtime::WebWatchConversationConfig {

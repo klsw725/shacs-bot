@@ -861,6 +861,27 @@ workspace guard 안내에는 사용자가 `tools.restrictToWorkspace`를 끌 수
 
 PRD 020 이후 file tool(`read_file`·`write_file`·`edit_file`·`notebook_edit`·`list_dir`·`glob`·`grep`)도 같습니다. `restrictToWorkspace`가 꺼진 실행에서 workspace·media 폴더 밖 경로, 또는 symlink를 따라가면 그 밖인 경로는 tool이 거절하지 않고 위 판정을 거칩니다. 질문에는 symlink를 따라간 실제 경로가 나옵니다. data 폴더의 `.env.json`과 인증 저장소 읽기는 모든 mode에서 매번 묻고(기억 선택지 없음), 쓰기는 거절합니다. 밖 폴더의 목록·검색에도 비밀 파일은 나오지 않고 symlink는 따라가지 않습니다. 이미 있는 symlink를 지나는 쓰기와 `.shacs-methods/`는 지금처럼 tool이 거절합니다. workspace 밖 file tool 대상은 정확히 그 호출로만 기억됩니다(폴더 단위 기억 없음). `restrictToWorkspace`를 켜면 file tool은 지금처럼 workspace·media 폴더 밖을 거절합니다.
 
+##### cron 작업의 미리 허락된 목록
+
+PRD 030 이후 `cron` tool의 `add`는 `permissions` 목록을 받습니다. 그 작업이 사람 없이 돌 때 쓸 것만 적습니다.
+
+- 경로 항목 `{"path": "/abs/path 또는 ~/path", "access": "read" | "write"}`: 그 파일이나 폴더 아래 전부를 workspace 밖에서 읽거나(read) 쓰게(write, 읽기 포함) 합니다. 상대 경로와 `..`는 받지 않습니다.
+- 명령 항목 `{"command": "<exec 규칙 pattern>"}`: `permissions.allow`의 `exec(...)`와 같은 문법입니다. 예: `python3 /home/shacs/.shacs-bot/workspace/builtin_skills/youtube-content/scripts/fetch_transcript.py *`. `python3 *`, `bash -c *` 같은 넓은 pattern은 받지 않습니다.
+
+목록이 있는 `add`는 어느 mode든(auto, `bypass_permissions`, `dont_ask` 포함) 대화 중이면 작업 이름·일정·지시·목록 전부를 적어 한 번만 묻고, 사람이 없는 실행에서는 거절합니다. classifier, allow 규칙, 기억된 허용이 대신 승인하지 못합니다. 비밀 파일(`.env.json`, 인증 저장소)을 가리키는 항목과 보호 경로(`config.json` 등)에 쓰는 항목은 등록이 거절됩니다. 승인하면 작업과 함께 승인 기록이 `<data>/runtime/cron/approvals.json`에 남고, `cron list`에 목록이 보입니다. 기록 파일은 비밀 파일로 다룹니다(읽기는 매번 묻고, 쓰기는 거절).
+
+그 작업의 cron 실행에서만 목록이 쓰입니다.
+
+- workspace 밖 file tool 접근은 경로 항목 안이어야 하고(읽기 tool은 read 이상, 쓰기는 write), symlink를 따라간 곳도 항목 안이어야 합니다.
+- 명령이 적은 workspace 밖 경로는 `cat`·`head`·`tail`·`wc`·`ls`·`grep` 같은 읽기 전용 명령의 인자나 입력 리디렉션일 때만 read 항목으로 충분하고, 그 밖(`mkdir`, 출력 리디렉션, 스크립트 인자 등)은 write 항목이 필요합니다. `../`가 든 명령은 목록으로 허락되지 않습니다.
+- 명령 항목은 그 실행 동안 `exec` allow 규칙처럼 쓰입니다. 이은 명령은 모두 맞아야 하고, deny 규칙·안전 장치·비밀 파일 규칙은 풀지 못합니다. auto mode에서 출력 리디렉션 대상은 write 항목이 `edit` allow 규칙을 대신합니다.
+- 다른 작업, heartbeat, 같은 세션의 대화 turn은 그 목록을 쓰지 못합니다. 목록이 없거나 맞지 않으면 `bypass_permissions`에서도 workspace 밖 접근은 거절됩니다.
+- 작업을 지우면(`cron remove`) 삭제를 알리기 전에 목록이 취소되어, 대기 중인 실행과 이미 도는 실행의 다음 tool 호출부터 쓰이지 않습니다. 한 번만 도는 작업이 실행 뒤 저절로 정리되는 것은 취소가 아닙니다. 일정 파일의 목록 칸을 고쳐도 실행에는 승인 기록의 목록만 쓰입니다.
+
+`cron` tool과 gateway scheduler는 같은 작업 파일 `<data>/runtime/cron/jobs.json`을 씁니다. 전에는 `cron` tool이 `<data>/cron/jobs.json`에 써서 scheduler가 그 작업을 보지 못했습니다. 그 파일에 남은 작업은 옮겨지지 않으니 다시 만드세요.
+
+auto가 아닌 mode에서 `pwd` 같은 몇 가지 말고는 명령 요약을 만들 수 없어 묻던 명령도, 나뉜 명령 모두가 넓지 않은 `exec` allow 규칙(설정의 규칙이나 cron 명령 항목)에 맞고 격리된 실행이면 묻지 않고 실행합니다. `python3 *` 같은 넓은 규칙과 기억된 허용은 이 자리를 채우지 않습니다.
+
 명령의 workspace 밖 경로는 명령 글에서 찾습니다. 변수로 만든 경로나 스크립트 안에서 여는 파일은 찾지 못합니다. 반복 한도로 멈춘 일반 요청은 거절 결과가 마지막 답이고, 이미지·복합 요청은 기존처럼 원문 대신 digest만 보입니다.
 
 #### 막힌 뒤

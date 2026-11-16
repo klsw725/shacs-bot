@@ -980,6 +980,9 @@ impl SubagentRuntime {
             permission_environment: config.permission_environment.clone(),
             in_cron_context: false,
             automation_source: None,
+            // A child never uses its cron parent's approved list (Spec 053
+            // PRD 030).
+            cron_grant_store: None,
             record_channel_delivery: false,
             cancellation_token: Some(cancellation_token.clone()),
             deadline: None,

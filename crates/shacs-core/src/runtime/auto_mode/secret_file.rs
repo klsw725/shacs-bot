@@ -13,6 +13,9 @@ const AUTH_FOLDER: &str = "auth";
 /// files beside it are not secret.
 const BROWSER_FOLDER: &str = "browser";
 const PROFILE_FOLDER: &str = "profile";
+/// `<data>/runtime/cron/approvals.json`: the cron jobs' approved permission
+/// lists (Spec 053 PRD 030 scope 3), and its temporary save file.
+const CRON_GRANTS: [&str; 3] = ["runtime", "cron", shacs_cron::GRANTS_FILE];
 const MAX_SCANNED_FILES: usize = 4_096;
 /// The login profile is counted on its own: it is far larger than the auth
 /// store.
@@ -93,6 +96,9 @@ impl SecretFiles {
             let targets = self.files.iter().map(|file| folder.join(file)).chain([
                 folder.join(AUTH_FOLDER),
                 folder.join(BROWSER_FOLDER).join(PROFILE_FOLDER),
+                CRON_GRANTS
+                    .iter()
+                    .fold(folder.clone(), |path, part| path.join(part)),
             ]);
             for target in targets {
                 names.push(target.display().to_string());
@@ -125,6 +131,15 @@ impl SecretFiles {
         self.folders
             .iter()
             .any(|folder| self.store_holds(folder, identity).unwrap_or(true))
+            || self.folders.iter().any(|folder| {
+                let grants = CRON_GRANTS
+                    .iter()
+                    .fold(folder.clone(), |path, part| path.join(part));
+                let temporary = grants.with_extension("json.tmp");
+                [grants, temporary].iter().any(|file| {
+                    fs::metadata(file).is_ok_and(|stored| (stored.dev(), stored.ino()) == identity)
+                })
+            })
     }
 
     #[cfg(not(unix))]
@@ -150,6 +165,13 @@ impl SecretFiles {
                 Component::Normal(part) => part.to_str(),
                 _ => None,
             });
+        let rest: Vec<&str> = parts.clone().collect();
+        if rest.len() == CRON_GRANTS.len()
+            && rest[..2] == CRON_GRANTS[..2]
+            && rest[2].starts_with(shacs_cron::GRANTS_FILE)
+        {
+            return true;
+        }
         match parts.next() {
             Some(AUTH_FOLDER) => true,
             Some(BROWSER_FOLDER) => parts.next() == Some(PROFILE_FOLDER),

@@ -1,3 +1,4 @@
+use super::cron_grant;
 use super::tool_refusals::{self, ToolRefusals};
 use crate::runtime::auto_mode::classifier_review::{turn_classifier, TurnClassifierInput};
 use crate::runtime::entrusted_work_conversation::{
@@ -317,6 +318,8 @@ pub struct AgentLoopConfig {
     pub execution_control: Option<AutomationExecutionControl>,
     /// The automation worker's trusted run source (Spec 053 PRD 010 scope 8).
     pub automation_source: Option<AutomationRunSource>,
+    /// Where cron jobs' approval records are kept (Spec 053 PRD 030 scope 5).
+    pub cron_grant_store: Option<PathBuf>,
     /// Current Unix time in ms for time-bound checks such as a reminder past its deadline; the
     /// system clock when unset.
     pub clock_ms: Option<ClockMs>,
@@ -374,6 +377,7 @@ impl AgentLoopConfig {
             execution_snapshot_source: LiveExecutionSnapshotSource::default(),
             execution_control: None,
             automation_source: None,
+            cron_grant_store: None,
             clock_ms: None,
             web_watch: None,
         }
@@ -1904,7 +1908,11 @@ impl<'a> AgentLoop<'a> {
             permission_mode_snapshot: self.config.permission_mode_snapshot.clone(),
             permission_rule_input: self.config.permission_rule_input.clone(),
             permission_auto_approval: self.config.permission_auto_approval.clone(),
-            permission_ceiling_snapshot: self.config.permission_ceiling_snapshot.clone(),
+            permission_ceiling_snapshot: cron_grant::ceiling_for_source(
+                self.config.permission_ceiling_snapshot.clone(),
+                self.config.automation_source.as_ref(),
+                self.config.cron_grant_store.as_deref(),
+            ),
             permission_evaluator: self.config.permission_evaluator.clone(),
             browser_reviewed_action_digest: None,
             permission_interactive: self.config.permission_interactive,
@@ -1921,6 +1929,7 @@ impl<'a> AgentLoop<'a> {
             permission_environment: self.config.permission_environment.clone(),
             in_cron_context: false,
             automation_source: self.config.automation_source.clone(),
+            cron_grant_store: self.config.cron_grant_store.clone(),
             record_channel_delivery: self.config.record_channel_delivery,
             cancellation_token: None,
             deadline: None,

@@ -148,6 +148,19 @@ impl UserPermissionRules {
         rules
     }
 
+    /// These rules with `texts` added as allow rules; a text that does not
+    /// parse is left out.
+    pub(crate) fn with_allow_rules(&self, texts: &[String]) -> Self {
+        let mut rules = self.clone();
+        rules.allow.extend(
+            texts
+                .iter()
+                .filter_map(|text| parse_rule(text, RuleEffect::Allow, &[]).ok())
+                .map(|(rule, _)| rule),
+        );
+        rules
+    }
+
     pub fn rule_texts(&self, effect: RuleEffect) -> Vec<&str> {
         self.list(effect)
             .iter()

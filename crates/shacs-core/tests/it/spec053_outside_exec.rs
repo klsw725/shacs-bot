@@ -166,6 +166,7 @@ fn restrict_to_workspace_still_refuses_the_transcript_outside_the_workspace() ->
 fn cron() -> AutomationRunSource {
     AutomationRunSource::Cron {
         job_id: Some("job-1".to_owned()),
+        grant_digest: None,
         work_id: "work-1".to_owned(),
     }
 }

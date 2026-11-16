@@ -21,6 +21,7 @@ pub(crate) fn approval_explanation(
     materials: Option<&PermissionMaterials>,
     evaluator: Option<&AutoEvaluatorVerdict>,
     outside_targets: &[String],
+    cron_list: Option<&str>,
 ) -> ApprovalExplanation {
     let text = |value: Option<&String>| value.cloned().unwrap_or_else(|| "unknown".to_owned());
     let reason_why = match decision.reason {
@@ -36,6 +37,7 @@ pub(crate) fn approval_explanation(
             }
             Some(why)
         }
+        PermissionPolicyReason::CronPermissionList => cron_list.map(str::to_owned),
         PermissionPolicyReason::UserRuleAsk => Some(format!(
             "your ask rule `{}` matches this call.",
             text(materials.and_then(|materials| materials.ask_rule.as_ref()))
@@ -91,6 +93,7 @@ pub(crate) fn approval_explanation(
     let once_only = matches!(
         decision.reason,
         PermissionPolicyReason::SecretFileRead
+            | PermissionPolicyReason::CronPermissionList
             | PermissionPolicyReason::UserRuleAsk
             | PermissionPolicyReason::CriticalPathRemoval
             | PermissionPolicyReason::ProtectedPathThroughSymlink

@@ -15,6 +15,19 @@ pub struct OutsideAccess {
     /// for a `../` in a command. Empty when the tool's own guard refuses them.
     pub targets: Vec<String>,
     pub automation_source: Option<AutomationRunSource>,
+    /// This cron run's approved list, valid now, covers every target (Spec
+    /// 053 PRD 030 scope 6).
+    pub cron_list_covers: bool,
+    /// A `cron add` that carries a permission list (PRD 030 scope 2).
+    pub cron_list_request: Option<CronListRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CronListRequest {
+    /// The list can be approved; the question shows this text.
+    Ask(String),
+    /// The list names something no list may grant.
+    Refused(String),
 }
 
 /// Applied after every other rule. Refusals and questions stand; only an
@@ -60,10 +73,47 @@ pub(crate) fn decide(
     decision
 }
 
-/// A cron job's approved outside-access list. None exists until Spec 053
-/// PRD 030, so cron runs refuse workspace-outside access in every mode.
-const fn cron_list_allows(_input: &PermissionPolicyInput) -> bool {
-    false
+/// A cron run's outside access holds only while the job's approved list,
+/// read for this call, covers every target (Spec 053 PRD 030 scope 6).
+const fn cron_list_allows(input: &PermissionPolicyInput) -> bool {
+    input.outside_access.cron_list_covers
+}
+
+/// A `cron add` with a permission list: refusals stand, except
+/// `dont_ask`'s, and everything else asks once unless the user approved this
+/// very call. Nothing else stands in for the user (Spec 053 PRD 030 scope 2).
+pub(crate) fn decide_cron_list(
+    input: &PermissionPolicyInput,
+    decision: PermissionPolicyDecision,
+) -> PermissionPolicyDecision {
+    let Some(request) = &input.outside_access.cron_list_request else {
+        return decision;
+    };
+    if matches!(request, CronListRequest::Refused(_)) {
+        return refused(PermissionPolicyReason::CronPermissionListRefused);
+    }
+    let mode = input.action.permission_mode_snapshot.mode;
+    let dont_ask_baseline = mode == PermissionMode::DontAsk
+        && decision.reason == PermissionPolicyReason::ModeBaselineDeny;
+    if decision.kind == PermissionPolicyDecisionKind::Deny && !dont_ask_baseline {
+        return decision;
+    }
+    if !input.interactive {
+        return refused(PermissionPolicyReason::CronPermissionListRefused);
+    }
+    // The user's answer to this very call, whatever the mode baseline said
+    // before it was read.
+    if input
+        .materials
+        .as_ref()
+        .is_some_and(|materials| materials.this_call_approved)
+    {
+        return decision;
+    }
+    PermissionPolicyDecision {
+        kind: PermissionPolicyDecisionKind::Ask,
+        ..refused(PermissionPolicyReason::CronPermissionList)
+    }
 }
 
 fn refused(reason: PermissionPolicyReason) -> PermissionPolicyDecision {

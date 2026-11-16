@@ -3246,6 +3246,7 @@ fn subagent_permissioned_action_context_inherits_snapshots_and_origin() -> Resul
         active_workspace: None,
         in_cron_context: false,
         automation_source: None,
+        cron_grant_store: None,
         record_channel_delivery: false,
         cancellation_token: None,
         deadline: None,

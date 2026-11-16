@@ -125,11 +125,13 @@ fn precedence_for_decision(decision: &PermissionPolicyDecision) -> StaticPolicyP
         | PermissionPolicyReason::BrowserLockWrite
         | PermissionPolicyReason::UserOnlyFileWrite
         | PermissionPolicyReason::ToolRefusal
-        | PermissionPolicyReason::OutsideWorkspaceUnattended => {
+        | PermissionPolicyReason::OutsideWorkspaceUnattended
+        | PermissionPolicyReason::CronPermissionListRefused => {
             StaticPolicyPrecedence::StaticDenyWins
         }
         PermissionPolicyReason::StaticAskRequired
         | PermissionPolicyReason::UserRuleAsk
+        | PermissionPolicyReason::CronPermissionList
         | PermissionPolicyReason::SecretFileRead
         | PermissionPolicyReason::CriticalPathRemoval
         | PermissionPolicyReason::ProtectedPathThroughSymlink
@@ -190,7 +192,8 @@ fn success_disposition(decision: &PermissionPolicyDecision) -> ClassifierDisposi
         | PermissionPolicyReason::BrowserLockWrite
         | PermissionPolicyReason::UserOnlyFileWrite
         | PermissionPolicyReason::ToolRefusal
-        | PermissionPolicyReason::OutsideWorkspaceUnattended => {
+        | PermissionPolicyReason::OutsideWorkspaceUnattended
+        | PermissionPolicyReason::CronPermissionListRefused => {
             ClassifierDisposition::NotInvokedStaticPolicy
         }
         PermissionPolicyReason::StaticAskRequired
@@ -201,6 +204,7 @@ fn success_disposition(decision: &PermissionPolicyDecision) -> ClassifierDisposi
         | PermissionPolicyReason::ProtectedPathThroughSymlink
         | PermissionPolicyReason::OutsideWorkspaceThroughSymlink
         | PermissionPolicyReason::OutsideWorkspaceAccess
+        | PermissionPolicyReason::CronPermissionList
         | PermissionPolicyReason::WorkspaceRead
         | PermissionPolicyReason::WorkspaceEdit
         | PermissionPolicyReason::EvaluatorAllow

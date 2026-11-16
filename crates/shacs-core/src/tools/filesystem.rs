@@ -215,17 +215,20 @@ pub(crate) fn raw_candidate_path(path: &str, context: &PathContext) -> PathBuf {
 /// or the requested one when nothing exists there yet. A path that cannot be
 /// worked out is no target; the tool reports its error when it runs (Spec
 /// 053 PRD 020 scope 3).
-pub(crate) fn outside_target(path: &str, context: &PathContext) -> Option<String> {
+pub(crate) fn outside_target(path: &str, context: &PathContext) -> Vec<String> {
     if !context.outside_by_decision || context.allowed_dir.is_none() {
-        return None;
+        return Vec::new();
     }
     // The real path is worked out as the tool will: the path as written
     // when it exists, so `link/..` follows the link before going up.
     let candidate = raw_candidate_path(path, context);
     let requested = normalize_lexical(&candidate).ok();
-    let real = fs::canonicalize(&candidate)
+    let Some(real) = fs::canonicalize(&candidate)
         .ok()
-        .or_else(|| requested.as_deref().and_then(creatable_real_path))?;
+        .or_else(|| requested.as_deref().and_then(creatable_real_path))
+    else {
+        return Vec::new();
+    };
     let roots = allowed_roots(context);
     let lexical_roots: Vec<PathBuf> = context
         .allowed_dir
@@ -239,7 +242,16 @@ pub(crate) fn outside_target(path: &str, context: &PathContext) -> Option<String
         .as_ref()
         .is_some_and(|requested| lexical_roots.iter().any(|root| requested.starts_with(root)));
     let real_inside = roots.iter().any(|root| real.starts_with(root));
-    (!(requested_inside && real_inside)).then(|| real.display().to_string())
+    if requested_inside && real_inside {
+        return Vec::new();
+    }
+    // The path as asked for is named too when it lies outside elsewhere, so
+    // an approved list must cover both (Spec 053 PRD 030 scope 6).
+    let mut targets = vec![real.display().to_string()];
+    if let Some(requested) = requested.filter(|requested| !requested_inside && *requested != real) {
+        targets.push(requested.display().to_string());
+    }
+    targets
 }
 
 /// Where a path that does not exist yet would be created: its nearest
@@ -265,9 +277,8 @@ pub(crate) fn path_outside_targets(
         .get(key)
         .and_then(Value::as_str)
         .or(default)
-        .and_then(|path| outside_target(path, context))
-        .into_iter()
-        .collect()
+        .map(|path| outside_target(path, context))
+        .unwrap_or_default()
 }
 
 fn allowed_roots(context: &PathContext) -> Vec<PathBuf> {
