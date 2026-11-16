@@ -20,6 +20,11 @@ pub(super) fn tool_call_execution_context(
     if let Some(deadline) = context.deadline {
         provider_invocation = provider_invocation.with_deadline(deadline);
     }
+    let approved_outside = evaluation
+        .outside_targets()
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
     let execution = if action.capabilities.contains(&SafetyCapability::ProcExec) {
         ToolCallExecutionContext::new(
             process_gate_input_for_action(registry, action, evaluation).ok(),
@@ -59,7 +64,8 @@ pub(super) fn tool_call_execution_context(
                 .unwrap_or_default(),
         }
     }))
-    .with_hidden_paths(context.permission_environment.clone());
+    .with_hidden_paths(context.permission_environment.clone())
+    .with_approved_outside(approved_outside);
     match (
         action.capabilities.contains(&SafetyCapability::ProcExec),
         context.cancellation_token.as_ref(),

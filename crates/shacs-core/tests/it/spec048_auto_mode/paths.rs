@@ -358,6 +358,8 @@ fn attachments_reads_without_a_range_and_sandboxed_exec_follow_the_table() -> Te
         allowed_dir: None,
         media_dir: None,
         extra_allowed_dirs: Vec::new(),
+        outside_by_decision: false,
+        approved_outside: None,
     }));
 
     // When

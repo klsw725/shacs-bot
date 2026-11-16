@@ -1,10 +1,10 @@
 use crate::tools::filesystem::{
-    raw_candidate_path, reject_existing_symlink_components, resolve_creatable_path, resolve_path,
-    PathContext,
+    path_outside_targets, raw_candidate_path, reject_existing_symlink_components,
+    resolve_creatable_path, resolve_path, PathContext,
 };
 use crate::tools::{
-    FileState, IntegerSchema, JsonMap, SchemaFragment, StringSchema, Tool, ToolParameters,
-    ToolResult,
+    FileState, IntegerSchema, JsonMap, SchemaFragment, StringSchema, Tool,
+    ToolCallExecutionContext, ToolParameters, ToolResult,
 };
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -82,6 +82,10 @@ impl Tool for NotebookEditTool {
             .to_json_schema()
     }
 
+    fn outside_workspace_targets(&self, params: &JsonMap) -> Vec<String> {
+        path_outside_targets(params, "path", None, &self.context)
+    }
+
     fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
         let path = params.get("path").and_then(Value::as_str)?;
         let candidate = raw_candidate_path(path, &self.context);
@@ -98,6 +102,24 @@ impl Tool for NotebookEditTool {
     }
 
     fn execute(&self, params: JsonMap) -> ToolResult {
+        self.execute_with_context(params, &ToolCallExecutionContext::default())
+    }
+
+    fn execute_with_context(
+        &self,
+        params: JsonMap,
+        context: &ToolCallExecutionContext,
+    ) -> ToolResult {
+        Self {
+            context: self.context.executing(context.approved_outside()),
+            ..self.clone()
+        }
+        .run(params)
+    }
+}
+
+impl NotebookEditTool {
+    fn run(&self, params: JsonMap) -> ToolResult {
         let path = params
             .get("path")
             .and_then(Value::as_str)

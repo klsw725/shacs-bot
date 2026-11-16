@@ -1,6 +1,6 @@
 use crate::tools::filesystem::{
-    entry_is_symlink, hard_links_into_store, ignored_name, resolve_path, sorted_read_dir,
-    PathContext,
+    entry_is_symlink, hard_links_into_store, ignored_name, path_outside_targets, resolve_path,
+    sorted_read_dir, PathContext,
 };
 use crate::tools::{
     BooleanSchema, IntegerSchema, JsonMap, SchemaFragment, StringSchema, Tool,
@@ -82,6 +82,10 @@ impl Tool for GlobTool {
         true
     }
 
+    fn outside_workspace_targets(&self, params: &JsonMap) -> Vec<String> {
+        path_outside_targets(params, "path", Some("."), &self.context)
+    }
+
     fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
         let path = params.get("path").and_then(Value::as_str).unwrap_or(".");
         resolve_path(path, &self.context)
@@ -98,6 +102,9 @@ impl Tool for GlobTool {
         params: JsonMap,
         context: &ToolCallExecutionContext,
     ) -> ToolResult {
+        let tool = Self {
+            context: self.context.executing(context.approved_outside()),
+        };
         let pattern = params
             .get("pattern")
             .and_then(Value::as_str)
@@ -128,7 +135,7 @@ impl Tool for GlobTool {
             offset,
             entry_type,
         };
-        match self.glob(&request, &|path| context.hides(path)) {
+        match tool.glob(&request, &|path| context.hides(path)) {
             Ok(text) => text.into(),
             Err(error) => format!("Error finding files: {error}").into(),
         }
@@ -249,6 +256,10 @@ impl Tool for GrepTool {
         true
     }
 
+    fn outside_workspace_targets(&self, params: &JsonMap) -> Vec<String> {
+        path_outside_targets(params, "path", Some("."), &self.context)
+    }
+
     fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
         let path = params.get("path").and_then(Value::as_str).unwrap_or(".");
         resolve_path(path, &self.context)
@@ -265,7 +276,10 @@ impl Tool for GrepTool {
         params: JsonMap,
         context: &ToolCallExecutionContext,
     ) -> ToolResult {
-        match self.grep(params, &|path| context.hides(path)) {
+        let tool = Self {
+            context: self.context.executing(context.approved_outside()),
+        };
+        match tool.grep(params, &|path| context.hides(path)) {
             Ok(text) => text.into(),
             Err(error) => format!("Error searching files: {error}").into(),
         }

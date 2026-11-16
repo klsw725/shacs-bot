@@ -322,14 +322,19 @@ fn folders_after_cd(folders: &WorkingFolders, words: &[ShellWord], home: &Path) 
 
 /// Resolves a word written as a path against `folder`, expanding `~`.
 pub(crate) fn join_word(folder: &Path, text: &str, home: &Path) -> PathBuf {
-    let joined = if text == "~" {
+    normalize(&join_word_as_written(folder, text, home))
+}
+
+/// As `join_word`, keeping `..` where it is written, so a symlink before it
+/// is followed first, as opening the path does.
+pub(crate) fn join_word_as_written(folder: &Path, text: &str, home: &Path) -> PathBuf {
+    if text == "~" {
         home.to_path_buf()
     } else if let Some(rest) = text.strip_prefix("~/") {
         home.join(rest)
     } else {
         folder.join(text)
-    };
-    normalize(&joined)
+    }
 }
 
 pub(crate) fn normalize(path: &Path) -> PathBuf {

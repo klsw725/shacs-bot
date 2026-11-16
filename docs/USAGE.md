@@ -737,7 +737,7 @@ Context limits는 bounded file bytes, folder entry limit, URL byte limit, provid
 
 1. 정규화 오류, 상속 한도 위반, capability가 없는 tool은 거절합니다(`ask_user`는 허용).
 2. 비밀 파일 쓰기, data 폴더 `runtime/`의 auto mode 표시 파일 쓰기([설정 도구](#설정-도구)), `permissions.deny` 규칙, 기억된 거절은 거절합니다.
-3. tool이 실행 전에 스스로 거절할 호출은 묻지 않고 거절하며, 거절 이유와 우회하지 말라는 안내를 어시스턴트에게 돌려주고 일을 이어 갑니다. 같은 요청에서 실제 tool·거절 종류·대상이 같은 거절의 세 번째에만 `tool_error`로 멈춥니다([도구가 스스로 거절한 뒤](#도구가-스스로-거절한-뒤)). file tool이 허용한 폴더(workspace, media) 밖의 대상, `exec` 안전 장치(`tools.exec`의 deny pattern과 allow pattern, 내부·사설 주소, `restrictToWorkspace`가 켜졌을 때의 `../`와 workspace 밖 절대 경로·`~` 경로)가 막는 명령, 격리 증명이 없는 process 실행이 여기에 듭니다. `restrictToWorkspace`가 꺼져 있으면 `exec`의 workspace 밖 경로는 거절하지 않고 [workspace 밖 접근](#workspace-밖-접근)으로 판정합니다. 공식 container 밖의 native 실행에서는 격리 증명이 없어 `exec`가 시작되지 않습니다.
+3. tool이 실행 전에 스스로 거절할 호출은 묻지 않고 거절하며, 거절 이유와 우회하지 말라는 안내를 어시스턴트에게 돌려주고 일을 이어 갑니다. 같은 요청에서 실제 tool·거절 종류·대상이 같은 거절의 세 번째에만 `tool_error`로 멈춥니다([도구가 스스로 거절한 뒤](#도구가-스스로-거절한-뒤)). `restrictToWorkspace`가 켜졌을 때 file tool이 허용한 폴더(workspace, media) 밖의 대상, `exec` 안전 장치(`tools.exec`의 deny pattern과 allow pattern, 내부·사설 주소, `restrictToWorkspace`가 켜졌을 때의 `../`와 workspace 밖 절대 경로·`~` 경로)가 막는 명령, 격리 증명이 없는 process 실행이 여기에 듭니다. `restrictToWorkspace`가 꺼져 있으면 `exec`와 file tool의 workspace 밖 경로는 거절하지 않고 [workspace 밖 접근](#workspace-밖-접근)으로 판정합니다. 공식 container 밖의 native 실행에서는 격리 증명이 없어 `exec`가 시작되지 않습니다.
 4. `permissions.json`을 읽을 수 없으면 묻습니다.
 5. 승인 질문에서 승인한 바로 그 호출은 허용합니다.
 6. 비밀 파일 읽기, `permissions.ask` 규칙, critical path 제거, symlink를 따라가면 보호 경로인 쓰기는 묻습니다. 이 질문은 한 번 승인(`1`)과 한 번 거절(`2`)만 받고, 다른 답에는 아무것도 실행하지 않고 같은 질문을 다시 보입니다.
@@ -786,7 +786,7 @@ active data 폴더(config 파일이 있는 폴더)의 `auth.json`, 그 원자적
 - `list_dir`·`glob`·`grep`이 폴더를 훑을 때 결과에 나오지 않고 내용도 읽히지 않습니다.
 - 그 파일을 지정해 읽는 action(`read_file`, `path`로 준 `grep`, `cat`, `<` 리디렉션, here-doc이나 `python3 -c` 코드 안의 이름)은 매번 한 번 승인·거절만 받는 질문이 됩니다. 승인하면 내용이 AI provider로 가고 세션 기록에 남습니다.
 - 쓰는 action(`write_file`, `edit_file`, `>`, `tee`, `rm`, `mv` 등)은 거절합니다. hard link와 symlink도 같은 파일로 봅니다.
-- 명령 분석은 셸을 실행하지 않고 글을 나누므로 셸과 똑같이 읽는다고 보장하지 않습니다. 변수로 이어 붙인 경로처럼 글에 이름이 나오지 않는 꼴은 놓칠 수 있습니다. data 폴더가 workspace 밖이면 file tool은 원래 그 파일에 닿지 못합니다. `exec`는 `restrictToWorkspace`가 켜졌을 때만 workspace 밖 절대 경로를 적은 명령을 막고, 꺼져 있으면 [workspace 밖 접근](#workspace-밖-접근)으로 판정합니다. 어느 쪽이든 비밀 파일 규칙은 그 앞에서 걸립니다.
+- 명령 분석은 셸을 실행하지 않고 글을 나누므로 셸과 똑같이 읽는다고 보장하지 않습니다. 변수로 이어 붙인 경로처럼 글에 이름이 나오지 않는 꼴은 놓칠 수 있습니다. data 폴더가 workspace 밖이면 file tool은 `restrictToWorkspace`가 켜졌을 때 그 파일에 닿지 못하고, 꺼져 있으면 [workspace 밖 접근](#workspace-밖-접근)으로 판정합니다. `exec`는 `restrictToWorkspace`가 켜졌을 때만 workspace 밖 절대 경로를 적은 명령을 막고, 꺼져 있으면 [workspace 밖 접근](#workspace-밖-접근)으로 판정합니다. 어느 쪽이든 비밀 파일 규칙은 그 앞에서 걸립니다.
 - file tool에 `.env.json`이나 비밀 파일의 절대 경로를 줘도 묻습니다. 다만 `.`·`/`·`~`로 시작하면서 `.env`·`auth`·`token` 같은 낱말이 든 명령(`/bin/cat .env.json`)은 redaction이 명령 글을 통째로 가려 판정할 수 없으므로 묻지 않고 거절됩니다.
 - `.env.json`의 8자 이상인 값이 호출 인자나 사용자 메시지에 들어 있으면 승인 질문, diagnostics, classifier 요청에서 `[secret 이름]`으로 가려집니다. 판정은 가리기 전 인자로 합니다. 그런 호출의 질문은 한 번 승인·거절만 받고 기억되지 않습니다. 8자보다 짧은 값이나 모양을 바꾼 값은 가리지 못하고, 8자 이상이면 흔한 글(`production` 같은 env 값)도 가려집니다. turn을 시작할 때 `.env.json`을 읽지 못하면 앞서 읽은 값으로 계속 가리고, 그 turn에는 classifier를 부르지 않습니다(판정 없음).
 
@@ -858,6 +858,8 @@ workspace guard 안내에는 사용자가 `tools.restrictToWorkspace`를 끌 수
 - `auto` mode: workspace 밖 읽기·쓰기는 바로 허용되지 않고 classifier가 판단합니다. 그 앞의 deny·ask 규칙, 비밀 파일 규칙, critical path, allow 규칙·기억된 허용은 그대로 먼저 걸립니다.
 - 그 밖의 대화형 mode: 판정이 허용이어도 묻습니다. 이번 호출 승인, `permissions.allow` 규칙, 기억된 허용이 허용한 호출은 묻지 않습니다. `dont_ask`에서는 거절하고, `bypass_permissions`는 묻지 않고 실행합니다. 질문에는 workspace 밖 경로가 나옵니다.
 - 사람이 없는 실행(cron, heartbeat, local API, 위임 작업 관찰): mode와 상관없이 거절합니다. cron이 아닌 실행만 `bypass_permissions`에서 실행합니다. cron 실행은 `bypass_permissions`에서도 거절합니다. allow 규칙, 기억된 허용, classifier는 이 거절을 풀지 못합니다.
+
+PRD 020 이후 file tool(`read_file`·`write_file`·`edit_file`·`notebook_edit`·`list_dir`·`glob`·`grep`)도 같습니다. `restrictToWorkspace`가 꺼진 실행에서 workspace·media 폴더 밖 경로, 또는 symlink를 따라가면 그 밖인 경로는 tool이 거절하지 않고 위 판정을 거칩니다. 질문에는 symlink를 따라간 실제 경로가 나옵니다. data 폴더의 `.env.json`과 인증 저장소 읽기는 모든 mode에서 매번 묻고(기억 선택지 없음), 쓰기는 거절합니다. 밖 폴더의 목록·검색에도 비밀 파일은 나오지 않고 symlink는 따라가지 않습니다. 이미 있는 symlink를 지나는 쓰기와 `.shacs-methods/`는 지금처럼 tool이 거절합니다. workspace 밖 file tool 대상은 정확히 그 호출로만 기억됩니다(폴더 단위 기억 없음). `restrictToWorkspace`를 켜면 file tool은 지금처럼 workspace·media 폴더 밖을 거절합니다.
 
 명령의 workspace 밖 경로는 명령 글에서 찾습니다. 변수로 만든 경로나 스크립트 안에서 여는 파일은 찾지 못합니다. 반복 한도로 멈춘 일반 요청은 거절 결과가 마지막 답이고, 이미지·복합 요청은 기존처럼 원문 대신 digest만 보입니다.
 

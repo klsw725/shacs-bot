@@ -90,6 +90,7 @@ impl Setup {
         )?;
         fs::write(data.join("auth").join("oauth.json"), SECRET_TOKEN)?;
         fs::write(media.join("photo.txt"), "attachment text")?;
+        fs::write(home.join("x.txt"), "home file")?;
         fs::write(workspace.join("notes.md"), "workspace notes")?;
         fs::create_dir_all(workspace.join(".git"))?;
         fs::write(workspace.join(".git").join("config"), "[core]")?;
@@ -109,6 +110,8 @@ impl Setup {
             allowed_dir: Some(self.workspace.clone()),
             media_dir: Some(self.media.clone()),
             extra_allowed_dirs: Vec::new(),
+            outside_by_decision: false,
+            approved_outside: None,
         }
     }
 
@@ -161,7 +164,8 @@ impl Setup {
     /// The production file tools, `exec` and recording stand-ins for the
     /// tools the table names by capability.
     pub fn registry(&self, exec: Exec) -> (ToolRegistry, Recorded) {
-        let context = self.path_context();
+        let mut context = self.path_context();
+        context.outside_by_decision = exec == Exec::Open;
         let recorded = Recorded::default();
         let mut registry = ToolRegistry::new();
         registry.register(ReadFileTool::new(context.clone()));
@@ -171,7 +175,7 @@ impl Setup {
         registry.register(GlobTool::new(context.clone()));
         registry.register(GrepTool::new(context.clone()));
         match exec {
-            Exec::Gated => registry.register(GatedExec {
+            Exec::Gated | Exec::Open => registry.register(GatedExec {
                 guard: ExecTool::new(ExecConfig::new(context)),
                 launched: recorded.clone(),
             }),
@@ -271,6 +275,10 @@ pub enum Exec {
     Restricted,
     /// As `Gated`, with no deny patterns, so the guard leaves `rm -rf` alone.
     GatedPermissive,
+    /// As `Gated`, with the file tools also leaving paths outside their
+    /// folders to the decision, as production does with
+    /// `restrictToWorkspace` off (Spec 053 PRD 020 scope 1).
+    Open,
 }
 
 #[derive(Debug, Clone, Default)]

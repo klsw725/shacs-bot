@@ -48,6 +48,8 @@ pub(crate) fn production_tool_registry(
         allowed_dir: Some(workspace.clone()),
         media_dir: Some(media_dir),
         extra_allowed_dirs: Vec::new(),
+        outside_by_decision: !bundle.config.tools.restrict_to_workspace,
+        approved_outside: None,
     };
     let file_state = Arc::new(Mutex::new(FileState::new()));
     let mut registry = ToolRegistry::new();

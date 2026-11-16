@@ -13,6 +13,7 @@ use super::{real_path, shell_command, user_only_file};
 use crate::runtime::PermissionedAction;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 pub(crate) const READ_TOOLS: &[&str] = &["read_file", "list_dir", "glob", "grep", "notebook_read"];
@@ -174,8 +175,12 @@ pub(crate) fn permission_materials(input: MaterialsInput<'_>) -> PermissionMater
     });
     let secret_path = reads
         .iter()
-        .find(|pair| secrets.contains(&pair.requested))
-        .map(|pair| secrets.display_name(&pair.requested));
+        .find_map(|pair| {
+            [&pair.requested, &pair.real]
+                .into_iter()
+                .find(|spelling| secrets.contains(spelling))
+        })
+        .map(|spelling| secrets.display_name(spelling));
     let protected = &environment.protected_paths;
     let protected_write = writes
         .iter()
@@ -193,7 +198,9 @@ pub(crate) fn permission_materials(input: MaterialsInput<'_>) -> PermissionMater
         secret_read_by_text: secret_path.is_none() && text_name.is_some(),
         secret_name: secret_path.or(text_name),
         this_call_approved: false,
-        secret_write: writes.iter().any(|pair| secrets.contains(&pair.requested)),
+        secret_write: writes
+            .iter()
+            .any(|pair| secrets.contains(&pair.requested) || secrets.contains(&pair.real)),
         browser_lock_write: browser_lock_write(
             environment,
             &writes,
@@ -252,8 +259,13 @@ fn file_access(
         .get("path")
         .and_then(Value::as_str)
         .unwrap_or(".");
-    let requested = shell_command::join_word(&environment.workspace, text, &environment.home);
-    Some((access, vec![pair(requested)]))
+    let written =
+        shell_command::join_word_as_written(&environment.workspace, text, &environment.home);
+    let requested = shell_command::normalize(&written);
+    // The file tool opens the path as written, so `link/..` reaches where
+    // the link leads (Spec 053 PRD 020 scope 3).
+    let real = fs::canonicalize(&written).unwrap_or_else(|_| real_path::real_path(&requested));
+    Some((access, vec![PathPair { requested, real }]))
 }
 
 fn pair(requested: PathBuf) -> PathPair {

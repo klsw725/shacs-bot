@@ -8,7 +8,7 @@ use shacs_core::runtime::{
     AutomationExecutionRequirements, AutomationOutcomePolicy, AutomationRunSource,
     ContainmentSnapshotRef, PermissionMode,
 };
-use shacs_core::tools::{JsonMap, Tool, ToolRegistry, ToolResult};
+use shacs_core::tools::{JsonMap, PathContext, ReadFileTool, Tool, ToolRegistry, ToolResult};
 use shacs_eval::evaluator::{
     AutomationExecutionMode, AutomationRunRequest, AutomationRunTriggerKind, AutomationTriggerRef,
 };
@@ -105,8 +105,13 @@ struct Run {
     tool_results: Vec<String>,
 }
 
-/// Runs one automation through the worker in `bypass_permissions`.
-fn run_automation(source: AutomationRunSource, outside: bool) -> Result<Run, Box<dyn Error>> {
+/// Runs one automation through the worker in `bypass_permissions`, calling
+/// `tool` on a file outside or inside the workspace.
+fn run_automation(
+    source: AutomationRunSource,
+    tool: &str,
+    outside: bool,
+) -> Result<Run, Box<dyn Error>> {
     let root = tempfile::tempdir()?;
     let workspace = root.path().join("workspace");
     let path = if outside {
@@ -114,15 +119,22 @@ fn run_automation(source: AutomationRunSource, outside: bool) -> Result<Run, Box
     } else {
         workspace.join("inside.txt")
     };
+    fs::create_dir_all(&workspace)?;
+    fs::write(&path, "outside note")?;
     let written = Arc::new(Mutex::new(Vec::new()));
     let mut tools = ToolRegistry::new();
     tools.register(PathWriter {
         workspace: workspace.clone(),
         written: written.clone(),
     });
+    // The file tools as production registers them with `restrictToWorkspace`
+    // off (Spec 053 PRD 020 scope 1).
+    let mut files = PathContext::workspace(&workspace);
+    files.outside_by_decision = true;
+    tools.register(ReadFileTool::new(files));
     let call = ToolCallRequest::new(
-        "write-1",
-        "mcp_notes_write",
+        "call-1",
+        tool,
         json!({"path": path.display().to_string()})
             .as_object()
             .cloned()
@@ -197,15 +209,51 @@ fn heartbeat() -> AutomationRunSource {
 #[test]
 fn a_cron_run_is_refused_outside_the_workspace_even_in_bypass() -> TestResult {
     // When
-    let run = run_automation(cron(), true)?;
+    let run = run_automation(cron(), WRITER, true)?;
 
     // Then
     assert!(run.written.is_empty(), "{:?}", run.tool_results);
-    // A PRD 000 refusal: the reason, then the guidance and its count.
+    assert!(refused_unattended(&run), "{:?}", run.tool_results);
+    Ok(())
+}
+
+const WRITER: &str = "mcp_notes_write";
+
+/// A PRD 000 refusal: the reason, then the guidance and its count.
+fn refused_unattended(run: &Run) -> bool {
+    run.tool_results.iter().any(|result| {
+        result.contains("reaches outside the workspace in an unattended run")
+            && result.contains("Refusal repetition: 1/3 in this request.")
+    })
+}
+
+#[test]
+fn a_cron_run_cannot_read_a_file_outside_the_workspace_even_in_bypass() -> TestResult {
+    // When
+    let run = run_automation(cron(), "read_file", true)?;
+
+    // Then
+    assert!(refused_unattended(&run), "{:?}", run.tool_results);
     assert!(
-        run.tool_results.iter().any(|result| result
-            .contains("reaches outside the workspace in an unattended run")
-            && result.contains("Refusal repetition: 1/3 in this request.")),
+        !run.tool_results
+            .iter()
+            .any(|result| result.contains("outside note")),
+        "{:?}",
+        run.tool_results
+    );
+    Ok(())
+}
+
+#[test]
+fn a_heartbeat_run_in_bypass_reads_a_file_outside_the_workspace() -> TestResult {
+    // When
+    let run = run_automation(heartbeat(), "read_file", true)?;
+
+    // Then
+    assert!(
+        run.tool_results
+            .iter()
+            .any(|result| result.contains("outside note")),
         "{:?}",
         run.tool_results
     );
@@ -215,7 +263,7 @@ fn a_cron_run_is_refused_outside_the_workspace_even_in_bypass() -> TestResult {
 #[test]
 fn a_heartbeat_run_in_bypass_writes_outside_the_workspace() -> TestResult {
     // When
-    let run = run_automation(heartbeat(), true)?;
+    let run = run_automation(heartbeat(), WRITER, true)?;
 
     // Then
     assert_eq!(run.written.len(), 1, "{:?}", run.tool_results);
@@ -225,7 +273,7 @@ fn a_heartbeat_run_in_bypass_writes_outside_the_workspace() -> TestResult {
 #[test]
 fn a_cron_run_inside_the_workspace_is_unchanged() -> TestResult {
     // When
-    let run = run_automation(cron(), false)?;
+    let run = run_automation(cron(), WRITER, false)?;
 
     // Then
     assert_eq!(run.written.len(), 1, "{:?}", run.tool_results);

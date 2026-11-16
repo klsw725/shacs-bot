@@ -28584,6 +28584,8 @@ mod tests {
             allowed_dir: Some(workspace.clone()),
             media_dir: Some(bundle.context.media_dir(Some("api"))),
             extra_allowed_dirs: Vec::new(),
+            outside_by_decision: false,
+            approved_outside: None,
         };
         let mut exec_config = ExecConfig::new(path_context);
         exec_config.restrict_to_workspace = true;
@@ -35981,6 +35983,8 @@ mod tests {
             allowed_dir: Some(workspace.clone()),
             media_dir: Some(media_dir.clone()),
             extra_allowed_dirs: Vec::new(),
+            outside_by_decision: false,
+            approved_outside: None,
         };
         let mut tools = ToolRegistry::new();
         tools.register(WriteFileTool::new(path_context));
@@ -36491,6 +36495,8 @@ mod tests {
             allowed_dir: Some(workspace.clone()),
             media_dir: Some(media_dir.clone()),
             extra_allowed_dirs: Vec::new(),
+            outside_by_decision: false,
+            approved_outside: None,
         }));
         let adapter = AgentLoopChatCompletionAdapter {
             configured_model: "openai/gpt-5".to_owned(),

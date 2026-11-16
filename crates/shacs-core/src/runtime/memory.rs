@@ -530,6 +530,8 @@ impl<'a> DreamProcessor<'a> {
                 allowed_dir: Some(skills_dir),
                 media_dir: None,
                 extra_allowed_dirs: Vec::new(),
+                outside_by_decision: false,
+                approved_outside: None,
             },
             file_state,
         ));

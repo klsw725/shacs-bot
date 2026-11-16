@@ -5,7 +5,7 @@ use crate::runtime::{
 };
 use serde_json::{json, Map, Value};
 use shacs_providers::ProviderInvocation;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod casting;
@@ -103,6 +103,7 @@ pub struct ToolCallExecutionContext {
     pub(crate) process_abort: Option<ControlledChildAbort>,
     provider_invocation: Option<ProviderInvocation>,
     hidden_paths: Option<Arc<PermissionEnvironment>>,
+    approved_outside: Vec<PathBuf>,
 }
 
 impl ToolCallExecutionContext {
@@ -115,7 +116,19 @@ impl ToolCallExecutionContext {
             process_abort: None,
             provider_invocation: None,
             hidden_paths: None,
+            approved_outside: Vec::new(),
         }
+    }
+
+    /// The workspace-outside paths the permission decision allowed this call
+    /// to use (Spec 053 PRD 020 scope 2).
+    pub fn with_approved_outside(mut self, paths: Vec<PathBuf>) -> Self {
+        self.approved_outside = paths;
+        self
+    }
+
+    pub fn approved_outside(&self) -> &[PathBuf] {
+        &self.approved_outside
     }
 
     pub fn with_hidden_paths(mut self, environment: Option<Arc<PermissionEnvironment>>) -> Self {

@@ -1507,6 +1507,8 @@ pub fn build_subagent_tool_registry(config: &SubagentExecutionConfig) -> ToolReg
             .as_ref()
             .map(|settings| settings.media_root.clone()),
         extra_allowed_dirs: Vec::new(),
+        outside_by_decision: false,
+        approved_outside: None,
     };
     let file_state = Arc::new(Mutex::new(FileState::new()));
     let mut registry = ToolRegistry::new();

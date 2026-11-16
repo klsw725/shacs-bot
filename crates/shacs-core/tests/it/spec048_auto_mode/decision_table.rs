@@ -64,7 +64,7 @@ fn rows() -> Vec<Row> {
             cells: [Run, Run, Unused, Ask, Deny],
         },
         Row {
-            name: "read outside the file tool range",
+            name: "read outside the file tool range with restrictToWorkspace",
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
@@ -83,6 +83,23 @@ fn rows() -> Vec<Row> {
                 Refuse("Error reading file:"),
                 Deny,
             ],
+        },
+        // Spec 053 PRD 020 scope 4: without `restrictToWorkspace` the file
+        // tool leaves the path to the decision, which never allows it outright.
+        Row {
+            name: "read outside the file tool range without restrictToWorkspace",
+            workspace_is_data: false,
+            exec: Exec::Open,
+            contained: true,
+            outside_workspace: true,
+            call: |setup| ("read_file", json!({"path": setup.home.join("x.txt")})),
+            rules: [
+                "read(/{home}/x.txt)",
+                "read",
+                "read(/{home}/**)",
+                "read(/{home}/**)",
+            ],
+            cells: [Classifier, Run, Run, Ask, Deny],
         },
         Row {
             name: "exec the safety guard refuses",

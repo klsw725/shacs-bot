@@ -35,6 +35,15 @@ pub struct PathContext {
     pub allowed_dir: Option<PathBuf>,
     pub media_dir: Option<PathBuf>,
     pub extra_allowed_dirs: Vec<PathBuf>,
+    /// With `restrictToWorkspace` off, a path outside the allowed folders is
+    /// left to the permission decision instead of refused here. Off by
+    /// default, so only the production registry turns it on (Spec 053 PRD
+    /// 020 scope 1).
+    pub outside_by_decision: bool,
+    /// While one call runs: the outside paths its permission decision
+    /// allowed, so a path that changed after the decision is refused.
+    /// `None` while the call is being decided (Spec 053 PRD 020 scope 2).
+    pub approved_outside: Option<Vec<PathBuf>>,
 }
 
 impl PathContext {
@@ -45,7 +54,28 @@ impl PathContext {
             allowed_dir: Some(path),
             media_dir: None,
             extra_allowed_dirs: Vec::new(),
+            outside_by_decision: false,
+            approved_outside: None,
         }
+    }
+
+    /// This context for running one call, with the outside paths its
+    /// permission decision allowed.
+    pub(crate) fn executing(&self, approved: &[PathBuf]) -> Self {
+        Self {
+            approved_outside: Some(approved.to_vec()),
+            ..self.clone()
+        }
+    }
+
+    /// Whether `resolved`, outside the allowed folders, may be used: it is
+    /// being decided, or the decision allowed exactly this path.
+    fn outside_allowed(&self, resolved: &Path) -> bool {
+        self.outside_by_decision
+            && self
+                .approved_outside
+                .as_ref()
+                .is_none_or(|approved| approved.iter().any(|path| path == resolved))
     }
 }
 
@@ -71,7 +101,7 @@ pub fn resolve_path(path: &str, context: &PathContext) -> Result<PathBuf, String
                 .map(|directory| resolved.starts_with(directory))
                 .unwrap_or(false)
         });
-        if !allowed {
+        if !allowed && !context.outside_allowed(&resolved) {
             return Err(format!(
                 "Path {path} is outside allowed directory {}",
                 allowed_dir.display()
@@ -112,7 +142,7 @@ pub(crate) fn resolve_creatable_path(path: &str, context: &PathContext) -> Resul
         let allowed_target = allowed_dirs
             .iter()
             .any(|directory| canonical_target.starts_with(directory));
-        if !(allowed_parent && allowed_target) {
+        if !(allowed_parent && allowed_target) && !context.outside_allowed(&canonical_target) {
             return Err(format!(
                 "Path {path} is outside allowed directory {}",
                 allowed_dir.display()
@@ -178,6 +208,66 @@ pub(crate) fn raw_candidate_path(path: &str, context: &PathContext) -> PathBuf {
     } else {
         expanded
     }
+}
+
+/// The path `path` reaches outside the allowed folders, when this context
+/// leaves such paths to the permission decision: the path symlinks lead to,
+/// or the requested one when nothing exists there yet. A path that cannot be
+/// worked out is no target; the tool reports its error when it runs (Spec
+/// 053 PRD 020 scope 3).
+pub(crate) fn outside_target(path: &str, context: &PathContext) -> Option<String> {
+    if !context.outside_by_decision || context.allowed_dir.is_none() {
+        return None;
+    }
+    // The real path is worked out as the tool will: the path as written
+    // when it exists, so `link/..` follows the link before going up.
+    let candidate = raw_candidate_path(path, context);
+    let requested = normalize_lexical(&candidate).ok();
+    let real = fs::canonicalize(&candidate)
+        .ok()
+        .or_else(|| requested.as_deref().and_then(creatable_real_path))?;
+    let roots = allowed_roots(context);
+    let lexical_roots: Vec<PathBuf> = context
+        .allowed_dir
+        .iter()
+        .chain(context.media_dir.iter())
+        .chain(context.extra_allowed_dirs.iter())
+        .cloned()
+        .chain(roots.iter().cloned())
+        .collect();
+    let requested_inside = requested
+        .as_ref()
+        .is_some_and(|requested| lexical_roots.iter().any(|root| requested.starts_with(root)));
+    let real_inside = roots.iter().any(|root| real.starts_with(root));
+    (!(requested_inside && real_inside)).then(|| real.display().to_string())
+}
+
+/// Where a path that does not exist yet would be created: its nearest
+/// existing parent with symlinks followed, and the rest as written.
+fn creatable_real_path(normalized: &Path) -> Option<PathBuf> {
+    let parent = normalized
+        .ancestors()
+        .skip(1)
+        .find(|parent| parent.exists())?;
+    let suffix = normalized.strip_prefix(parent).ok()?;
+    Some(fs::canonicalize(parent).ok()?.join(suffix))
+}
+
+/// The `outside_workspace_targets` of a file tool whose path argument is
+/// `key`, or `default` when the call leaves it out.
+pub(crate) fn path_outside_targets(
+    params: &JsonMap,
+    key: &str,
+    default: Option<&str>,
+    context: &PathContext,
+) -> Vec<String> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .or(default)
+        .and_then(|path| outside_target(path, context))
+        .into_iter()
+        .collect()
 }
 
 fn allowed_roots(context: &PathContext) -> Vec<PathBuf> {
@@ -284,6 +374,10 @@ impl Tool for ReadFileTool {
         true
     }
 
+    fn outside_workspace_targets(&self, params: &JsonMap) -> Vec<String> {
+        path_outside_targets(params, "path", None, &self.context)
+    }
+
     fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
         let path = params.get("path").and_then(Value::as_str)?;
         resolve_path(path, &self.context)
@@ -292,6 +386,24 @@ impl Tool for ReadFileTool {
     }
 
     fn execute(&self, params: JsonMap) -> ToolResult {
+        self.execute_with_context(params, &ToolCallExecutionContext::default())
+    }
+
+    fn execute_with_context(
+        &self,
+        params: JsonMap,
+        context: &ToolCallExecutionContext,
+    ) -> ToolResult {
+        Self {
+            context: self.context.executing(context.approved_outside()),
+            ..self.clone()
+        }
+        .run(params)
+    }
+}
+
+impl ReadFileTool {
+    fn run(&self, params: JsonMap) -> ToolResult {
         let path = params
             .get("path")
             .and_then(Value::as_str)
@@ -477,6 +589,10 @@ impl Tool for WriteFileTool {
             .to_json_schema()
     }
 
+    fn outside_workspace_targets(&self, params: &JsonMap) -> Vec<String> {
+        path_outside_targets(params, "path", None, &self.context)
+    }
+
     fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
         let path = params.get("path").and_then(Value::as_str)?;
         resolve_creatable_path(path, &self.context)
@@ -486,6 +602,24 @@ impl Tool for WriteFileTool {
     }
 
     fn execute(&self, params: JsonMap) -> ToolResult {
+        self.execute_with_context(params, &ToolCallExecutionContext::default())
+    }
+
+    fn execute_with_context(
+        &self,
+        params: JsonMap,
+        context: &ToolCallExecutionContext,
+    ) -> ToolResult {
+        Self {
+            context: self.context.executing(context.approved_outside()),
+            ..self.clone()
+        }
+        .run(params)
+    }
+}
+
+impl WriteFileTool {
+    fn run(&self, params: JsonMap) -> ToolResult {
         let path = params
             .get("path")
             .and_then(Value::as_str)
@@ -587,6 +721,10 @@ impl Tool for EditFileTool {
             .to_json_schema()
     }
 
+    fn outside_workspace_targets(&self, params: &JsonMap) -> Vec<String> {
+        path_outside_targets(params, "path", None, &self.context)
+    }
+
     fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
         let path = params.get("path").and_then(Value::as_str)?;
         reject_existing_symlink_components(&raw_candidate_path(path, &self.context))
@@ -597,6 +735,24 @@ impl Tool for EditFileTool {
     }
 
     fn execute(&self, params: JsonMap) -> ToolResult {
+        self.execute_with_context(params, &ToolCallExecutionContext::default())
+    }
+
+    fn execute_with_context(
+        &self,
+        params: JsonMap,
+        context: &ToolCallExecutionContext,
+    ) -> ToolResult {
+        Self {
+            context: self.context.executing(context.approved_outside()),
+            ..self.clone()
+        }
+        .run(params)
+    }
+}
+
+impl EditFileTool {
+    fn run(&self, params: JsonMap) -> ToolResult {
         let path = params
             .get("path")
             .and_then(Value::as_str)
@@ -807,6 +963,10 @@ impl Tool for ListDirTool {
         true
     }
 
+    fn outside_workspace_targets(&self, params: &JsonMap) -> Vec<String> {
+        path_outside_targets(params, "path", None, &self.context)
+    }
+
     fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
         let path = params.get("path").and_then(Value::as_str)?;
         resolve_path(path, &self.context)
@@ -823,6 +983,9 @@ impl Tool for ListDirTool {
         params: JsonMap,
         context: &ToolCallExecutionContext,
     ) -> ToolResult {
+        let tool = Self {
+            context: self.context.executing(context.approved_outside()),
+        };
         let path = params
             .get("path")
             .and_then(Value::as_str)
@@ -837,7 +1000,7 @@ impl Tool for ListDirTool {
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(200);
 
-        match self.list_dir(path, recursive, max_entries, &|path| context.hides(path)) {
+        match tool.list_dir(path, recursive, max_entries, &|path| context.hides(path)) {
             Ok(text) => text.into(),
             Err(error) => format!("Error listing directory: {error}").into(),
         }

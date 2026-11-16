@@ -730,6 +730,11 @@ impl PermissionEvaluation {
         }
     }
 
+    /// The workspace-outside paths this decision covers.
+    pub(crate) fn outside_targets(&self) -> &[String] {
+        &self.policy_materials.outside_access.targets
+    }
+
     pub(crate) fn approval_explanation(&self) -> ApprovalExplanation {
         approval_why::approval_explanation(
             &self.decision,

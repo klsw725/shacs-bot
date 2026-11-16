@@ -158,7 +158,7 @@ cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- permissions revoke <
 
 `exec` 안전 장치와 file tool의 범위 거절은 실패 결과와 우회하지 말라는 안내를 어시스턴트에게 돌려주고 요청을 이어 갑니다. 같은 요청에서 실제 도구·거절 종류·대상이 같은 거절의 세 번째에 `tool_error`로 멈추며, 승인 후 재개도 같은 횟수를 씁니다. `fail_on_tool_error` 실행은 첫 실패에서 멈춥니다. 실행 전에 알 수 있는 거절은 뒤 호출을 시작하기 전에 한도를 확인하며, 실행 중 새로 생긴 거절의 병렬 실행 한계와 설정 안내는 [도구가 스스로 거절한 뒤](docs/USAGE.md#도구가-스스로-거절한-뒤)를 참고하세요.
 
-`restrictToWorkspace`가 꺼져 있으면 `exec`가 workspace 밖 경로를 적어도 안전 장치가 거절하지 않고, auto mode에서는 classifier가, 다른 대화형 mode에서는 사용자가 정합니다. sandbox 설정 유무는 더 이상 이 guard를 켜지 않습니다. 사람이 없는 run(cron, heartbeat, local API)의 workspace 밖 명령은 거절되며, cron이 아닌 run만 `bypass_permissions`에서 실행됩니다. 자세한 내용은 [workspace 밖 접근](docs/USAGE.md#workspace-밖-접근)을 참고하세요. file tool의 접근 범위는 아직 그대로입니다.
+`restrictToWorkspace`가 꺼져 있으면 `exec`가 workspace 밖 경로를 적거나 file tool이 workspace 밖 파일을 다뤄도 tool이 거절하지 않고, auto mode에서는 classifier가, 다른 대화형 mode에서는 사용자가 정합니다. sandbox 설정 유무는 더 이상 이 guard를 켜지 않습니다. 사람이 없는 run(cron, heartbeat, local API)의 workspace 밖 접근은 거절되며, cron이 아닌 run만 `bypass_permissions`에서 실행됩니다. 자세한 내용은 [workspace 밖 접근](docs/USAGE.md#workspace-밖-접근)을 참고하세요. data 폴더의 `.env.json`과 인증 저장소는 file tool로 읽을 때 매번 묻고 쓰기는 거절합니다.
 
 Malformed `permissions.json`은 raw content를 출력하지 않고 fail closed됩니다. Remembered allow는 protected target, static deny, permission ceiling, containment precondition을 우회하지 않으며, 이 기능은 완전한 sandboxing/redaction이나 prompt/tool/repo content 기반 permission grant를 보장하지 않습니다.
 
