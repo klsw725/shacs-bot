@@ -1799,46 +1799,61 @@ fn exec_tool_restricts_working_dir_and_paths_to_workspace() -> Result<(), Box<dy
 }
 
 #[test]
-fn exec_tool_native_unknown_without_backend_enforces_workspace_scope() -> Result<(), Box<dyn Error>>
-{
+fn exec_tool_without_restrict_to_workspace_leaves_outside_paths_to_the_decision(
+) -> Result<(), Box<dyn Error>> {
+    // Spec 053 PRD 010 scopes 1 and 2: without `restrictToWorkspace` the
+    // guard refuses no outside path, with or without a sandbox name, and the
+    // tool reports those paths for the permission decision instead.
     let temp = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
     let outside_file = outside.path().join("secret.txt");
     std::fs::write(&outside_file, "secret")?;
-    let config = ExecConfig::new(PathContext::workspace(temp.path()));
-    if config.restrict_to_workspace || config.sandbox.is_some() {
-        return Err("test setup must exercise native unknown default config".into());
-    }
-    let tool = ExecTool::new(config);
-
-    let bad_cwd = tool
-        .execute(json_map(json!({
-            "command": "printf nope",
-            "working_dir": outside.path().to_string_lossy()
-        }))?)
-        .into_text();
-    if !bad_cwd.contains("working_dir is outside") {
-        return Err(
-            format!("native unknown outside working_dir was not blocked: {bad_cwd}").into(),
-        );
-    }
-
-    let traversal = tool
-        .execute(json_map(json!({ "command": "printf ../secret" }))?)
-        .into_text();
-    if !traversal.contains("path traversal") {
-        return Err(format!("native unknown path traversal was not blocked: {traversal}").into());
-    }
-
-    let absolute = tool
-        .execute(json_map(json!({
-            "command": format!("printf {}", outside_file.to_string_lossy())
-        }))?)
-        .into_text();
-    if !absolute.contains("path outside working dir") {
-        return Err(
-            format!("native unknown absolute outside path was not blocked: {absolute}").into(),
-        );
+    std::fs::create_dir(temp.path().join("sub"))?;
+    let inside_file = temp.path().join("inside.txt");
+    std::fs::write(&inside_file, "inside")?;
+    let outside_dir = std::fs::canonicalize(outside.path())?.display().to_string();
+    let outside_file_real = std::fs::canonicalize(&outside_file)?.display().to_string();
+    let cases = [
+        (
+            json!({"command": "printf nope", "working_dir": outside.path().to_string_lossy()}),
+            vec![outside_dir],
+        ),
+        (
+            json!({"command": "printf ../secret"}),
+            vec!["..".to_owned()],
+        ),
+        (
+            json!({"command": format!("printf {}", outside_file.to_string_lossy())}),
+            vec![outside_file_real],
+        ),
+        (
+            json!({
+                "command": format!("printf {}", inside_file.to_string_lossy()),
+                "working_dir": "sub"
+            }),
+            Vec::new(),
+        ),
+    ];
+    for sandbox in [None, Some("bwrap".to_owned())] {
+        let mut config = ExecConfig::new(PathContext::workspace(temp.path()));
+        config.sandbox = sandbox.clone();
+        if config.restrict_to_workspace {
+            return Err("test setup must leave restrictToWorkspace off".into());
+        }
+        let tool = ExecTool::new(config);
+        for (arguments, expected) in &cases {
+            let params = json_map(arguments.clone())?;
+            if let Some(refusal) = tool.preflight_refusal(&params) {
+                return Err(format!("{sandbox:?} {arguments}: refused {refusal}").into());
+            }
+            let targets = tool.outside_workspace_targets(&params);
+            if &targets != expected {
+                return Err(format!(
+                    "{sandbox:?} {arguments}: targets {targets:?}, expected {expected:?}"
+                )
+                .into());
+            }
+        }
     }
     Ok(())
 }

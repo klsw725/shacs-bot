@@ -1,4 +1,5 @@
 use crate::runtime::auto_mode::action_materials::{self, StandingApprovals};
+use crate::runtime::auto_mode::action_secrets::mask_shown;
 use crate::runtime::auto_mode::{approval_why, blocked_call};
 use crate::runtime::permission_action::normalize_prepared_runtime_tool_call;
 use crate::runtime::permission_pattern::{
@@ -10,12 +11,12 @@ use crate::runtime::{
     correlate_policy_safety_snapshot_ref, decide_permission, evaluate_static_rules,
     normalize_runtime_tool_call, ActionNormalizationError, ApprovalCacheEntry, ApprovalCorrelation,
     ApprovalCorrelationError, ApprovalDecisionKind, ApprovalExplanation, ApprovalRequest,
-    AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, AutoModeEscalation, ContainmentSnapshotRef,
-    EvaluatorConfidence, EvaluatorScopeMatch, InheritedPermissionContext,
-    PermissionCeilingSnapshot, PermissionEnvironment, PermissionMode, PermissionModeSnapshot,
-    PermissionPolicyDecision, PermissionPolicyDecisionKind, PermissionPolicyInput,
-    PermissionPolicyReason, PermissionRuleInput, PermissionedAction, PermissionedActionInput,
-    PermissionedActionOrigin, ProcExecSummary, ProcessAdapterKind,
+    AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, AutoModeEscalation, AutomationRunSource,
+    ContainmentSnapshotRef, EvaluatorConfidence, EvaluatorScopeMatch, InheritedPermissionContext,
+    OutsideAccess, PermissionCeilingSnapshot, PermissionEnvironment, PermissionMode,
+    PermissionModeSnapshot, PermissionPolicyDecision, PermissionPolicyDecisionKind,
+    PermissionPolicyInput, PermissionPolicyReason, PermissionRuleInput, PermissionedAction,
+    PermissionedActionInput, PermissionedActionOrigin, ProcExecSummary, ProcessAdapterKind,
     ProcessContainmentProofCandidate, ProcessEnvelopeAdmission, ProcessExecutionEnvelope,
     ProcessExecutionEnvelopeInput, ProcessGateInput, ProcessGatePolicyMaterials,
     ProcessGateTerminalPrecondition, ProcessIdentity, ProcessRedactedCommand,
@@ -241,6 +242,10 @@ pub struct ToolExecutionContext {
     #[serde(skip, default)]
     pub permission_environment: Option<Arc<PermissionEnvironment>>,
     pub in_cron_context: bool,
+    /// Set only by the automation worker from the stored work envelope, never
+    /// from stored or model-supplied data (Spec 053 PRD 010 scope 8).
+    #[serde(skip, default)]
+    pub automation_source: Option<AutomationRunSource>,
     pub record_channel_delivery: bool,
     #[serde(skip, default)]
     pub cancellation_token: Option<crate::runtime::CancellationToken>,
@@ -273,6 +278,7 @@ impl Default for ToolExecutionContext {
             active_workspace: None,
             permission_environment: None,
             in_cron_context: false,
+            automation_source: None,
             record_channel_delivery: false,
             cancellation_token: None,
             deadline: None,
@@ -683,6 +689,9 @@ pub(crate) struct PermissionEvaluation {
     /// session's browser): the model needs that reason to look again (Spec
     /// 049 PRD 030 scope 3).
     browser_refusal: Option<String>,
+    /// The outside targets as a question shows them: `.env.json` values
+    /// masked. The decision keeps the raw ones (Spec 053 PRD 010 scope 7).
+    shown_outside_targets: Vec<String>,
     pub(crate) decision: PermissionPolicyDecision,
 }
 
@@ -726,6 +735,7 @@ impl PermissionEvaluation {
             &self.decision,
             self.policy_materials.materials.as_ref(),
             self.evaluator.as_ref(),
+            &self.shown_outside_targets,
         )
     }
 }
@@ -820,11 +830,16 @@ pub(crate) fn permission_evaluation_for_action(
                 }),
         },
     );
+    let outside_access = OutsideAccess {
+        targets: outside_workspace_targets(registry, action),
+        automation_source: context.automation_source.clone(),
+    };
     let policy_materials = ProcessGatePolicyMaterials {
         browser_start: None,
         remembered_rules: remembered_rules.clone(),
         remembered_store_unavailable: project_state.store_unavailable,
         materials,
+        outside_access: outside_access.clone(),
     };
     let mut decision = decide_permission(PermissionPolicyInput {
         action: action.clone(),
@@ -836,6 +851,7 @@ pub(crate) fn permission_evaluation_for_action(
         remembered_store_unavailable: project_state.store_unavailable,
         interactive: context.permission_interactive,
         materials: policy_materials.materials.clone(),
+        outside_access,
     });
     // The classifier reviewed one target; a changed target after review is
     // refused. An existing refusal (ceiling, rule, argument error) keeps its
@@ -864,12 +880,20 @@ pub(crate) fn permission_evaluation_for_action(
                 })
         })
         .flatten();
+    let environment = context.permission_environment.as_deref();
+    let shown_outside_targets = policy_materials
+        .outside_access
+        .targets
+        .iter()
+        .map(|target| mask_shown(environment, target))
+        .collect();
     PermissionEvaluation {
         rule_input,
         evaluator,
         approval,
         inherited_context,
         interactive: context.permission_interactive,
+        shown_outside_targets,
         policy_materials,
         browser_refusal,
         decision,
@@ -1493,6 +1517,8 @@ pub(crate) fn permission_block_message(
     let content = if decision.reason == PermissionPolicyReason::BrowserLockWrite {
         // Spec 050 PRD 020 scope 6: a fixed text with the reason's code.
         format!("{label}: {BROWSER_LOCK_WRITE_TEXT} (browser_lock_write)")
+    } else if decision.reason == PermissionPolicyReason::OutsideWorkspaceUnattended {
+        unattended_outside_block_text()
     } else {
         format!(
             "{label}: tool call was not executed (reason: {:?}).",
@@ -1506,6 +1532,34 @@ pub(crate) fn permission_block_message(
         content,
     }
 }
+
+/// The paths the call names outside the workspace, from the tool itself
+/// (Spec 053 PRD 010 scope 2). The decision and refusal counting both use it.
+pub(crate) fn outside_workspace_targets(
+    registry: &ToolRegistry,
+    action: &PermissionedAction,
+) -> Vec<String> {
+    registry
+        .get(&action.tool_name)
+        .and_then(|tool| {
+            action
+                .decision_arguments()
+                .as_object()
+                .map(|params| tool.outside_workspace_targets(params))
+        })
+        .unwrap_or_default()
+}
+
+/// The whole result of an unattended workspace-outside refusal. Only this
+/// exact text is that refusal; a classifier reason quoting the phrase is not
+/// (Spec 053 PRD 010 scope 9).
+pub(crate) fn unattended_outside_block_text() -> String {
+    format!("Permission denied: tool call was not executed ({UNATTENDED_OUTSIDE_TEXT}).")
+}
+
+/// `RefusalKind::from_text` recognizes this phrase (Spec 053 PRD 010 scope 9).
+pub(crate) const UNATTENDED_OUTSIDE_TEXT: &str =
+    "it reaches outside the workspace in an unattended run, where nobody can approve it";
 
 const BROWSER_LOCK_WRITE_TEXT: &str = "브라우저 lock 파일은 바꿀 수 없습니다.";
 

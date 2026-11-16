@@ -7,8 +7,8 @@ use super::runner_spec034::{
 use crate::runtime::auto_mode::{blocked_call, classifier_review, result_check};
 use crate::runtime::quiet_tools::quiet_tool_calls;
 use crate::runtime::tool_execution::{
-    effective_permission_rule_input, permission_decision_for_action,
-    permissioned_action_input_from_context,
+    effective_permission_rule_input, outside_workspace_targets, permission_decision_for_action,
+    permissioned_action_input_from_context, unattended_outside_block_text,
 };
 use crate::runtime::tool_refusal::{RefusalKind, ToolRefusal};
 use crate::runtime::tool_refusals::ToolRefusals;
@@ -1703,7 +1703,12 @@ fn admit_tool_refusal(
 ) {
     let decision = (!executed_call_ids.contains(&message.tool_call_id))
         .then(|| permission_decision_for_action(spec.tools, action, context));
-    if auto_mode_run(context)
+    // A bridge call's admission context lacks the classifier verdict its
+    // decision used, so the exact unattended refusal text decides here
+    // (Spec 053 PRD 010 scope 9).
+    let unattended = message.content == unattended_outside_block_text();
+    if !unattended
+        && auto_mode_run(context)
         && decision.as_ref().is_some_and(|decision| {
             decision.kind == PermissionPolicyDecisionKind::Deny
                 && matches!(
@@ -1722,7 +1727,11 @@ fn admit_tool_refusal(
             .then_some(RefusalKind::ToolPreflight)
     });
     let Some(kind) = kind else { return };
-    let refusal = ToolRefusal::for_action(action, kind, context);
+    let refusal = if kind == RefusalKind::UnattendedOutside {
+        ToolRefusal::with_targets(action, kind, &outside_workspace_targets(spec.tools, action))
+    } else {
+        ToolRefusal::for_action(action, kind, context)
+    };
     let decision = spec.tool_refusals.admit(
         &refusal,
         message,
@@ -2131,7 +2140,13 @@ fn auto_mode_reviewed_context(
             .map(|reviewed| reviewed.attempt.verdict.clone())
     });
     let mut final_decision = permission_decision_for_action(executor.registry(), action, &context);
-    let blocks = if final_decision.kind == PermissionPolicyDecisionKind::Allow {
+    // The classifier or a rule allowed it; only nobody being there to approve
+    // workspace-outside access refused it. That is a tool refusal for Spec
+    // 053 PRD 000, not a classifier block (Spec 053 PRD 010 scope 9).
+    let unattended_refusal =
+        final_decision.reason == PermissionPolicyReason::OutsideWorkspaceUnattended;
+    let blocks = if final_decision.kind == PermissionPolicyDecisionKind::Allow || unattended_refusal
+    {
         Some((spec.auto_mode_blocks.allowed(), None))
     } else if turn_ended(spec) {
         context.permission_evaluator = Some(blocked_call::turn_ended_verdict(
@@ -2149,7 +2164,7 @@ fn auto_mode_reviewed_context(
     };
     if final_decision.kind == PermissionPolicyDecisionKind::Allow {
         spec.auto_mode_blocks.mark_ran(review.pending_call_id);
-    } else {
+    } else if !unattended_refusal {
         spec.auto_mode_blocks.mark_not_run(review.pending_call_id);
     }
     if let (Some(reviewed), Some(classifier)) = (reviewed, classifier) {
@@ -2173,7 +2188,8 @@ fn auto_mode_reviewed_context(
     }
     let verdict = context.permission_evaluator.as_ref();
     let blocks = blocks.map(|(counts, escalation)| AutoModeBlockDiagnostics {
-        outcome: if final_decision.kind == PermissionPolicyDecisionKind::Allow {
+        outcome: if final_decision.kind == PermissionPolicyDecisionKind::Allow || unattended_refusal
+        {
             "allowed"
         } else if blocked_call::blocked(verdict) {
             "blocked"

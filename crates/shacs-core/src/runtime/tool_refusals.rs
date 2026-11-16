@@ -115,6 +115,9 @@ impl ToolRefusals {
                 RefusalKind::InternalUrl => message.content.push_str(
                     " The user can configure tools.ssrfWhitelist for an intended internal URL.",
                 ),
+                RefusalKind::UnattendedOutside => message.content.push_str(
+                    " Nobody can approve workspace-outside access in an unattended run; keep the work inside the workspace.",
+                ),
                 RefusalKind::WorkingDirectory
                 | RefusalKind::FileRange
                 | RefusalKind::DenyPattern

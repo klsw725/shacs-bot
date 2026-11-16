@@ -12,6 +12,7 @@ mod automation_gates;
 mod automation_lifecycle;
 mod automation_payload;
 mod automation_production;
+mod automation_run_source;
 mod browser_host;
 mod browser_start_evidence;
 mod classifier_evidence;
@@ -106,6 +107,7 @@ mod process_gate;
 mod provider_credentials;
 pub use browser_host::*;
 pub use browser_start_evidence::BrowserStartEvidence;
+mod outside_access;
 mod quiet_tools;
 mod rendered_web_reader;
 #[cfg(test)]
@@ -251,6 +253,7 @@ pub use automation_production::{
     AutomationTaskOutcomeDecision, AutomationTaskOutcomeEvaluator, AutomationTaskOutcomeInput,
     AutomationTaskOutcomeRecord, ConservativeAutomationTaskOutcomeEvaluator,
 };
+pub use automation_run_source::AutomationRunSource;
 pub use classifier_evidence::{
     classifier_decision_evidence, skipped_classifier_evidence, with_classifier_stages,
     AccountingState, AccountingUnavailableReason, AccountingValue, ClassifierActionCorrelation,
@@ -425,6 +428,7 @@ pub use memory_skill_curator::{
     runtime_skill_reference_evidence, runtime_skill_view_disclosure,
     MemorySkillCuratorRuntimeError, RuntimeMemoryEvidenceRequestInput,
 };
+pub use outside_access::OutsideAccess;
 pub use permission_action::{
     normalize_resolved_deferred_tool_call, normalize_runtime_tool_call, ActionNormalizationError,
     ActionNormalizationState, ContainmentSnapshotRef, DecisionArguments, IntentSnapshotRef,

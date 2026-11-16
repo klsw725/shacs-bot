@@ -16,11 +16,17 @@ enum Cell {
     Unused,
 }
 
+const UNATTENDED_OUTSIDE: &str = "outside the workspace in an unattended run";
+
 struct Row {
     name: &'static str,
     workspace_is_data: bool,
     exec: Exec,
     contained: bool,
+    /// The call reaches outside the workspace with the guard off, so an
+    /// unattended run refuses what the decision would otherwise allow (Spec
+    /// 053 PRD 010 scope 7).
+    outside_workspace: bool,
     call: fn(&Setup) -> (&'static str, Value),
     /// Rules for the narrow allow, broad allow, ask and deny columns;
     /// `{media}` and `{home}` stand for those folders.
@@ -37,6 +43,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("read_file", json!({"path": "notes.md"})),
             rules: ["read(notes.md)", "", "read(notes.md)", "read(notes.md)"],
             cells: [Run, Run, Unused, Ask, Deny],
@@ -46,6 +53,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |setup| ("read_file", json!({"path": setup.media.join("photo.txt")})),
             rules: [
                 "read(/{media}/photo.txt)",
@@ -60,6 +68,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |setup| ("read_file", json!({"path": setup.home.join("x.txt")})),
             rules: [
                 "read(/{home}/x.txt)",
@@ -80,6 +89,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("exec", json!({"command": "rm -rf build"})),
             rules: ["exec(rm -rf build)", "exec", "exec(rm *)", "exec(rm *)"],
             cells: [
@@ -91,10 +101,11 @@ fn rows() -> Vec<Row> {
             ],
         },
         Row {
-            name: "exec naming a path outside the workspace without a sandbox",
+            name: "exec naming a path outside the workspace with restrictToWorkspace",
             workspace_is_data: false,
-            exec: Exec::Gated,
+            exec: Exec::Restricted,
             contained: true,
+            outside_workspace: false,
             call: |setup| {
                 (
                     "exec",
@@ -118,11 +129,29 @@ fn rows() -> Vec<Row> {
                 Deny,
             ],
         },
+        // Spec 053 PRD 010 scope 5: without `restrictToWorkspace` the guard
+        // leaves the path to the decision, which never allows it outright.
+        Row {
+            name: "exec naming a path outside the workspace without restrictToWorkspace",
+            workspace_is_data: false,
+            exec: Exec::Gated,
+            contained: true,
+            outside_workspace: true,
+            call: |setup| {
+                (
+                    "exec",
+                    json!({"command": format!("cat {}", setup.home.display())}),
+                )
+            },
+            rules: ["exec(cat *)", "exec", "exec(cat *)", "exec(cat *)"],
+            cells: [Classifier, Run, Classifier, Ask, Deny],
+        },
         Row {
             name: "exec outside a proven container",
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: false,
+            outside_workspace: false,
             call: |_| ("exec", json!({"command": "echo hi"})),
             rules: ["exec(echo *)", "exec", "exec(echo *)", "exec(echo *)"],
             cells: [
@@ -138,6 +167,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("write_file", json!({"path": "new.txt", "content": "x"})),
             rules: ["edit(new.txt)", "", "edit(new.txt)", "edit(new.txt)"],
             cells: [Run, Run, Unused, Ask, Deny],
@@ -147,6 +177,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("write_file", json!({"path": ".git/config", "content": "x"})),
             rules: [
                 "edit(.git/config)",
@@ -161,6 +192,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("exec", json!({"command": "echo hi > gitlink/config"})),
             rules: ["exec(echo *)", "exec", "exec(echo *)", "exec(echo *)"],
             cells: [Ask, Ask, Ask, Ask, Deny],
@@ -170,6 +202,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("exec", json!({"command": "echo hi > outlink/file.txt"})),
             rules: ["exec(echo *)", "exec", "exec(echo *)", "exec(echo *)"],
             cells: [Ask, Ask, Ask, Ask, Deny],
@@ -179,6 +212,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::GatedPermissive,
             contained: true,
+            outside_workspace: true,
             call: |setup| {
                 (
                     "exec",
@@ -193,6 +227,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: true,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("read_file", json!({"path": "auth.json"})),
             rules: ["read(auth.json)", "", "read(auth.json)", "read(auth.json)"],
             cells: [Ask, Ask, Unused, Ask, Deny],
@@ -202,6 +237,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: true,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("write_file", json!({"path": "auth.json", "content": "{}"})),
             rules: ["edit(auth.json)", "", "edit(auth.json)", "edit(auth.json)"],
             cells: [Deny, Deny, Unused, Deny, Deny],
@@ -211,6 +247,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::GatedPermissive,
             contained: true,
+            outside_workspace: false,
             call: |setup| {
                 (
                     "exec",
@@ -225,6 +262,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("exec", json!({"command": "echo hi"})),
             rules: ["exec(echo *)", "exec", "exec(echo *)", "exec(echo *)"],
             cells: [Classifier, Run, Classifier, Ask, Deny],
@@ -234,6 +272,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("exec", json!({"command": "python3 -m http.server --help"})),
             rules: [
                 "exec(python3 -m http.server *)",
@@ -248,6 +287,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("web_fetch", json!({"url": "https://example.com/page"})),
             rules: [
                 "web_fetch(domain:example.com)",
@@ -262,6 +302,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("web_search", json!({"query": "weather"})),
             rules: ["web_search", "", "web_search", "web_search"],
             cells: [Classifier, Run, Unused, Ask, Deny],
@@ -271,6 +312,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("mcp_github_get_issue", json!({"number": 1})),
             rules: ["mcp_github", "", "mcp_github_*", "mcp_*"],
             cells: [Classifier, Run, Unused, Ask, Deny],
@@ -280,6 +322,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("spawn", json!({"task": "look around"})),
             rules: ["spawn", "", "spawn", "spawn"],
             cells: [Classifier, Classifier, Unused, Ask, Deny],
@@ -289,6 +332,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("message", json!({"content": "done"})),
             rules: ["message", "", "message", "message"],
             cells: [Classifier, Run, Unused, Ask, Deny],
@@ -298,6 +342,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("cron", json!({"action": "list"})),
             rules: ["cron", "", "cron", "cron"],
             cells: [Classifier, Run, Unused, Ask, Deny],
@@ -307,6 +352,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("image_generate", json!({"prompt": "a cat"})),
             rules: ["image_generate", "", "image_generate", "image_generate"],
             cells: [Classifier, Run, Unused, Ask, Deny],
@@ -316,6 +362,7 @@ fn rows() -> Vec<Row> {
             workspace_is_data: false,
             exec: Exec::Gated,
             contained: true,
+            outside_workspace: false,
             call: |_| ("my", json!({"action": "show"})),
             rules: ["my", "", "my", "my"],
             cells: [Classifier, Run, Unused, Ask, Deny],
@@ -385,6 +432,16 @@ fn check(
             _ => Err(label.clone()),
         },
     };
+    let would_allow = matches!(
+        (cell, verdict),
+        (Cell::Run, _) | (Cell::Classifier, Some(Verdict::Allow))
+    );
+    if row.outside_workspace && !interactive && would_allow {
+        return match outcome {
+            Outcome::Refused(text) if text.contains(UNATTENDED_OUTSIDE) => Ok(()),
+            _ => Err(label),
+        };
+    }
     match (cell, verdict) {
         (Cell::Run, _) | (Cell::Classifier, Some(Verdict::Allow)) => {
             outcome.ran().then_some(()).ok_or(label.clone())

@@ -1,6 +1,6 @@
 use crate::runtime::{
     decide_permission, evaluate_static_rules, ApprovalCorrelation, AutoEvaluatorVerdict,
-    BrowserStartEvidence, ContainmentPermissionProof, InheritedPermissionContext,
+    BrowserStartEvidence, ContainmentPermissionProof, InheritedPermissionContext, OutsideAccess,
     PermissionMaterials, PermissionPolicyDecision, PermissionPolicyDecisionKind,
     PermissionPolicyInput, PermissionPolicyReason, PermissionRuleInput, ProcessAdapterKind,
     ProcessEnvelopeAdmission, ProcessExecutionEnvelope, ProcessIdentity, ProcessRedactedCommand,
@@ -129,6 +129,7 @@ pub struct ProcessGatePolicyMaterials {
     pub remembered_rules: Vec<RememberedPermissionPolicyMatch>,
     pub remembered_store_unavailable: bool,
     pub materials: Option<PermissionMaterials>,
+    pub outside_access: OutsideAccess,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,6 +239,7 @@ impl ProcessGate {
                 remembered_store_unavailable: input.policy_materials.remembered_store_unavailable,
                 interactive: input.interactive,
                 materials: input.policy_materials.materials.clone(),
+                outside_access: input.policy_materials.outside_access.clone(),
             })
         };
         if input.terminal_precondition != ProcessGateTerminalPrecondition::Ready

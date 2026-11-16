@@ -51,6 +51,7 @@ fn input(
         remembered_store_unavailable: false,
         interactive,
         materials: Some(materials),
+        outside_access: crate::runtime::OutsideAccess::default(),
     }
 }
 

@@ -176,6 +176,14 @@ impl Tool for ExecTool {
         refusal.map(|error| format!("Error executing command: {error}"))
     }
 
+    fn outside_workspace_targets(&self, params: &JsonMap) -> Vec<String> {
+        let Some(command) = params.get("command").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let working_dir = params.get("working_dir").and_then(Value::as_str);
+        self.command_outside_workspace_targets(command, working_dir)
+    }
+
     fn execute(&self, params: JsonMap) -> ToolResult {
         self.execute_with_context(params, &ToolCallExecutionContext::default())
     }

@@ -6,10 +6,10 @@ use shacs_core::runtime::{
     build_spec033_snapshot_from, AutomationDeliveryResult, AutomationDispatchRequest,
     AutomationExecutionControl, AutomationExecutionReceipt, AutomationExecutionTerminalFact,
     AutomationExecutor, AutomationGateResolution, AutomationGateResolver, AutomationJobResult,
-    AutomationOutcomePolicy, AutomationProcessCleanupFact, AutomationScheduleKind,
-    AutomationWorkEnqueueInput, AutomationWorkEnvelope, DurableWorkDispatcher, MessageBus,
-    PluginHookDispatchEffect, PluginHookDispatchRecord, PluginHookDispatchStatus, PluginHookEvent,
-    SandboxMode,
+    AutomationOutcomePolicy, AutomationProcessCleanupFact, AutomationRunSource,
+    AutomationScheduleKind, AutomationSourceEventKind, AutomationWorkEnqueueInput,
+    AutomationWorkEnvelope, DurableWorkDispatcher, MessageBus, PluginHookDispatchEffect,
+    PluginHookDispatchRecord, PluginHookDispatchStatus, PluginHookEvent, SandboxMode,
 };
 use shacs_eval::evaluator::{AutomationExecutionMode, AutomationRunState};
 use shacs_projection::{HookDenialReason, SandboxFallback};
@@ -491,6 +491,88 @@ impl AutomationExecutor for CleanupFailedExecutor {
             task_outcome: None,
         }
     }
+}
+
+#[test]
+fn dispatched_automation_carries_its_stored_source() -> Result<(), Box<dyn Error>> {
+    // Spec 053 PRD 010 scope 8: the source comes from the stored envelope, so
+    // a cron firing and a heartbeat reach the agent run as different sources.
+    let cases = [
+        (
+            AutomationSourceEventKind::Cron {
+                approved_automation_rule_ref: Some("cron-job:job-7".to_owned()),
+            },
+            AutomationRunSource::Cron {
+                job_id: Some("job-7".to_owned()),
+                work_id: "automation-work-1".to_owned(),
+            },
+        ),
+        (
+            AutomationSourceEventKind::Heartbeat,
+            AutomationRunSource::Heartbeat {
+                work_id: "automation-work-1".to_owned(),
+            },
+        ),
+    ];
+    for (source, expected) in cases {
+        let root = tempfile::tempdir()?;
+        let event_root = root.path().join("events");
+        let checkpoint_root = root.path().join("checkpoints");
+        let payload_root = root.path().join("payloads");
+        let mut dispatcher = DurableWorkDispatcher::open(
+            &event_root,
+            &payload_root,
+            MessageBus::new(),
+            "owner-1",
+            100,
+        )?;
+        let queued_snapshot = snapshot(SandboxMode::Active, SandboxFallback::NotApplicable);
+        let mut event = source_event(AutomationExecutionMode::NoAgentCheck);
+        event.source = source;
+        dispatcher.enqueue_automation(AutomationWorkEnqueueInput {
+            work_id: "automation-work-1".to_owned(),
+            envelope: AutomationWorkEnvelope {
+                event,
+                schedule: AutomationScheduleKind::Recurring,
+                existing_runs: Vec::new(),
+                enqueue_provenance_snapshot: Some(queued_snapshot.clone()),
+                expected_current_facts_digest: queued_snapshot.semantic_compatibility_digest()?,
+                hook_evidence: None,
+                requirements: requirements(),
+                instruction: Some("check runtime health".to_owned()),
+                outcome_policy: AutomationOutcomePolicy::Notify,
+            },
+            next_wake_at_ms: Some(100),
+        })?;
+        let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
+        let state = replay.state.ok_or("missing queued automation")?;
+        let admission = evaluate_durable_work_recovery(&state.work, &payload_root, 100);
+        let mut executor = SuccessfulNoAgentExecutor {
+            requests: Vec::new(),
+        };
+        let mut resolver = FreshGateResolver {
+            snapshot: refreshed_snapshot(queued_snapshot),
+            calls: 0,
+        };
+        dispatcher.dispatch_due_automation(
+            &state.work,
+            &admission,
+            100,
+            &mut resolver,
+            &mut executor,
+        )?;
+        let sources: Vec<&AutomationRunSource> = executor
+            .requests
+            .iter()
+            .map(|request| &request.run_source)
+            .collect();
+        assert_eq!(
+            sources,
+            vec![&expected],
+            "the dispatched request carries the stored source"
+        );
+    }
+    Ok(())
 }
 
 #[test]

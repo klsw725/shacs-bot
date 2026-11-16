@@ -18,19 +18,19 @@ use crate::runtime::{
     runtime_workflow_diagnostics, store_persistent_goal, workflow_projection, AgentHook,
     AgentRunSpec, AgentRunner, ApprovalActor, ApprovalCacheEntry, ApprovalDecision,
     ApprovalDecisionKind, ApprovalRequest, AutoCompact, AutoCompactArchiveOutcome,
-    AutoEvaluatorVerdict, AutomationExecutionControl, ContainmentSnapshotRef, ContextBudgetInput,
-    ContextBuildRequest, ContextBuilder, ContextFileDiscoveryOptions, ContextFileProjection,
-    ContextProviderHandoff, ContextReferenceResolverConfig, DreamProcessor, DreamRunOutcome,
-    ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope,
-    ExecutionSnapshot, GoalCompletionEvaluator, GoalCompletionVerdict, GoalMetadataError,
-    GoalStopReason, InboundMessage, LateResultDecision, LiveExecutionSnapshotSource,
-    LoopTaskCancelResult, LoopTaskRegistry, MemoryConsolidationError, MemoryStore, MessageBus,
-    OutboundMessage, PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot,
-    PermissionRuleInput, PermissionedAction, PermissionedActionInput, PermissionedActionOrigin,
-    PersistentGoal, PersistentGoalStatus, PluginCommandDispatcher, PolicySafetySnapshotRef,
-    ProviderArchiveConsolidator, ProviderEventCallback, ProviderInvocationClient,
-    RecentAutoModeDenial, RecentAutoModeDenialStore, RecentAutoModeRetryToken,
-    RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenMatch,
+    AutoEvaluatorVerdict, AutomationExecutionControl, AutomationRunSource, ContainmentSnapshotRef,
+    ContextBudgetInput, ContextBuildRequest, ContextBuilder, ContextFileDiscoveryOptions,
+    ContextFileProjection, ContextProviderHandoff, ContextReferenceResolverConfig, DreamProcessor,
+    DreamRunOutcome, ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact,
+    ExecutionScope, ExecutionSnapshot, GoalCompletionEvaluator, GoalCompletionVerdict,
+    GoalMetadataError, GoalStopReason, InboundMessage, LateResultDecision,
+    LiveExecutionSnapshotSource, LoopTaskCancelResult, LoopTaskRegistry, MemoryConsolidationError,
+    MemoryStore, MessageBus, OutboundMessage, PermissionCeilingSnapshot, PermissionMode,
+    PermissionModeSnapshot, PermissionRuleInput, PermissionedAction, PermissionedActionInput,
+    PermissionedActionOrigin, PersistentGoal, PersistentGoalStatus, PluginCommandDispatcher,
+    PolicySafetySnapshotRef, ProviderArchiveConsolidator, ProviderEventCallback,
+    ProviderInvocationClient, RecentAutoModeDenial, RecentAutoModeDenialStore,
+    RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenMatch,
     RecentAutoModeRetryTokenStore, RuntimeContextTools, RuntimeExecutionLedger, RuntimeInterrupt,
     RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage,
     RuntimeWorkflowLiveInput, RuntimeWorkflowLiveOptions, RuntimeWorkflowLiveWorktreeConfig,
@@ -315,6 +315,8 @@ pub struct AgentLoopConfig {
     pub provider_runtime_override: Option<RawCredential>,
     pub execution_snapshot_source: LiveExecutionSnapshotSource,
     pub execution_control: Option<AutomationExecutionControl>,
+    /// The automation worker's trusted run source (Spec 053 PRD 010 scope 8).
+    pub automation_source: Option<AutomationRunSource>,
     /// Current Unix time in ms for time-bound checks such as a reminder past its deadline; the
     /// system clock when unset.
     pub clock_ms: Option<ClockMs>,
@@ -371,6 +373,7 @@ impl AgentLoopConfig {
             provider_runtime_override: None,
             execution_snapshot_source: LiveExecutionSnapshotSource::default(),
             execution_control: None,
+            automation_source: None,
             clock_ms: None,
             web_watch: None,
         }
@@ -1074,6 +1077,12 @@ impl<'a> AgentLoop<'a> {
             });
         let refusal_root = tool_refusals::root_id(stored_refusal_root)?
             .map(str::to_owned)
+            .or_else(|| {
+                self.config
+                    .automation_source
+                    .as_ref()
+                    .map(AutomationRunSource::refusal_root)
+            })
             .unwrap_or_else(|| {
                 format!(
                     "user:{}:{}:{}:{}",
@@ -1911,6 +1920,7 @@ impl<'a> AgentLoop<'a> {
             active_workspace: Some(self.config.workspace.clone()),
             permission_environment: self.config.permission_environment.clone(),
             in_cron_context: false,
+            automation_source: self.config.automation_source.clone(),
             record_channel_delivery: self.config.record_channel_delivery,
             cancellation_token: None,
             deadline: None,

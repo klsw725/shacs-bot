@@ -9,10 +9,11 @@ use shacs_core::runtime::{
     required_permission_release_evidence_buckets, ActionNormalizationError,
     ActionNormalizationState, AppDeclarationPermissionInput, ApprovalActor, ApprovalCorrelation,
     ApprovalCorrelationError, ApprovalDecision, ApprovalDecisionKind, ApprovalRequest,
-    AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, BoundaryPermissionViolation,
-    ContainerNetworkMode, ContainerRuntimeKind, DockerContainmentSnapshot, EvaluatorConfidence,
-    EvaluatorScopeMatch, InheritedPermissionContext, LateResultPermissionDisposition,
-    LateResultPermissionInput, PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot,
+    AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, AutomationRunSource,
+    BoundaryPermissionViolation, ContainerNetworkMode, ContainerRuntimeKind,
+    DockerContainmentSnapshot, EvaluatorConfidence, EvaluatorScopeMatch,
+    InheritedPermissionContext, LateResultPermissionDisposition, LateResultPermissionInput,
+    OutsideAccess, PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot,
     PermissionPolicyDecisionKind, PermissionPolicyInput, PermissionPolicyReason,
     PermissionPolicySafetySnapshotAuditStatus, PermissionReleaseEvidence,
     PermissionReleaseEvidenceBucket, PermissionReplayInput, PermissionReplayInvariant,
@@ -257,6 +258,7 @@ fn policy_input(
         remembered_store_unavailable: false,
         interactive: true,
         materials: None,
+        outside_access: shacs_core::runtime::OutsideAccess::default(),
     }
 }
 
@@ -2206,4 +2208,131 @@ fn permission_contract_matrix_declares_required_release_evidence_buckets(
         return Err(format!("contract matrix release evidence incomplete: {cases:?}").into());
     }
     Ok(())
+}
+
+fn outside_input(
+    mode: PermissionMode,
+    tool_name: &str,
+    capability: SafetyCapability,
+    interactive: bool,
+    source: Option<AutomationRunSource>,
+) -> PermissionPolicyInput {
+    let action = action(
+        mode,
+        tool_name,
+        vec![capability],
+        vec![target(json!("src/lib.rs"))],
+    );
+    let rules = evaluate_static_rules(
+        &action,
+        &PermissionRuleInput {
+            containment: safe_containment(),
+            protected_targets: Vec::new(),
+            proc_exec_summary: None,
+        },
+    );
+    let mut input = policy_input(action, rules);
+    input.interactive = interactive;
+    input.outside_access = OutsideAccess {
+        targets: vec!["/tmp/x.txt".to_owned()],
+        automation_source: source,
+    };
+    input
+}
+
+#[test]
+fn workspace_outside_access_needs_a_user_grant_and_is_refused_unattended(
+) -> Result<(), Box<dyn Error>> {
+    // Spec 053 PRD 010 scopes 6 and 7.
+    let heartbeat = AutomationRunSource::Heartbeat {
+        work_id: "work-1".to_owned(),
+    };
+    let cron = AutomationRunSource::Cron {
+        job_id: Some("job-1".to_owned()),
+        work_id: "work-2".to_owned(),
+    };
+    let read = |interactive, source| {
+        outside_input(
+            PermissionMode::Default,
+            "read_file",
+            SafetyCapability::FsRead,
+            interactive,
+            source,
+        )
+    };
+    let mut inside = read(true, None);
+    inside.outside_access = OutsideAccess::default();
+    let mut remembered = read(true, None);
+    remembered.remembered_rules = vec![remembered_match(
+        RememberedPermissionEffect::Allow,
+        "allow-rule",
+        exact_matcher("action-digest"),
+    )];
+    let mut remembered_unattended = remembered.clone();
+    remembered_unattended.interactive = false;
+    let bypass = |interactive, source| {
+        outside_input(
+            PermissionMode::BypassPermissions,
+            "write_file",
+            SafetyCapability::FsWrite,
+            interactive,
+            source,
+        )
+    };
+    let cases = [
+        (
+            "inside the workspace",
+            inside,
+            PermissionPolicyDecisionKind::Allow,
+            PermissionPolicyReason::ModeBaselineAllow,
+        ),
+        (
+            "default read outside",
+            read(true, None),
+            PermissionPolicyDecisionKind::Ask,
+            PermissionPolicyReason::OutsideWorkspaceAccess,
+        ),
+        (
+            "remembered allow",
+            remembered,
+            PermissionPolicyDecisionKind::Allow,
+            PermissionPolicyReason::RememberedAllow,
+        ),
+        (
+            "remembered allow unattended",
+            remembered_unattended,
+            PermissionPolicyDecisionKind::Deny,
+            PermissionPolicyReason::OutsideWorkspaceUnattended,
+        ),
+        (
+            "bypass in conversation",
+            bypass(true, None),
+            PermissionPolicyDecisionKind::Allow,
+            PermissionPolicyReason::ModeBaselineAllow,
+        ),
+        (
+            "bypass heartbeat",
+            bypass(false, Some(heartbeat)),
+            PermissionPolicyDecisionKind::Allow,
+            PermissionPolicyReason::ModeBaselineAllow,
+        ),
+        (
+            "bypass cron",
+            bypass(false, Some(cron)),
+            PermissionPolicyDecisionKind::Deny,
+            PermissionPolicyReason::OutsideWorkspaceUnattended,
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, input, kind, reason) in cases {
+        let decision = decide_permission(input);
+        if decision.kind != kind || decision.reason != reason {
+            failures.push(format!("{name}: {decision:?}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n").into())
+    }
 }

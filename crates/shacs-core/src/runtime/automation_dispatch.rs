@@ -3,8 +3,8 @@ use super::{
     AutomationExecutionReceipt, AutomationExecutionRequirements, AutomationExecutor,
     AutomationGateResolution, AutomationGateResolver, AutomationJobResult,
     AutomationLifecycleInput, AutomationLifecycleOutcome, AutomationProcessCleanupFact,
-    AutomationScheduleKind, AutomationSourceEvent, DurableDispatchError, DurableWorkDispatcher,
-    ExecutionSnapshot, PluginHookDispatchRecord, ProcessExecutionReceipt,
+    AutomationRunSource, AutomationScheduleKind, AutomationSourceEvent, DurableDispatchError,
+    DurableWorkDispatcher, ExecutionSnapshot, PluginHookDispatchRecord, ProcessExecutionReceipt,
 };
 use serde::{Deserialize, Serialize};
 use shacs_eval::evaluator::{
@@ -230,6 +230,7 @@ fn normalized_request(
         requirements: envelope.requirements.clone(),
         instruction: envelope.instruction.clone(),
         outcome_policy: envelope.outcome_policy,
+        run_source: AutomationRunSource::from_event(&envelope.event.source, &item.work_id),
         owner_target_ref: match &envelope.event.source {
             super::AutomationSourceEventKind::AppTaskResult { app_task_id, .. } => {
                 app_task_id.clone()

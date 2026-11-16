@@ -124,13 +124,17 @@ fn precedence_for_decision(decision: &PermissionPolicyDecision) -> StaticPolicyP
         | PermissionPolicyReason::SecretFileWrite
         | PermissionPolicyReason::BrowserLockWrite
         | PermissionPolicyReason::UserOnlyFileWrite
-        | PermissionPolicyReason::ToolRefusal => StaticPolicyPrecedence::StaticDenyWins,
+        | PermissionPolicyReason::ToolRefusal
+        | PermissionPolicyReason::OutsideWorkspaceUnattended => {
+            StaticPolicyPrecedence::StaticDenyWins
+        }
         PermissionPolicyReason::StaticAskRequired
         | PermissionPolicyReason::UserRuleAsk
         | PermissionPolicyReason::SecretFileRead
         | PermissionPolicyReason::CriticalPathRemoval
         | PermissionPolicyReason::ProtectedPathThroughSymlink
-        | PermissionPolicyReason::OutsideWorkspaceThroughSymlink => {
+        | PermissionPolicyReason::OutsideWorkspaceThroughSymlink
+        | PermissionPolicyReason::OutsideWorkspaceAccess => {
             StaticPolicyPrecedence::StaticAskBlocksClassifier
         }
         PermissionPolicyReason::EvaluatorUnavailable => {
@@ -185,7 +189,10 @@ fn success_disposition(decision: &PermissionPolicyDecision) -> ClassifierDisposi
         | PermissionPolicyReason::SecretFileWrite
         | PermissionPolicyReason::BrowserLockWrite
         | PermissionPolicyReason::UserOnlyFileWrite
-        | PermissionPolicyReason::ToolRefusal => ClassifierDisposition::NotInvokedStaticPolicy,
+        | PermissionPolicyReason::ToolRefusal
+        | PermissionPolicyReason::OutsideWorkspaceUnattended => {
+            ClassifierDisposition::NotInvokedStaticPolicy
+        }
         PermissionPolicyReason::StaticAskRequired
         | PermissionPolicyReason::UserRuleAsk
         | PermissionPolicyReason::UserRuleAllow
@@ -193,6 +200,7 @@ fn success_disposition(decision: &PermissionPolicyDecision) -> ClassifierDisposi
         | PermissionPolicyReason::CriticalPathRemoval
         | PermissionPolicyReason::ProtectedPathThroughSymlink
         | PermissionPolicyReason::OutsideWorkspaceThroughSymlink
+        | PermissionPolicyReason::OutsideWorkspaceAccess
         | PermissionPolicyReason::WorkspaceRead
         | PermissionPolicyReason::WorkspaceEdit
         | PermissionPolicyReason::EvaluatorAllow

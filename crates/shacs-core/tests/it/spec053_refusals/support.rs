@@ -12,7 +12,7 @@ use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub(super) fn config(setup: &Setup) -> AgentLoopConfig {
+pub(crate) fn config(setup: &Setup) -> AgentLoopConfig {
     let mut config = harness::agent_loop_config(setup, true);
     let context = setup.context(&Options::mode(PermissionMode::BypassPermissions, true));
     config.permission_mode_snapshot = context.permission_mode_snapshot;
@@ -20,7 +20,7 @@ pub(super) fn config(setup: &Setup) -> AgentLoopConfig {
     config
 }
 
-pub(super) fn record_refusals(agent: AgentLoop<'_>) -> (AgentLoop<'_>, Arc<Mutex<Vec<ToolEvent>>>) {
+pub(crate) fn record_refusals(agent: AgentLoop<'_>) -> (AgentLoop<'_>, Arc<Mutex<Vec<ToolEvent>>>) {
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
     let agent = agent.with_tool_event_callback(Arc::new(move |event| {
@@ -33,7 +33,7 @@ pub(super) fn record_refusals(agent: AgentLoop<'_>) -> (AgentLoop<'_>, Arc<Mutex
     (agent, events)
 }
 
-pub(super) fn tool_outcomes(agent: &AgentLoop<'_>) -> Result<Vec<ToolOutcomeKind>, Box<dyn Error>> {
+pub(crate) fn tool_outcomes(agent: &AgentLoop<'_>) -> Result<Vec<ToolOutcomeKind>, Box<dyn Error>> {
     let session = agent
         .session_manager()
         .read_session_file("cli:refusals")
@@ -95,7 +95,7 @@ pub(super) fn tools(setup: &Setup) -> ToolRegistry {
     tools
 }
 
-pub(super) fn agent<'a>(
+pub(crate) fn agent<'a>(
     setup: &Setup,
     tools: &'a ToolRegistry,
     provider: &'a RoutingProvider,

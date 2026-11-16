@@ -109,9 +109,9 @@ use shacs_core::runtime::{
     resolve_context_reference,
     runtime_stop_request_marker_path as core_runtime_stop_request_marker_path,
     serialize_spec035_tasks_projection, ActionNormalizationState, AgentHook, AgentHookContext,
-    AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopTurnResult, CompositeHook,
-    ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef, ContextBudgetInput,
-    ContextBuilder, ContextDiagnosticsInput, ContextDiagnosticsSummary,
+    AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopTurnResult, AutomationRunSource,
+    CompositeHook, ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef,
+    ContextBudgetInput, ContextBuilder, ContextDiagnosticsInput, ContextDiagnosticsSummary,
     ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions, ContextReferenceDiagnosticsSummary,
     ContextReferenceResolverConfig, CoreDiagnosticsAggregateInput,
     CredentialResolvingProviderClient, DiscoveredPlugin, DockerContainmentSnapshot, DreamLifecycle,
@@ -19682,6 +19682,8 @@ pub struct AgentLoopChatCompletionAdapter {
 struct ProviderTurnInvocation {
     chat: ChatCompletionInvocation,
     runtime_override: Option<RawCredential>,
+    /// Set only by the automation worker (Spec 053 PRD 010 scope 8).
+    automation_source: Option<AutomationRunSource>,
 }
 
 struct ProviderTurnOrigin<'a> {
@@ -19979,10 +19981,17 @@ impl AgentLoopChatCompletionAdapter {
         }
         #[cfg(test)]
         {
-            config.permission_rule_input.containment =
+            config.permission_rule_input.containment = if tests::CONFIRMED_CONTAINMENT.get() {
+                runtime_permission_rule_containment_from_snapshot_with_observed(
+                    self.containment_snapshot.as_ref(),
+                    Some(false),
+                    true,
+                )
+            } else {
                 runtime_permission_rule_containment_from_snapshot(
                     self.containment_snapshot.as_ref(),
-                );
+                )
+            };
         }
         let config_context = shacs_config::config_context(
             Some(self.config_path.clone()),
@@ -20046,6 +20055,7 @@ impl AgentLoopChatCompletionAdapter {
             ProviderTurnInvocation {
                 chat: invocation,
                 runtime_override: None,
+                automation_source: None,
             },
             on_event,
             ProviderTurnOrigin {
@@ -20081,6 +20091,7 @@ impl AgentLoopChatCompletionAdapter {
             ProviderTurnInvocation {
                 chat: invocation,
                 runtime_override: Some(runtime_override),
+                automation_source: None,
             },
             None,
             "api",
@@ -20099,6 +20110,7 @@ impl AgentLoopChatCompletionAdapter {
             ProviderTurnInvocation {
                 chat: invocation,
                 runtime_override: None,
+                automation_source: None,
             },
             None,
             "sdk",
@@ -20194,6 +20206,7 @@ impl AgentLoopChatCompletionAdapter {
         let ProviderTurnInvocation {
             chat: invocation,
             runtime_override,
+            automation_source,
         } = invocation;
         let mut config = self.loop_config();
         config.settings.temperature = invocation
@@ -20202,6 +20215,7 @@ impl AgentLoopChatCompletionAdapter {
         config.settings.max_tokens = invocation.max_tokens.unwrap_or(config.settings.max_tokens);
         config.provider_runtime_override = runtime_override;
         config.execution_control = execution_control;
+        config.automation_source = automation_source;
         let message = InboundMessage::new(
             origin.channel,
             origin.sender_id,
@@ -38228,6 +38242,14 @@ mod tests {
             .ok_or("missing approval lineage")?
             .to_owned();
         Ok((adapter, lineage))
+    }
+
+    thread_local! {
+        /// Lets a test's loop config treat the test machine as a confirmed
+        /// non-root container, which `bypass_permissions` needs; the real
+        /// check reads `/proc` of the machine running the tests.
+        pub(crate) static CONFIRMED_CONTAINMENT: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
     }
 
     /// An agent-loop chat adapter in `root` whose provider answers with `responses` in order.

@@ -979,6 +979,7 @@ impl SubagentRuntime {
             active_workspace: Some(config.workspace.clone()),
             permission_environment: config.permission_environment.clone(),
             in_cron_context: false,
+            automation_source: None,
             record_channel_delivery: false,
             cancellation_token: Some(cancellation_token.clone()),
             deadline: None,

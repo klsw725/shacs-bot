@@ -282,9 +282,10 @@ fn the_default_exec_guard_decides_before_the_critical_path_question() -> TestRes
 
 #[test]
 fn calls_the_tool_would_refuse_are_refused_with_the_tool_text() -> TestResult {
-    // Given
+    // Given: `restrictToWorkspace` on, so the exec guard refuses outside paths
+    // (Spec 053 PRD 010 scope 1).
     let setup = Setup::new()?;
-    let (registry, recorded) = setup.registry(Exec::Gated);
+    let (registry, recorded) = setup.registry(Exec::Restricted);
     let outside = setup.home.join("x.txt");
     fs::write(&outside, "outside")?;
     let cases = [
@@ -302,7 +303,9 @@ fn calls_the_tool_would_refuse_are_refused_with_the_tool_text() -> TestResult {
         ),
         ("exec", json!({"command": "cat ../x.txt"})),
     ];
-    let real_exec = ExecTool::new(ExecConfig::new(setup.path_context()));
+    let mut real_config = ExecConfig::new(setup.path_context());
+    real_config.restrict_to_workspace = true;
+    let real_exec = ExecTool::new(real_config);
     let mut failures = Vec::new();
     for interactive in [true, false] {
         let context = setup.context(&Options::auto(interactive).verdict(Verdict::Allow));

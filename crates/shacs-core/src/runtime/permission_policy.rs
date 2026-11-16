@@ -1,8 +1,8 @@
 use crate::runtime::auto_mode::{auto_decision, PermissionMaterials};
 use crate::runtime::{
-    evaluate_inherited_ceiling, ApprovalCorrelation, ApprovalCorrelationError,
-    InheritedPermissionContext, PermissionMode, PermissionedAction, SafetyCapability,
-    StaticRuleDecision, StaticRuleDecisionKind, StaticRuleReason,
+    evaluate_inherited_ceiling, outside_access, ApprovalCorrelation, ApprovalCorrelationError,
+    InheritedPermissionContext, OutsideAccess, PermissionMode, PermissionedAction,
+    SafetyCapability, StaticRuleDecision, StaticRuleDecisionKind, StaticRuleReason,
 };
 use serde::{Deserialize, Serialize};
 use shacs_config::{RememberedPermissionEffect, RememberedPermissionMatcher, WorkspacePathScope};
@@ -51,6 +51,12 @@ pub enum PermissionPolicyReason {
     ToolRefusal,
     WorkspaceRead,
     WorkspaceEdit,
+    /// A call that reaches outside the workspace asks in interactive modes
+    /// other than auto (Spec 053 PRD 010 scope 6).
+    OutsideWorkspaceAccess,
+    /// Nobody can approve workspace-outside access in an unattended run
+    /// (Spec 053 PRD 010 scope 7).
+    OutsideWorkspaceUnattended,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +100,8 @@ pub struct PermissionPolicyInput {
     pub interactive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub materials: Option<PermissionMaterials>,
+    #[serde(skip, default)]
+    pub outside_access: OutsideAccess,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +156,11 @@ pub struct PromptInjectionSignal {
 }
 
 pub fn decide_permission(input: PermissionPolicyInput) -> PermissionPolicyDecision {
+    let decision = decide_before_outside_access(input.clone());
+    outside_access::decide(&input, decision)
+}
+
+fn decide_before_outside_access(input: PermissionPolicyInput) -> PermissionPolicyDecision {
     if let Some(context) = &input.inherited_context {
         let ceiling = evaluate_inherited_ceiling(context);
         if !ceiling.allowed {

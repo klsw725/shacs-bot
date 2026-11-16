@@ -223,6 +223,13 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// The paths these arguments name outside the workspace, found without
+    /// touching files or processes. The permission decision treats a call
+    /// with any as workspace-outside access (Spec 053 PRD 010 scope 2).
+    fn outside_workspace_targets(&self, _params: &JsonMap) -> Vec<String> {
+        Vec::new()
+    }
+
     fn execute(&self, params: JsonMap) -> ToolResult;
 
     fn execute_with_context(

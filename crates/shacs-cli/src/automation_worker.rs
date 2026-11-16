@@ -13,6 +13,8 @@ use shacs_providers::{GenerationSettings, ProviderRequest};
 use std::collections::BTreeSet;
 use std::path::Path;
 
+#[cfg(test)]
+mod outside_access_tests;
 mod trajectory_recorder;
 pub(super) use trajectory_recorder::record_no_provider_trajectory;
 
@@ -351,6 +353,7 @@ impl AgentLoopChatCompletionAdapter {
                 super::ProviderTurnInvocation {
                     chat: invocation,
                     runtime_override: None,
+                    automation_source: Some(request.run_source.clone()),
                 },
                 None,
                 super::ProviderTurnOrigin {

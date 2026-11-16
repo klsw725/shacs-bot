@@ -1,7 +1,7 @@
 use super::ExecTool;
 use crate::tools::filesystem::raw_candidate_path;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 impl ExecTool {
@@ -109,8 +109,59 @@ impl ExecTool {
         None
     }
 
+    /// The paths this command names outside the workspace and the media
+    /// folder, for the permission decision (Spec 053 PRD 010 scope 2).
+    ///
+    /// Empty when the workspace guard is on, because the guard refuses such
+    /// commands itself. Compares against the allowed range, not the
+    /// command's working directory, and reports any `../` as `..`.
+    pub(super) fn command_outside_workspace_targets(
+        &self,
+        command: &str,
+        working_dir: Option<&str>,
+    ) -> Vec<String> {
+        if self.workspace_guard_enabled() {
+            return Vec::new();
+        }
+        let workspace = self
+            .config
+            .path_context
+            .workspace
+            .as_ref()
+            .or(self.config.working_dir.as_ref());
+        let allowed_roots: Vec<PathBuf> = [workspace, self.config.path_context.media_dir.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|root| std::fs::canonicalize(root).ok())
+            .collect();
+        let outside = |path: &Path| !allowed_roots.iter().any(|root| path.starts_with(root));
+        let mut targets = BTreeSet::new();
+        if command.contains("../") || command.contains("..\\") {
+            targets.insert("..".to_owned());
+        }
+        for raw in extract_absolute_paths(command) {
+            let candidate = expand_shell_path(&raw);
+            if let Some(path) = canonicalize_existing_prefix(&candidate) {
+                if outside(&path) {
+                    targets.insert(path.display().to_string());
+                }
+            }
+        }
+        if let Some(working_dir) = working_dir {
+            let candidate = raw_candidate_path(working_dir, &self.config.path_context);
+            if let Ok(path) = std::fs::canonicalize(candidate) {
+                if outside(&path) {
+                    targets.insert(path.display().to_string());
+                }
+            }
+        }
+        targets.into_iter().collect()
+    }
+
+    /// Only `restrictToWorkspace` turns the guard on; a sandbox name in the
+    /// config no longer does (Spec 053 PRD 010 scope 1).
     fn workspace_guard_enabled(&self) -> bool {
-        self.config.restrict_to_workspace || self.config.sandbox.is_none()
+        self.config.restrict_to_workspace
     }
 
     fn workspace_guard_root(&self) -> Option<&PathBuf> {

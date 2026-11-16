@@ -66,6 +66,7 @@ fn policy_input(action: PermissionedAction, rules: StaticRuleDecision) -> Permis
         remembered_store_unavailable: false,
         interactive: true,
         materials: None,
+        outside_access: shacs_core::runtime::OutsideAccess::default(),
     }
 }
 

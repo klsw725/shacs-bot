@@ -1253,6 +1253,7 @@ impl Attempt {
             remembered_store_unavailable: false,
             interactive: self.context.permission_interactive,
             materials: None,
+            outside_access: shacs_core::runtime::OutsideAccess::default(),
         };
         change(&mut input);
         decide_permission(input)

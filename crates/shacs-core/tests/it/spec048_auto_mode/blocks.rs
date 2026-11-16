@@ -349,9 +349,9 @@ fn reused_ids_do_not_count_classifier_block_text_as_a_tool_refusal() -> TestResu
 #[test]
 fn later_refusals_with_the_same_id_stop_at_the_third_actual_refusal() -> TestResult {
     // Given: the provider reuses `c1`; the second time the exec guard
-    // refuses it with its own violation text.
+    // (`restrictToWorkspace` on) refuses it with its own violation text.
     let setup = Setup::new()?;
-    let (registry, recorded) = setup.registry(Exec::Gated);
+    let (registry, recorded) = setup.registry(Exec::Restricted);
     fs::write(setup.root.join("outside.txt"), "outside")?;
     let reason = "{\"decision\": \"block\", \"rule\": \"[Data Exfiltration]\", \"reason\": \"path traversal detected in the upload\"}";
     let provider = RoutingProvider::new(

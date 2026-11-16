@@ -107,9 +107,13 @@ pub(crate) fn decide_auto_mode(
             PermissionPolicyReason::OutsideWorkspaceThroughSymlink,
         );
     }
-    if capabilities
-        .iter()
-        .all(|capability| *capability == SafetyCapability::FsRead)
+    // Rows 14 and 15 never take workspace-outside access (Spec 053 PRD 010
+    // scope 5).
+    let outside = !input.outside_access.targets.is_empty();
+    if !outside
+        && capabilities
+            .iter()
+            .all(|capability| *capability == SafetyCapability::FsRead)
     {
         return decided(
             PermissionPolicyDecisionKind::Allow,
@@ -122,7 +126,7 @@ pub(crate) fn decide_auto_mode(
             SafetyCapability::FsRead | SafetyCapability::FsWrite
         )
     });
-    if file_capabilities && materials.workspace_edit {
+    if !outside && file_capabilities && materials.workspace_edit {
         return decided(
             PermissionPolicyDecisionKind::Allow,
             PermissionPolicyReason::WorkspaceEdit,
@@ -302,6 +306,14 @@ fn denied_by_user(
             )
         },
     )
+}
+
+/// A question where someone can answer it, a refusal otherwise.
+pub(crate) fn ask_or_deny_when_possible(
+    input: &PermissionPolicyInput,
+    reason: PermissionPolicyReason,
+) -> PermissionPolicyDecision {
+    ask_or_deny(can_ask(input), reason)
 }
 
 fn can_ask(input: &PermissionPolicyInput) -> bool {

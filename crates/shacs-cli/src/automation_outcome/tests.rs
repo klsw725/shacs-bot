@@ -42,6 +42,9 @@ fn request(policy: AutomationOutcomePolicy) -> AutomationDispatchRequest {
         instruction: Some("work".to_owned()),
         outcome_policy: policy,
         owner_target_ref: None,
+        run_source: shacs_core::runtime::AutomationRunSource::Heartbeat {
+            work_id: "automation-work-1".to_owned(),
+        },
     }
 }
 

@@ -175,6 +175,14 @@ impl Setup {
                 guard: ExecTool::new(ExecConfig::new(context)),
                 launched: recorded.clone(),
             }),
+            Exec::Restricted => {
+                let mut config = ExecConfig::new(context);
+                config.restrict_to_workspace = true;
+                registry.register(GatedExec {
+                    guard: ExecTool::new(config),
+                    launched: recorded.clone(),
+                });
+            }
             Exec::GatedPermissive => {
                 let mut config = ExecConfig::new(context);
                 config.deny_patterns = Vec::new();
@@ -258,8 +266,10 @@ pub enum Exec {
     /// The production safety checks and process gate, with the launch only
     /// recorded.
     Gated,
-    /// As `Gated`, with no deny patterns and a sandbox, so the guard leaves
-    /// paths and `rm -rf` alone.
+    /// As `Gated`, with `restrictToWorkspace` on, so the guard refuses paths
+    /// outside the workspace itself (Spec 053 PRD 010 scope 1).
+    Restricted,
+    /// As `Gated`, with no deny patterns, so the guard leaves `rm -rf` alone.
     GatedPermissive,
 }
 
@@ -652,6 +662,10 @@ impl Tool for GatedExec {
 
     fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
         self.guard.preflight_refusal(params)
+    }
+
+    fn outside_workspace_targets(&self, params: &JsonMap) -> Vec<String> {
+        self.guard.outside_workspace_targets(params)
     }
 
     fn execute(&self, params: JsonMap) -> ToolResult {

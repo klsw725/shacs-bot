@@ -20,9 +20,10 @@ pub(crate) fn approval_explanation(
     decision: &PermissionPolicyDecision,
     materials: Option<&PermissionMaterials>,
     evaluator: Option<&AutoEvaluatorVerdict>,
+    outside_targets: &[String],
 ) -> ApprovalExplanation {
     let text = |value: Option<&String>| value.cloned().unwrap_or_else(|| "unknown".to_owned());
-    let why = match decision.reason {
+    let reason_why = match decision.reason {
         PermissionPolicyReason::SecretFileRead => {
             let name = text(materials.and_then(|materials| materials.secret_name.as_ref()));
             let mut why = format!(
@@ -81,6 +82,12 @@ pub(crate) fn approval_explanation(
         }
         _ => None,
     };
+    // Whatever the reason, the question says the call reaches outside the
+    // workspace (Spec 053 SPEC scope 3).
+    let why = match (reason_why, outside_why(outside_targets)) {
+        (Some(why), Some(outside)) => Some(format!("{} Also, {outside}", why.trim_end())),
+        (why, outside) => why.or(outside),
+    };
     let once_only = matches!(
         decision.reason,
         PermissionPolicyReason::SecretFileRead
@@ -90,6 +97,16 @@ pub(crate) fn approval_explanation(
             | PermissionPolicyReason::OutsideWorkspaceThroughSymlink
     );
     ApprovalExplanation { why, once_only }
+}
+
+fn outside_why(targets: &[String]) -> Option<String> {
+    (!targets.is_empty()).then(|| {
+        let targets: Vec<String> = targets.iter().map(|target| format!("`{target}`")).collect();
+        format!(
+            "this call reaches outside the workspace: {}.",
+            targets.join(", ")
+        )
+    })
 }
 
 /// Why a call the classifier did not allow became a question (Spec 048 PRD

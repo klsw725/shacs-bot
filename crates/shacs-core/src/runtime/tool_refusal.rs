@@ -1,6 +1,7 @@
 //! A refusal's identity, independent of its provider call id (Spec 053).
 
 use super::auto_mode::{real_path, shell_command, shell_paths};
+use super::tool_execution::UNATTENDED_OUTSIDE_TEXT;
 use super::{PermissionedAction, ToolExecutionContext};
 use serde::Serialize;
 use serde_json::Value;
@@ -18,12 +19,17 @@ pub(crate) enum RefusalKind {
     AllowPattern,
     InternalUrl,
     ToolPreflight,
+    /// Workspace-outside access refused because nobody can approve it
+    /// (Spec 053 PRD 010 scope 9).
+    UnattendedOutside,
 }
 
 impl RefusalKind {
     pub(crate) fn from_text(text: &str) -> Option<Self> {
         let text = text.to_ascii_lowercase();
-        if text.contains("outside allowed directory") {
+        if text.contains(UNATTENDED_OUTSIDE_TEXT) {
+            Some(Self::UnattendedOutside)
+        } else if text.contains("outside allowed directory") {
             Some(Self::FileRange)
         } else if text.contains("working_dir could not be resolved") {
             Some(Self::WorkingDirectory)
@@ -122,8 +128,27 @@ impl ToolRefusal {
             RefusalKind::DenyPattern
             | RefusalKind::InvalidDenyPattern
             | RefusalKind::AllowPattern
-            | RefusalKind::InternalUrl => {}
+            | RefusalKind::InternalUrl
+            | RefusalKind::UnattendedOutside => {}
         }
+        targets.sort();
+        targets.dedup();
+        Self {
+            tool: action.tool_name.clone(),
+            kind,
+            targets,
+        }
+    }
+
+    /// A refusal identified by the targets the decision itself used, so a
+    /// changed operand inside the workspace does not reset the count (Spec 053
+    /// PRD 010 scope 9).
+    pub(crate) fn with_targets(
+        action: &PermissionedAction,
+        kind: RefusalKind,
+        targets: &[String],
+    ) -> Self {
+        let mut targets: Vec<PathBuf> = targets.iter().map(PathBuf::from).collect();
         targets.sort();
         targets.dedup();
         Self {
@@ -148,4 +173,32 @@ fn normalize(path: &str, workspace: &Path, home: &Path) -> PathBuf {
         workspace.join(path)
     };
     real_path::real_path(&path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RefusalKind;
+    use crate::runtime::tool_execution::permission_block_message;
+    use crate::runtime::{
+        PermissionPolicyDecision, PermissionPolicyDecisionKind, PermissionPolicyReason,
+    };
+
+    #[test]
+    fn an_unattended_outside_refusal_is_a_refusal_event() {
+        let decision = PermissionPolicyDecision {
+            kind: PermissionPolicyDecisionKind::Deny,
+            reason: PermissionPolicyReason::OutsideWorkspaceUnattended,
+            evaluator_ref: None,
+            approval_ref: None,
+            approval_error: None,
+            remembered_rule_ref: None,
+            can_handoff_to_tool_runtime: false,
+        };
+        let message = permission_block_message("call-1", "exec", &decision);
+        assert_eq!(
+            RefusalKind::from_text(&message.content),
+            Some(RefusalKind::UnattendedOutside),
+            "the refusal is counted and gets guidance (Spec 053 PRD 010 scope 9)"
+        );
+    }
 }

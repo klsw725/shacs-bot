@@ -1,6 +1,6 @@
 use super::{
     AutomationDeliveryResult, AutomationExecutionRequirements, AutomationJobResult,
-    AutomationTaskOutcomeRecord, ExecutionSnapshot, PluginHookDispatchRecord,
+    AutomationRunSource, AutomationTaskOutcomeRecord, ExecutionSnapshot, PluginHookDispatchRecord,
     ProcessExecutionReceipt,
 };
 use serde::{Deserialize, Serialize};
@@ -91,6 +91,7 @@ pub struct AutomationDispatchRequest {
     pub instruction: Option<String>,
     pub outcome_policy: super::AutomationOutcomePolicy,
     pub owner_target_ref: Option<String>,
+    pub run_source: AutomationRunSource,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -2689,6 +2689,7 @@ fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
         active_workspace: None,
         permission_environment: None,
         in_cron_context: false,
+        automation_source: None,
         record_channel_delivery: true,
         cancellation_token: None,
         deadline: None,
