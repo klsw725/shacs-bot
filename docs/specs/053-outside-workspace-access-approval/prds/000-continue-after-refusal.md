@@ -122,3 +122,42 @@ test result: ok. 504 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fi
   - `cargo test --manifest-path crates/Cargo.toml -p shacs-core -q --no-fail-fast`: exit 0, 결과 요약 79개 합계 2,043 passed / 0 failed(lib 504 passed, `it` 656 passed / 2 ignored: 하위 프로세스용 `proxy_probe`, 기본 model이 필요한 `real_model`). 로그 `/tmp/spec053-prd000-pkg2.log`.
   - `shacs-cli`(public adapter와 surface approval worker가 `AgentLoop`를 만든다): `--lib -q public_adapter_approval_reuses_stored_scope_and_ceiling_for_real_exec` 1 passed, `--lib -q surface_approval_consumer_` 6 passed, `--test it -q spec048_ask_verbose::` 2 passed, 모두 exit 0. 로그 `/tmp/spec053-prd000-cli2.log`.
 - deep-high 독립 검토: 1차(2026-11-16)는 위 혼합 이미지 결함으로 수정 요청, 수정 뒤 2차는 승인(차단 없음). 2차는 직접·병렬·classifier·bridge·승인 실행 경로가 모두 이미지 변환 뒤 거절을 받아들이고, 이미지 저장이 두 번 일어나지 않으며, 037 가리기 순서가 이전과 같음을 확인했다. 위 최종 검증 결과는 이 승인 뒤의 기록이다.
+
+추가 수정의 실제 출력은 아래와 같다. 전체 package 로그에는 하위 프로세스의 결과 요약도 들어 있으므로, 위 79개 요약의 합계는 고유 시험 개수가 아니다. 전체 package 명령 자체의 종료 코드는 0이며, 아래 core 출력은 주요 실행 파일의 결과 줄을 발췌한 것이다.
+
+`cargo test --manifest-path crates/Cargo.toml -p shacs-core --test it -q spec053_refusals::mixed_results::` — exit 0:
+
+```text
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 657 filtered out; finished in 0.39s
+```
+
+`cargo test --manifest-path crates/Cargo.toml -p shacs-core -q --no-fail-fast` — exit 0, 전체 로그 `/tmp/spec053-prd000-pkg2.log`:
+
+```text
+test result: ok. 504 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 684.62s
+test result: ok. 656 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 51.38s
+test result: ok. 15 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 45.56s
+test result: ok. 16 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 2.26s
+```
+
+전체 package에는 기존 `#[ignore]` 5개가 있다. `it`의 `spec042_web_watch::failures::proxy_probe`는 다른 시험이 부르는 하위 프로세스용이고 `spec047_memory_search::real_model`은 기본 모델 설치가 필요하다. 별도 실행 파일의 `writes_manual_release_runner_trajectory_fixture`는 수동 fixture 생성기, `spec036_action_decision::lineage::restart_probe`는 하위 프로세스용, `spec036_action_decision::manual::conversation_driver`는 대화형 수동 실행기다. 이번 작업에서 시험을 무시하도록 바꾸지 않았다.
+
+`cargo test --manifest-path crates/Cargo.toml -p shacs-cli --locked --lib -q public_adapter_approval_reuses_stored_scope_and_ceiling_for_real_exec` — exit 0:
+
+```text
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 471 filtered out; finished in 0.37s
+```
+
+`cargo test --manifest-path crates/Cargo.toml -p shacs-cli --locked --lib -q surface_approval_consumer_` — exit 0:
+
+```text
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 466 filtered out; finished in 0.74s
+```
+
+`cargo test --manifest-path crates/Cargo.toml -p shacs-cli --locked --test it -q spec048_ask_verbose::` — exit 0:
+
+```text
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 201 filtered out; finished in 2.74s
+```
+
+혼합 이미지 회귀 시험·fmt·clippy 원문 로그는 `/tmp/spec053-prd000-image-checks.log`, CLI 세 명령의 원문 로그는 `/tmp/spec053-prd000-cli2.log`다. 커밋과 전체 workspace 시험은 실행하지 않았다.

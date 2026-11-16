@@ -1,6 +1,6 @@
 # 053. workspace 밖 접근 묻기 구현 명세
 
-Status: Planned (PRD 000 구현·독립 검토 승인 2026-11-16, 커밋·전체 workspace 시험 전)
+Status: Planned (PRD 000·010 구현·독립 검토 승인 2026-11-16, PRD 020·030과 전체 workspace 시험 전)
 
 Consumes: 004 tool 실행과 runner의 tool 결과 처리(`fatal_tool_message`, `tool_outcome_for_message`, 한 dispatch의 호출 순서), 004·010 file tool이 다룰 수 있는 폴더(`PathContext`, `allowed_roots`: workspace, media 폴더, `extra_allowed_dirs`)와 symlink 검사, 010 `exec` 안전 장치(deny pattern, allow pattern, 내부·사설 주소, workspace guard, `resolve_working_dir`), 011 하위 작업과 workflow 자식의 `restrict_to_workspace`·`fail_on_tool_error`, 012 run의 대화형 여부와 cron 작업 저장·실행(`shacs-cron`의 `CronJob`, `cron` tool, 실행 출처 `CronWake { job_id }`), 013 승인 질문, 020 deferred bridge 호출, 022 permission mode·`fs_read` 자동 승인 기준(workspace 밖 host path와 symlink escape 대상은 자동 승인하지 않는다)·기억된 규칙과 matcher·승인 correlation, 022 PRD 005 runtime 경계의 상속 권한 한도(cron의 `approval_ref`), 030 process gate와 sandbox adapter, 031 config의 `tools.restrictToWorkspace`, 033 production 자동화 경로(cron 실행이 durable automation 작업을 넣고 automation worker가 `AgentLoop`를 부르는 것), 037 PRD 040 turn을 멈춘 도구 결과 가리기(`quiet_failure`), 048 판정 순서(PRD 000 판정 표와 다른 mode의 더하기)·사용자 규칙·비밀 파일 규칙·보호 경로·명령 분석·classifier·막힘 수
 
