@@ -1,6 +1,6 @@
 # 053. workspace 밖 접근 묻기 구현 명세
 
-Status: Planned (PRD 000–030 구현·독립 검토 승인 2026-11-17, 전체 workspace 시험 전)
+Status: Complete
 
 Consumes: 004 tool 실행과 runner의 tool 결과 처리(`fatal_tool_message`, `tool_outcome_for_message`, 한 dispatch의 호출 순서), 004·010 file tool이 다룰 수 있는 폴더(`PathContext`, `allowed_roots`: workspace, media 폴더, `extra_allowed_dirs`)와 symlink 검사, 010 `exec` 안전 장치(deny pattern, allow pattern, 내부·사설 주소, workspace guard, `resolve_working_dir`), 011 하위 작업과 workflow 자식의 `restrict_to_workspace`·`fail_on_tool_error`, 012 run의 대화형 여부와 cron 작업 저장·실행(`shacs-cron`의 `CronJob`, `cron` tool, 실행 출처 `CronWake { job_id }`), 013 승인 질문, 020 deferred bridge 호출, 022 permission mode·`fs_read` 자동 승인 기준(workspace 밖 host path와 symlink escape 대상은 자동 승인하지 않는다)·기억된 규칙과 matcher·승인 correlation, 022 PRD 005 runtime 경계의 상속 권한 한도(cron의 `approval_ref`), 030 process gate와 sandbox adapter, 031 config의 `tools.restrictToWorkspace`, 033 production 자동화 경로(cron 실행이 durable automation 작업을 넣고 automation worker가 `AgentLoop`를 부르는 것), 037 PRD 040 turn을 멈춘 도구 결과 가리기(`quiet_failure`), 048 판정 순서(PRD 000 판정 표와 다른 mode의 더하기)·사용자 규칙·비밀 파일 규칙·보호 경로·명령 분석·classifier·막힘 수
 
@@ -255,3 +255,16 @@ PRD 문서는 구현을 시작할 때 쓴다. 각 PRD는 앞 번호의 닫힌 �
 | 030 cron 작업의 미리 허락된 목록 | 소유 범위 3의 비대화형 run 줄 중 cron 목록, 5(목록, 묻기, 승인 기록과 판 참조, 판의 수명과 취소, 읽기 전용 확인, 명령 항목, 리디렉션 대신하기), 6 중 자기 변경과 그 문서 | 000, 010(workspace 밖 대상 재료, 비대화형 거절, cron 출처와 작업 id), 020(file tool 판정) | 수용 조건 4.1–4.6(4.3a 포함), 6 |
 
 수용 조건 6은 각 PRD가 자기 변경에 대해 확인한다.
+
+## 종료 증거 (2026-11-17)
+
+PRD [000](prds/000-continue-after-refusal.md), [010](prds/010-command-outside-workspace.md), [020](prds/020-file-tools-outside-workspace.md), [030](prds/030-cron-approved-list.md)이 모두 구현되고 독립 검토(deep-high) APPROVE를 받은 뒤 커밋되었다. 각 PRD는 앞 PRD가 닫힌 뒤 시작했다. 010·020·030은 세 번째 검토에서 APPROVE였다. 각 PRD의 검토 지적과 고친 것은 그 PRD의 구현 메모에 있다.
+
+- 수용 조건 1: PRD 000의 `AgentLoop` 시험(`tests/it/spec053_refusals/`)과 PRD 010의 bridge·비대화형 거절 셈 시험.
+- 수용 조건 2: PRD 010(`tests/it/spec053_outside_exec.rs`, `tests/tools.rs`의 restrict 끔·sandbox 없음 시험, 048 판정 표의 `exec` 밖 경로 두 줄).
+- 수용 조건 3: PRD 010의 명령 항목과 PRD 020(`tests/it/spec053_outside_files.rs`, 048 판정 표의 밖 읽기 두 줄).
+- 수용 조건 4.1–4.6(4.3a 포함): PRD 030(`tests/it/spec053_cron_list.rs`, `shacs-cron` grants 시험, CLI `enqueue_cron` → 대기열 → worker 경로 시험). 4.7: PRD 010·020의 production worker 시험.
+- 수용 조건 5: PRD 010의 실제 `exec` 실행 시험(유튜브 흐름과 `restrictToWorkspace: true` 회복).
+- 수용 조건 6: 마지막 tree에서 fmt(Google 옵션)와 workspace clippy `-D warnings`가 exit 0이었다. 사용자 승인으로 전체 workspace 시험 `cargo test --manifest-path crates/Cargo.toml --workspace --locked -q --no-fail-fast`을 돌려 exit 0, 211개 결과 묶음에서 4055 passed / 0 failed / 8 ignored였다(1247초). 로그: `/tmp/spec053-workspace-tests.log`.
+- 구현 중 찾아 고친 기존 결함: `cron` tool과 gateway scheduler가 다른 작업 파일(`<data>/cron/jobs.json`과 `<data>/runtime/cron/jobs.json`)을 써서 대화에서 만든 작업이 울리지 않았다. PRD 030이 `<data>/runtime/cron/jobs.json` 하나로 맞췄다. 옛 파일의 작업은 옮기지 않는다(2026-11-17 서버 확인: 옛 폴더는 비어 있음).
+- 남은 한계는 위 "남은 위험과 한계"와 각 PRD의 구현 메모 그대로다. 특히 CLI 경로 시험은 `bypass_permissions`와 MCP꼴 writer로 했고, auto mode classifier 허용과 `default` mode 명령 항목 실행은 core 판정 시험으로 확인했다(시험 기계에서는 공식 container의 격리 증명이 없어 실제 `exec`가 시작되지 않는다). 실제 Docker·서버 확인은 하지 않았다.
