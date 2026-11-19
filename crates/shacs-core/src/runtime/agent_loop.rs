@@ -83,9 +83,10 @@ use shacs_session::durable_event::{
 };
 use shacs_skills::{
     discover_skill_registry, discover_workflow_recipes, SkillBackedWorkflowRecipe,
-    SkillRegistryOptions,
+    SkillEnvironment, SkillRegistryOptions,
 };
 use shacs_utils::gitstore::{GitCliStore, GitStore};
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -275,6 +276,8 @@ enum PermissionApprovalReply {
 
 #[derive(Clone)]
 pub struct AgentLoopConfig {
+    pub skill_environment: SkillEnvironment,
+    pub exec_env: BTreeMap<String, String>,
     pub browser_screenshots: Option<bool>,
     /// The host behind the `browser` tool, told when the owner's turns start
     /// and end and asked by `/new`, `/stop` and `/browser` (Spec 050 PRD 000).
@@ -339,6 +342,8 @@ pub struct ProjectPermissionStoreConfig {
 impl AgentLoopConfig {
     pub fn new(workspace: impl Into<PathBuf>, model: impl Into<String>) -> Self {
         Self {
+            skill_environment: SkillEnvironment::default(),
+            exec_env: BTreeMap::new(),
             workspace: workspace.into(),
             media_roots: Vec::new(),
             tool_images: None,
@@ -1927,6 +1932,7 @@ impl<'a> AgentLoop<'a> {
             project_permission_store: self.config.project_permission_store.clone(),
             active_workspace: Some(self.config.workspace.clone()),
             permission_environment: self.config.permission_environment.clone(),
+            skill_environment: self.config.skill_environment.clone(),
             in_cron_context: false,
             automation_source: self.config.automation_source.clone(),
             cron_grant_store: self.config.cron_grant_store.clone(),
@@ -3245,6 +3251,9 @@ impl<'a> AgentLoop<'a> {
             .clone()
             .unwrap_or_else(|| self.config.model.clone());
         let mut config = SubagentExecutionConfig::new(self.config.workspace.clone(), model);
+        config.skill_context = Some(self.context_builder.clone());
+        config.skill_environment = self.config.skill_environment.clone();
+        config.exec_env = self.config.exec_env.clone();
         config.tool_images = self.config.tool_images.clone();
         config.settings = self.config.settings.clone();
         config.retry_mode = self.config.retry_mode;
@@ -4456,6 +4465,7 @@ impl<'a> AgentLoop<'a> {
     fn reply_tool_context(&self, stored: &ToolExecutionContext) -> ToolExecutionContext {
         let mut context = stored.clone();
         context.permission_environment = self.config.permission_environment.clone();
+        context.skill_environment = self.config.skill_environment.clone();
         context
     }
 
@@ -4526,6 +4536,7 @@ impl<'a> AgentLoop<'a> {
         context.permission_session_approval_cache = Vec::new();
         context.permission_session_remembered_rules = Vec::new();
         context.permission_environment = self.config.permission_environment.clone();
+        context.skill_environment = self.config.skill_environment.clone();
         if bridge_tool_names().contains(&tool_call.name.as_str()) {
             let tool_surface = assemble_tool_surface(ToolSurfaceAssemblyInput {
                 definitions: self.tools.definitions(),
@@ -4693,6 +4704,7 @@ impl<'a> AgentLoop<'a> {
         // other before the assistant reads it.
         spec.tool_context.permission_mode_snapshot = self.config.permission_mode_snapshot.clone();
         spec.tool_context.permission_environment = self.config.permission_environment.clone();
+        spec.tool_context.skill_environment = self.config.skill_environment.clone();
         spec.tool_context.active_workspace = Some(self.config.workspace.clone());
         let mut report = report;
         crate::runtime::runner::admit_tool_report(&spec, &mut report, &spec.tool_context);
@@ -7810,6 +7822,14 @@ mod tests {
         let tools = ToolRegistry::new();
         let mut config = AgentLoopConfig::new(workspace.path(), "model");
         config.durable_event_root = Some(durable_events.path().to_path_buf());
+        config.skill_environment = SkillEnvironment::new(BTreeMap::from([(
+            "WORKFLOW_KEY".to_owned(),
+            "workflow-startup-canary".to_owned(),
+        )]));
+        config.exec_env.insert(
+            "EXPLICIT_KEY".to_owned(),
+            "workflow-explicit-canary".to_owned(),
+        );
         let mut loop_runtime = AgentLoop::new(
             MessageBus::new(),
             SessionManager::new(workspace.path())?,
@@ -7817,6 +7837,39 @@ mod tests {
             &tools,
             &client,
             config,
+        );
+
+        let plan = compile_read_only_workflow_plan(
+            "review",
+            "direct:two-workflows",
+            "turn",
+            &PermissionModeSnapshot::default(),
+        );
+        let mut session = Session::new("direct:two-workflows");
+        let child = loop_runtime.workflow_subagent_execution_config(
+            &plan,
+            &mut session,
+            "direct:two-workflows",
+        );
+        assert_eq!(
+            child
+                .skill_environment
+                .values()
+                .get("WORKFLOW_KEY")
+                .map(String::as_str),
+            Some("workflow-startup-canary")
+        );
+        assert_eq!(
+            child.exec_env.get("EXPLICIT_KEY").map(String::as_str),
+            Some("workflow-explicit-canary")
+        );
+        assert!(!child.enable_exec, "main workflow must keep exec disabled");
+        assert!(
+            !crate::runtime::subagent::build_subagent_tool_registry(&child)
+                .tool_names()
+                .iter()
+                .any(|name| name == "exec"),
+            "disabled workflow exec must not be callable"
         );
 
         for request in [

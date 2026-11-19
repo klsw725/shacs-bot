@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use shacs_config::{AutoApprovalConfig, RememberedPermissionEffect, RememberedPermissionFileStore};
+use shacs_skills::SkillEnvironment;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -202,6 +203,8 @@ impl RuntimeToolExecutionReport {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolExecutionContext {
+    #[serde(skip)]
+    pub skill_environment: SkillEnvironment,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_context: Option<crate::runtime::BrowserCallContext>,
     pub channel: String,
@@ -260,6 +263,7 @@ pub struct ToolExecutionContext {
 impl Default for ToolExecutionContext {
     fn default() -> Self {
         Self {
+            skill_environment: SkillEnvironment::default(),
             browser_context: None,
             channel: String::new(),
             chat_id: String::new(),
@@ -1380,7 +1384,7 @@ pub(crate) fn permission_approval_interrupt(
         session_approval_reuse_pattern(action).unwrap_or_else(|| "exact action only".to_owned())
     };
     let hidden_note = (once_only && !explanation.once_only).then_some(
-        "the call holds a value from .env.json, shown as [secret NAME], so it takes one-time answers only.",
+        "the call holds a secret value, shown as [secret NAME], so it takes one-time answers only.",
     );
     let why = match (explanation.why.as_deref(), hidden_note) {
         (Some(why), Some(note)) => format!("Why: {why} Also, {note}\n"),

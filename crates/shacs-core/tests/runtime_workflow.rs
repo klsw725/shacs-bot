@@ -1,23 +1,27 @@
 use serde_json::{json, Map};
+use shacs_config::EnvFile;
 use shacs_core::runtime::{
     build_workflow_checkpoint, cancel_runtime_workflow, decide_workflow_admission,
     read_only_child_tool_names, run_live_runtime_workflow, run_live_runtime_workflow_with_options,
     run_read_only_runtime_workflow, run_runtime_workflow_admission_branch,
     runtime_workflow_diagnostics, runtime_workflow_execution_handle,
     runtime_workflow_resume_worktree_decision, AgentLoop, AgentLoopConfig, CancellationToken,
-    ChildResultEnvelope, ChildResultStatus, ContextBuilder, InboundMessage, MessageBus,
-    PermissionMode, PermissionModeSnapshot, RuntimeWorkflowAdmissionBranchInput,
-    RuntimeWorkflowAdmissionBranchOutcome, RuntimeWorkflowInput, RuntimeWorkflowLiveError,
-    RuntimeWorkflowLiveInput, RuntimeWorkflowLiveOptions, RuntimeWorkflowLiveWorktreeConfig,
-    Session, SessionManager, SubagentExecutionConfig, SubagentRuntime, WorkflowAdmissionDecision,
-    WorkflowAdmissionInput, WorkflowBarrierDecision, WorkflowBudgetPolicy, WorkflowBudgetSlice,
-    WorkflowBudgetUsage, WorkflowCheckpointInput, WorkflowCheckpointPolicy, WorkflowChildSpec,
-    WorkflowContextPolicy, WorkflowHarnessPlan, WorkflowMergePolicy, WorkflowModelRoutingPolicy,
-    WorkflowPattern, WorkflowPermissionPolicy, WorkflowQuarantinePolicy, WorkflowResumeDecision,
-    WorkflowResumePolicy, WorkflowRunState, WorkflowStep, WorkflowStopCondition,
-    WorkflowSynthesisOutcome, WorkflowToolScopePolicy, WorkflowVerificationGate,
-    WorkflowVerifierSpec, WorkflowVerifierVerdict, WorkflowVerifierVerdictKind,
-    WorkflowWorktreePolicy,
+    ChildResultEnvelope, ChildResultStatus, ContainerNetworkMode, ContainerRuntimeKind,
+    ContainmentSnapshotRef, ContextBuilder, DockerContainmentSnapshot, InboundMessage, MessageBus,
+    PermissionCeilingSnapshot, PermissionEnvironment, PermissionEnvironmentInput, PermissionMode,
+    PermissionModeSnapshot, RawRuleLists, RuntimeBoundaryOrigin,
+    RuntimeWorkflowAdmissionBranchInput, RuntimeWorkflowAdmissionBranchOutcome,
+    RuntimeWorkflowInput, RuntimeWorkflowLiveError, RuntimeWorkflowLiveInput,
+    RuntimeWorkflowLiveOptions, RuntimeWorkflowLiveWorktreeConfig, SafetyCapability, Session,
+    SessionManager, SlotOverrides, SubagentExecutionConfig, SubagentRuntime,
+    WorkflowAdmissionDecision, WorkflowAdmissionInput, WorkflowBarrierDecision,
+    WorkflowBudgetPolicy, WorkflowBudgetSlice, WorkflowBudgetUsage, WorkflowCheckpointInput,
+    WorkflowCheckpointPolicy, WorkflowChildSpec, WorkflowContextPolicy, WorkflowHarnessPlan,
+    WorkflowMergePolicy, WorkflowModelRoutingPolicy, WorkflowPattern, WorkflowPermissionPolicy,
+    WorkflowQuarantinePolicy, WorkflowResumeDecision, WorkflowResumePolicy, WorkflowRunState,
+    WorkflowStep, WorkflowStopCondition, WorkflowSynthesisOutcome, WorkflowToolScopePolicy,
+    WorkflowVerificationGate, WorkflowVerifierSpec, WorkflowVerifierVerdict,
+    WorkflowVerifierVerdictKind, WorkflowWorktreePolicy,
 };
 use shacs_core::tools::ToolRegistry;
 use shacs_eval::evaluator::{EvidenceKind, EvidenceRef, RedactionStatus};
@@ -25,12 +29,13 @@ use shacs_providers::{
     LlmResponse, ProviderClient, ProviderError, ProviderRequest, ToolCallRequest,
 };
 use shacs_session::durable_replay::{evaluate_durable_recovery, DurableRecoveryStatus};
+use shacs_skills::SkillEnvironment;
 use shacs_utils::worktree::GitWorktreeMergeHandoffState;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
@@ -841,7 +846,9 @@ fn isolated_worktree_live_workflow_writes_only_child_tree_and_hands_off_diff(
     fs::create_dir_all(&worktrees)?;
     git(&repo, &["init"])?;
     fs::write(repo.join("README.md"), "base\n")?;
+    fs::write(repo.join("credential-check.sh"), "test \"$WORKFLOW_KEY\" = workflow-canary && test \"$EXPLICIT_KEY\" = explicit-canary && printf workflow-env-ok\n")?;
     git(&repo, &["add", "README.md"])?;
+    git(&repo, &["add", "credential-check.sh"])?;
     git(&repo, &["commit", "-m", "initial"])?;
 
     let provider = QueueProvider::new(vec![
@@ -850,6 +857,11 @@ fn isolated_worktree_live_workflow_writes_only_child_tree_and_hands_off_diff(
             "write_file",
             json!({"path": "README.md", "content": "base\nchild\n"}),
         ),
+        llm_tool_call(
+            "exec-env",
+            "exec",
+            json!({"command": "sh credential-check.sh"}),
+        ),
         llm_text("claims extracted"),
         llm_text(r#"{"verdict":"pass","summary":"verified with diff evidence"}"#),
     ]);
@@ -857,17 +869,80 @@ fn isolated_worktree_live_workflow_writes_only_child_tree_and_hands_off_diff(
     let mut plan = sample_plan();
     plan.worktree_policy = WorkflowWorktreePolicy::IsolatedWorktreeRequired;
     plan.child_graph[0].worktree_policy = WorkflowWorktreePolicy::IsolatedWorktreeRequired;
-    plan.tool_scope_policy.allowed_tools = vec!["write_file".to_owned(), "read_file".to_owned()];
+    plan.tool_scope_policy.allowed_tools = vec![
+        "write_file".to_owned(),
+        "read_file".to_owned(),
+        "exec".to_owned(),
+    ];
+    plan.permission_policy
+        .denied_capabilities
+        .retain(|capability| capability != "proc_exec");
     plan.tool_scope_policy.quarantine = WorkflowQuarantinePolicy::None;
     plan.permission_policy
         .approval_required_for_privileged_steps = true;
 
     let mut execution_config = SubagentExecutionConfig::new(&repo, "test-model");
+    execution_config.enable_exec = true;
+    execution_config.containment_snapshot = Some(ContainmentSnapshotRef {
+        contained: Some(true),
+        backend: Some("test".to_owned()),
+        digest: None,
+        summary: None,
+    });
+    execution_config.permission_rule_input.containment = DockerContainmentSnapshot {
+        contained: Some(true),
+        runtime: ContainerRuntimeKind::Docker,
+        root_user: Some(false),
+        privileged: Some(false),
+        host_mounts_summary: Vec::new(),
+        network_mode: ContainerNetworkMode::None,
+        digest: None,
+        summary: None,
+    };
+    execution_config.skill_environment = SkillEnvironment::new(BTreeMap::from([(
+        "WORKFLOW_KEY".to_owned(),
+        "workflow-canary".to_owned(),
+    )]));
+    execution_config
+        .exec_env
+        .insert("EXPLICIT_KEY".to_owned(), "explicit-canary".to_owned());
+    execution_config.permission_environment = Some(Arc::new(PermissionEnvironment::new(
+        PermissionEnvironmentInput {
+            workspace: &repo,
+            data_folder: root.path(),
+            config_file: &root.path().join("config.json"),
+            home: root.path(),
+            rules: RawRuleLists {
+                allow: &["exec(sh credential-check.sh)".to_owned()],
+                ask: &[],
+                deny: &[],
+            },
+            mcp_servers: &[],
+            extra_skill_roots: &[],
+            extra_context_files: &[],
+            configured_targets: &[],
+            classify_all_shell: false,
+            slots: SlotOverrides::default(),
+            classifier_model: None,
+            env_file: &EnvFile::default(),
+            env_file_current: true,
+        },
+    )));
     execution_config.permission_mode_snapshot = PermissionModeSnapshot {
         mode: PermissionMode::AcceptEdits,
         source: Some("runtime_workflow_test".to_owned()),
         scope_ref: None,
     };
+    execution_config.permission_ceiling_snapshot = Some(PermissionCeilingSnapshot {
+        parent_mode: PermissionMode::AcceptEdits,
+        capability_ceiling: vec![
+            SafetyCapability::FsRead,
+            SafetyCapability::FsWrite,
+            SafetyCapability::ProcExec,
+        ],
+        approved_scope_refs: vec!["workspace".to_owned()],
+        origin: RuntimeBoundaryOrigin::UserTurn,
+    });
     let outcome = run_live_runtime_workflow_with_options(RuntimeWorkflowLiveOptions {
         input: RuntimeWorkflowLiveInput {
             plan,
@@ -888,7 +963,11 @@ fn isolated_worktree_live_workflow_writes_only_child_tree_and_hands_off_diff(
 
     assert_eq!(fs::read_to_string(repo.join("README.md"))?, "base\n");
     assert_eq!(git(&repo, &["status", "--porcelain=v1"])?, "");
-    assert_eq!(outcome.run.state, WorkflowRunState::Completed);
+    assert_eq!(
+        outcome.run.state,
+        WorkflowRunState::Completed,
+        "{outcome:?}"
+    );
     assert_eq!(outcome.worktree_evidence.len(), 1);
     assert_eq!(
         outcome.worktree_evidence[0]
@@ -911,7 +990,22 @@ fn isolated_worktree_live_workflow_writes_only_child_tree_and_hands_off_diff(
         .events
         .iter()
         .any(|event| event.phase == "budget_observed"));
-    assert_eq!(provider.request_count()?, 3);
+    assert_eq!(provider.request_count()?, 4);
+    let requests = provider
+        .observed_requests
+        .lock()
+        .map_err(|_| "requests lock poisoned")?;
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.messages.iter().any(|message| {
+                message["role"] == "tool"
+                    && message["content"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("workflow-env-ok"))
+            })),
+        "workflow child must execute with inherited values"
+    );
 
     Ok(())
 }

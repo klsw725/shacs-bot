@@ -93,6 +93,7 @@ pub fn run_scenario(
             workspace: workspace.clone(),
         },
         migrations: Vec::new(),
+        runtime_environment: None,
     };
     let marker = workspace.join(format!("{}.marker", scenario.id));
     let marker_name = marker

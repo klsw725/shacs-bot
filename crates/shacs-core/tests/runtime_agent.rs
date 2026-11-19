@@ -929,8 +929,8 @@ fn runtime_context_skips_template_memory_and_reports_skill_parity_metadata(
         || !system.contains("**inline-req** — Inline requirement")
         || !system.contains("unavailable: missing bins: shacs-definitely-missing-inline-bin, shacs-definitely-missing-inline-openclaw-bin")
         || !system.contains("missing env: SHACS_DEFINITELY_MISSING_INLINE_ENV, SHACS_DEFINITELY_MISSING_INLINE_OPENCLAW_ENV")
-        || !system.contains("**dir-canonical** — Directory canonical")
-        || system.contains("**frontmatter-alias** — Directory canonical")
+        || system.contains("**dir-canonical** — Directory canonical")
+        || !system.contains("**frontmatter-alias** — Directory canonical")
         || !system.contains("`")
         || !system.contains("**dup** — Workspace duplicate")
         || system.contains("Lower duplicate")
@@ -944,8 +944,8 @@ fn runtime_context_skips_template_memory_and_reports_skill_parity_metadata(
         .load_skill("dup")
         .ok_or("missing explicit dup skill")?;
     let canonical_skill = context
-        .load_skill("dir-canonical")
-        .ok_or("directory skill name should be canonical")?;
+        .load_skill("frontmatter-alias")
+        .ok_or("registry frontmatter name should be canonical")?;
     let loaded_context = context.load_skills_for_context(&["nested-always", "missing-req"]);
     let summary = context.build_skills_summary(&BTreeSet::from(["missing-req".to_owned()]));
     let subagent_prompt = context.build_subagent_prompt();
@@ -953,7 +953,7 @@ fn runtime_context_skips_template_memory_and_reports_skill_parity_metadata(
         || dup.contains("Lower duplicate body")
         || dup.contains("Builtin duplicate body")
         || !canonical_skill.contains("Directory canonical body")
-        || context.load_skill("frontmatter-alias").is_some()
+        || context.load_skill("dir-canonical").is_some()
         || !loaded_context.contains("### Skill: nested-always")
         || loaded_context.contains("metadata:")
         || !loaded_context.contains("Missing req body")
@@ -1037,7 +1037,7 @@ fn runtime_memory_store_appends_sanitizes_cursors_and_feeds_context() -> Result<
     store.write_soul("soul facts")?;
     store.write_user("user facts")?;
 
-    let first = store.append_history("<think>secret</think> visible", None)?;
+    let first = store.append_history("<think>memory-private-canary</think> visible", None)?;
     let second = store.append_history("abcdef", Some(3))?;
     store.set_last_dream_cursor(first)?;
 
@@ -1060,7 +1060,7 @@ fn runtime_memory_store_appends_sanitizes_cursors_and_feeds_context() -> Result<
     if !system.contains("remember this")
         || system.contains("visible")
         || !system.contains("abc")
-        || system.contains("secret")
+        || system.contains("memory-private-canary")
     {
         return Err(format!("memory store context bridge drifted: {system}").into());
     }

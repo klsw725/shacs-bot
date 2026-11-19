@@ -20,6 +20,7 @@ mod permission_user_rules;
 mod permissions;
 mod profiles;
 mod remembered_permissions;
+mod runtime_environment;
 mod runtime_layout;
 mod schema;
 mod secret_places;
@@ -51,6 +52,7 @@ pub use remembered_permissions::{
     RememberedPermissionRuleId, RememberedPermissionStore, RememberedPermissionStoreError,
     RememberedPermissionStoreErrorKind, WorkspacePathScope, WorkspacePermissionId,
 };
+pub use runtime_environment::RuntimeEnvironment;
 pub use runtime_layout::*;
 pub use schema::*;
 pub use secret_places::{
@@ -868,6 +870,7 @@ pub struct ConfigBundle {
     pub config: Config,
     pub context: ConfigContext,
     pub migrations: Vec<Migration>,
+    pub runtime_environment: Option<RuntimeEnvironment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -972,6 +975,8 @@ impl From<serde_json::Error> for ConfigError {
 
 pub trait EnvSource {
     fn var(&self, name: &str) -> Option<String>;
+    /// Captures all names once for a runtime's configuration and skill executions.
+    fn snapshot(&self) -> BTreeMap<String, String>;
 }
 
 static CURRENT_CONFIG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -979,6 +984,10 @@ static CURRENT_CONFIG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 impl EnvSource for BTreeMap<String, String> {
     fn var(&self, name: &str) -> Option<String> {
         self.get(name).cloned()
+    }
+
+    fn snapshot(&self) -> BTreeMap<String, String> {
+        self.clone()
     }
 }
 
@@ -988,6 +997,12 @@ pub struct ProcessEnv;
 impl EnvSource for ProcessEnv {
     fn var(&self, name: &str) -> Option<String> {
         std::env::var(name).ok()
+    }
+
+    fn snapshot(&self) -> BTreeMap<String, String> {
+        std::env::vars_os()
+            .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+            .collect()
     }
 }
 
@@ -1128,9 +1143,11 @@ pub fn load_config_with_env(
     if config.agents.defaults.workspace.trim().is_empty() {
         config.agents.defaults.workspace = default_workspace();
     }
-    if options.resolve_env {
-        resolve_config_with_env_file(&mut config, &config_path, env)?;
-    }
+    let runtime_environment = if options.resolve_env {
+        Some(RuntimeEnvironment::resolve(&mut config, &config_path, env)?)
+    } else {
+        None
+    };
     if config.agents.defaults.workspace.trim().is_empty() {
         config.agents.defaults.workspace = default_workspace();
     }
@@ -1139,6 +1156,7 @@ pub fn load_config_with_env(
         config,
         context,
         migrations,
+        runtime_environment,
     })
 }
 
@@ -1167,6 +1185,7 @@ pub fn load_config_with_env_or_default(
                 config,
                 context,
                 migrations: Vec::new(),
+                runtime_environment: None,
             })
         }
         Err(error) => Err(error),

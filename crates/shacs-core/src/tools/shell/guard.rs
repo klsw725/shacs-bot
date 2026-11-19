@@ -1,6 +1,7 @@
 use super::ExecTool;
 use crate::tools::filesystem::raw_candidate_path;
 use regex::Regex;
+use shacs_skills::SkillEnvironment;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -28,7 +29,7 @@ impl ExecTool {
         Ok(cwd)
     }
 
-    pub(super) fn build_env(&self) -> HashMap<String, String> {
+    pub(super) fn build_env(&self, skills: &SkillEnvironment) -> HashMap<String, String> {
         let mut env = HashMap::new();
         env.insert(
             "HOME".to_owned(),
@@ -48,6 +49,7 @@ impl ExecTool {
                 env.insert(key.clone(), value);
             }
         }
+        env.extend(skills.values().clone());
         env.extend(self.config.env.clone());
         env
     }

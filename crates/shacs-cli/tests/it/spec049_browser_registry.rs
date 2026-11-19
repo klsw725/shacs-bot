@@ -3238,6 +3238,7 @@ fn bundle(root: &Path, mode: &str, model: &str) -> Result<ConfigBundle, Box<dyn 
         config,
         context,
         migrations: Vec::new(),
+        runtime_environment: None,
     })
 }
 fn run(adapter: &AgentLoopChatCompletionAdapter, session: &str) -> TestResult {

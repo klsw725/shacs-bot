@@ -66,6 +66,7 @@ pub(super) fn tool_call_execution_context(
         }
     }))
     .with_hidden_paths(context.permission_environment.clone())
+    .with_skill_environment(context.skill_environment.clone())
     .with_approved_outside(approved_outside)
     .with_cron_grant(cron_grant);
     match (

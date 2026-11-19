@@ -29,6 +29,10 @@ const TOKEN: &str = "spec052-unit-discord-canary";
 struct NoEnvironment;
 
 impl EnvSource for NoEnvironment {
+    fn snapshot(&self) -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
+
     fn var(&self, _name: &str) -> Option<String> {
         None
     }
@@ -38,6 +42,13 @@ impl EnvSource for NoEnvironment {
 struct Environment(&'static [(&'static str, &'static str)]);
 
 impl EnvSource for Environment {
+    fn snapshot(&self) -> BTreeMap<String, String> {
+        self.0
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
     fn var(&self, name: &str) -> Option<String> {
         self.0
             .iter()

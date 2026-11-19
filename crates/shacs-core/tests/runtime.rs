@@ -2664,6 +2664,7 @@ fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
             .with_spawn(spawn_tool),
     );
     let context = ToolExecutionContext {
+        skill_environment: Default::default(),
         browser_context: None,
         browser_reviewed_action_digest: None,
         channel: "telegram".to_owned(),

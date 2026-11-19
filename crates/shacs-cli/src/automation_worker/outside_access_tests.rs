@@ -223,6 +223,117 @@ fn heartbeat() -> AutomationRunSource {
 }
 
 #[test]
+fn production_cron_and_heartbeat_exec_receive_declared_startup_values() -> TestResult {
+    for is_cron in [true, false] {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(workspace.join("skills/automation"))?;
+        fs::write(
+            workspace.join("skills/automation/SKILL.md"),
+            "---\nname: automation\nrequires.env: AUTOMATION_KEY\n---\nFixture",
+        )?;
+        fs::write(
+            root.path().join(".env.json"),
+            r#"{"AUTOMATION_KEY":"automation-canary","UNDECLARED_KEY":"excluded-canary"}"#,
+        )?;
+        fs::write(workspace.join("credential-check.sh"), "test \"$AUTOMATION_KEY\" = automation-canary && test -z \"${UNDECLARED_KEY+x}\" && printf automation-credential-ok\n")?;
+        let command = "sh credential-check.sh";
+        let fixture = scripted_agent_loop_adapter(
+            root.path(),
+            json!({
+                "agents":{"defaults":{"provider":"openai","model":"gpt-4o","workspace":workspace,"unifiedSession":false}},
+                "permissions":{"mode":"default","allow":["exec(sh credential-check.sh)"]},
+                "tools":{"exec":{"enable":true},"toolSearch":{"enabled":"off"}}
+            }),
+            ToolRegistry::new(),
+            vec![
+                LlmResponse {
+                    tool_calls: vec![ToolCallRequest::new(
+                        "credential",
+                        "exec",
+                        json!({"command":command})
+                            .as_object()
+                            .cloned()
+                            .unwrap_or_default(),
+                    )],
+                    finish_reason: "tool_calls".to_owned(),
+                    ..LlmResponse::default()
+                },
+                LlmResponse {
+                    content: Some("done".to_owned()),
+                    ..LlmResponse::default()
+                },
+            ],
+            PermissionMode::Default,
+        )?;
+        let bundle = crate::load_runtime_config(crate::RuntimeConfigOptions {
+            config_path: Some(root.path().join("config.json")),
+            ..crate::RuntimeConfigOptions::default()
+        })?;
+        let mut adapter = crate::AgentLoopChatCompletionAdapter::from_bundle(bundle, true)?;
+        adapter.client = fixture.client;
+        adapter.containment_snapshot = Some(ContainmentSnapshotRef {
+            contained: Some(true),
+            backend: Some("official-container+test".to_owned()),
+            digest: Some("test-containment".to_owned()),
+            summary: None,
+        });
+        CONFIRMED_CONTAINMENT.set(true);
+        let source = if is_cron {
+            let store = crate::cron_store_path(root.path());
+            let scheduler = PersistentCronService::new(&store)?;
+            scheduler.start()?;
+            let items = vec![CronPermission::Command {
+                command: command.to_owned(),
+            }];
+            let job = scheduler.add_job(AddCronJob {
+                permissions: items.clone(),
+                name: "credential-check".to_owned(),
+                schedule: CronSchedule::every(60_000),
+                message: "check credentials".to_owned(),
+                deliver: false,
+                channel: None,
+                to: None,
+                delete_after_run: false,
+                channel_meta: Value::Null,
+                session_key: None,
+            });
+            let digest = permissions_digest(&items);
+            record_grant(
+                &grants_path(&store),
+                CronGrant {
+                    job_id: job.id.clone(),
+                    digest: digest.clone(),
+                    items,
+                    approved_at_ms: 1,
+                    revoked_at_ms: None,
+                },
+            )?;
+            AutomationRunSource::Cron {
+                job_id: Some(job.id),
+                grant_digest: Some(digest),
+                work_id: "credential-check".to_owned(),
+            }
+        } else {
+            heartbeat()
+        };
+        adapter.execute_agent_automation(
+            &request(source),
+            "check credentials",
+            AutomationExecutionControl::runtime_default(),
+        )?;
+        let results = tool_results(&workspace.join("sessions"))?;
+        assert!(
+            results
+                .iter()
+                .any(|result| result.contains("automation-credential-ok")),
+            "{results:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn a_cron_run_is_refused_outside_the_workspace_even_in_bypass() -> TestResult {
     // When
     let run = run_automation(cron(), WRITER, true)?;

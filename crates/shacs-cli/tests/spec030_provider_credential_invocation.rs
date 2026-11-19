@@ -183,6 +183,7 @@ fn bundle(config: Config, root: &Path, workspace: std::path::PathBuf) -> ConfigB
             workspace,
         },
         migrations: Vec::new(),
+        runtime_environment: None,
     }
 }
 

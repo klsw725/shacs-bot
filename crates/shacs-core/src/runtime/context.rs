@@ -3,10 +3,14 @@ use super::MemoryStore;
 use chrono::{Datelike, Local, Offset, Utc};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use shacs_skills::{builtin_skills, is_deferred_builtin_skill, BUILTIN_SKILLS_DIR};
+use shacs_config::{self, EnvFile, EnvSource, ProcessEnv, RuntimeEnvironment};
+use shacs_skills::{
+    self, SkillCredentialSources, SkillCredentialStatus, SkillEnvironment, SkillRegistryOptions,
+};
 use shacs_templates::{render_agent_template, template_variables, AgentTemplate};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::{env, fs, io};
 
 pub(crate) const BOOTSTRAP_FILES: [&str; 4] = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"];
@@ -22,10 +26,13 @@ pub struct ContextBuilder {
     timezone: Option<String>,
     disabled_skills: Vec<String>,
     extra_skill_roots: Vec<PathBuf>,
+    user_skills_dir: Option<PathBuf>,
+    skill_config_path: PathBuf,
     media_roots: Vec<PathBuf>,
     native_image_input_supported: bool,
     media: media::MediaContext,
     configured_env: BTreeMap<String, String>,
+    selected_skills: Option<Arc<Vec<SkillDocument>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,9 +68,12 @@ impl ContextBuilder {
             timezone: None,
             disabled_skills: Vec::new(),
             extra_skill_roots: Vec::new(),
+            user_skills_dir: None,
+            skill_config_path: shacs_config::default_config_path(),
             media_roots: Vec::new(),
             native_image_input_supported: true,
             configured_env: BTreeMap::new(),
+            selected_skills: None,
         }
     }
 
@@ -85,6 +95,12 @@ impl ContextBuilder {
         self
     }
 
+    pub fn with_skill_config(mut self, config_path: &Path) -> Self {
+        self.skill_config_path = config_path.to_path_buf();
+        self.user_skills_dir = config_path.parent().map(|path| path.join("skills"));
+        self
+    }
+
     pub fn with_media_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
         self.media_roots = roots.into_iter().collect();
         self
@@ -102,6 +118,13 @@ impl ContextBuilder {
 
     pub fn workspace(&self) -> &Path {
         &self.workspace
+    }
+
+    pub(crate) fn for_workspace(&self, workspace: &Path) -> Self {
+        Self {
+            workspace: workspace.to_path_buf(),
+            ..self.clone()
+        }
     }
 
     pub fn build_system_prompt(&self, channel: Option<&str>) -> String {
@@ -212,86 +235,103 @@ impl ContextBuilder {
         )
     }
 
-    fn skill_roots(&self) -> Vec<PathBuf> {
-        let mut roots = vec![
-            self.workspace.join("skills"),
-            self.workspace.join(".shacs-bot").join("skills"),
-            self.workspace.join(".nanobot").join("skills"),
-            self.workspace.join("builtin_skills"),
-        ];
-        roots.extend(self.extra_skill_roots.clone());
-        roots
-    }
-
     fn load_skill_documents(&self) -> Vec<SkillDocument> {
-        let disabled = self
-            .disabled_skills
-            .iter()
-            .map(|name| name.as_str())
-            .collect::<Vec<_>>();
-        let mut documents = Vec::new();
-        let mut seen = BTreeSet::new();
-        let materialized_builtin_root = self.workspace.join(BUILTIN_SKILLS_DIR);
-        for root in self.skill_roots() {
-            let is_materialized_builtin_root = root == materialized_builtin_root;
-            let Ok(entries) = fs::read_dir(root) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let path = if path.is_dir() {
-                    path.join("SKILL.md")
-                } else {
-                    path
-                };
-                if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
-                    continue;
-                }
-                if let Some(document) = SkillDocument::from_path(&path, &self.configured_env) {
-                    if document.disabled
-                        || disabled.contains(&document.name.as_str())
-                        || (is_materialized_builtin_root
-                            && is_deferred_builtin_skill(document.name.as_str()))
-                    {
-                        continue;
-                    }
-                    if !seen.insert(document.name.clone()) {
-                        continue;
-                    }
-                    documents.push(document);
-                }
-            }
+        if let Some(selected) = &self.selected_skills {
+            return selected.as_ref().clone();
         }
-        for document in self.virtual_builtin_skill_documents() {
-            if document.disabled || disabled.contains(&document.name.as_str()) {
-                continue;
-            }
-            if !seen.insert(document.name.clone()) {
-                continue;
-            }
-            documents.push(document);
-        }
-        documents.sort_by(|left, right| left.name.cmp(&right.name));
-        documents
+        self.resolve_skill_documents(&ProcessEnv, &EnvFile::load(&self.skill_config_path))
+            .0
     }
 
-    fn virtual_builtin_skill_documents(&self) -> Vec<SkillDocument> {
-        builtin_skills()
-            .iter()
-            .filter_map(|skill| {
-                let file = skill
-                    .files
+    /// Freezes sources, bodies and readiness once, before any tools or children run.
+    pub fn select_skills(mut self, environment: &RuntimeEnvironment) -> (Self, SkillEnvironment) {
+        let (documents, values) =
+            self.resolve_skill_documents(environment, &Ok(environment.file.clone()));
+        self.selected_skills = Some(Arc::new(documents));
+        (self, SkillEnvironment::new(values))
+    }
+
+    fn resolve_skill_documents(
+        &self,
+        process: &impl EnvSource,
+        file: &Result<EnvFile, shacs_config::ConfigError>,
+    ) -> (Vec<SkillDocument>, BTreeMap<String, String>) {
+        let mut options = SkillRegistryOptions::new(&self.workspace);
+        options.user_skills_dir = self.user_skills_dir.clone();
+        options.plugin_roots = self.extra_skill_roots.clone();
+        options.plugin_roots_enabled = true;
+        let Ok(registry) = shacs_skills::discover_skill_registry(options) else {
+            return (Vec::new(), BTreeMap::new());
+        };
+        let env_path = shacs_config::env_file_path(&self.skill_config_path);
+        let mut values = BTreeMap::new();
+        let documents = registry
+            .active_entries()
+            .into_iter()
+            .filter(|entry| entry.inactive_reason(&self.disabled_skills).is_none())
+            .filter_map(|entry| {
+                let raw = entry.raw.as_ref()?.clone();
+                let descriptor = &entry.descriptor;
+                let status = match file {
+                    Ok(file) => {
+                        let resolution = shacs_skills::resolve_skill_credentials(
+                            entry,
+                            &self.disabled_skills,
+                            SkillCredentialSources {
+                                process,
+                                file,
+                                explicit: &self.configured_env,
+                            },
+                        );
+                        values.extend(resolution.values().clone());
+                        resolution.status
+                    }
+                    Err(error) => SkillCredentialStatus {
+                        required: descriptor.credentials.required.clone(),
+                        reserved: descriptor.credentials.reserved.clone(),
+                        diagnostics: descriptor
+                            .credentials
+                            .diagnostics
+                            .iter()
+                            .cloned()
+                            .chain([error.to_string()])
+                            .collect(),
+                        ..SkillCredentialStatus::default()
+                    },
+                };
+                let mut missing_bins: Vec<String> = descriptor
+                    .requirements
                     .iter()
-                    .find(|file| file.relative_path == "SKILL.md")?;
-                let raw = String::from_utf8(file.content.to_vec()).ok()?;
-                let source_path = self
-                    .workspace
-                    .join("builtin_skills")
-                    .join(skill.name)
-                    .join("SKILL.md");
-                SkillDocument::from_raw(source_path, raw, &self.configured_env)
+                    .filter_map(|requirement| requirement.split_once(": "))
+                    .filter(|(key, _)| key.ends_with(".bins"))
+                    .flat_map(|(_, value)| value.split(','))
+                    .map(|name| name.trim().trim_matches(['[', ']', '\'', '"']).trim())
+                    .filter(|name| !name.is_empty() && !bin_available(name))
+                    .map(str::to_owned)
+                    .collect();
+                let mut seen_bins = BTreeSet::new();
+                missing_bins.retain(|name| seen_bins.insert(name.clone()));
+                let unavailable_summary = (!missing_bins.is_empty())
+                    .then(|| format!("missing bins: {}", missing_bins.join(", ")));
+                Some(SkillDocument {
+                    name: descriptor.name.clone(),
+                    description: descriptor.description.clone(),
+                    source_path: descriptor.source_path.clone().unwrap_or_else(|| {
+                        self.workspace
+                            .join("builtin_skills")
+                            .join(&descriptor.name)
+                            .join("SKILL.md")
+                    }),
+                    always: descriptor.always,
+                    available: unavailable_summary.is_none(),
+                    unavailable_summary,
+                    credential_guidance: status.guidance(&env_path),
+                    body: strip_skill_frontmatter(&raw).trim().to_owned(),
+                    raw,
+                })
             })
-            .collect()
+            .collect();
+        (documents, values)
     }
 
     fn load_always_skills(&self) -> Option<String> {
@@ -299,7 +339,14 @@ impl ContextBuilder {
             .load_skill_documents()
             .into_iter()
             .filter(|skill| skill.always && skill.available)
-            .map(|skill| format!("### Skill: {}\n\n{}", skill.name, skill.body))
+            .map(|skill| {
+                let content = format!("### Skill: {}\n\n{}", skill.name, skill.body);
+                if skill.credential_guidance.is_empty() {
+                    content
+                } else {
+                    format!("{content}\n\n{}", skill.credential_guidance)
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n\n---\n\n");
         (!content.is_empty()).then_some(content)
@@ -402,7 +449,13 @@ impl ContextBuilder {
         self.load_skill_documents()
             .into_iter()
             .find(|skill| skill.name == name)
-            .map(|skill| skill.raw)
+            .map(|skill| {
+                if skill.credential_guidance.is_empty() {
+                    skill.raw
+                } else {
+                    format!("{}\n\n{}", skill.raw, skill.credential_guidance)
+                }
+            })
     }
 
     pub fn load_skills_for_context(&self, skill_names: &[impl AsRef<str>]) -> String {
@@ -454,6 +507,12 @@ impl ContextBuilder {
                             skill.source_path.display()
                         );
                     }
+                }
+                if !skill.credential_guidance.is_empty() {
+                    line.push_str(&format!(
+                        "\n  {}",
+                        skill.credential_guidance.replace('\n', "\n  ")
+                    ));
                 }
                 line
             })
@@ -528,104 +587,10 @@ struct SkillDocument {
     unavailable_summary: Option<String>,
     source_path: PathBuf,
     always: bool,
-    disabled: bool,
     available: bool,
+    credential_guidance: String,
     raw: String,
     body: String,
-}
-
-impl SkillDocument {
-    fn from_path(path: &Path, configured_env: &BTreeMap<String, String>) -> Option<Self> {
-        let raw = fs::read_to_string(path).ok()?;
-        Self::from_raw(path.to_path_buf(), raw, configured_env)
-    }
-
-    fn from_raw(
-        source_path: PathBuf,
-        raw: String,
-        configured_env: &BTreeMap<String, String>,
-    ) -> Option<Self> {
-        let (frontmatter, body) = split_frontmatter(&raw);
-        let metadata = parse_frontmatter(frontmatter.unwrap_or_default());
-        let fallback_name = skill_name_from_path(&source_path);
-        let name = fallback_name;
-        let requirement = SkillRequirement::from_metadata(&metadata);
-        let unavailable_summary = requirement.unavailable_summary(configured_env);
-        let body = body.trim().to_owned();
-        Some(Self {
-            name,
-            description: metadata.get("description").cloned(),
-            unavailable_summary: unavailable_summary.clone(),
-            source_path,
-            always: parse_bool(metadata.get("always"))
-                || parse_bool(metadata.get("metadata.nanobot.always"))
-                || parse_bool(metadata.get("metadata.openclaw.always")),
-            disabled: parse_bool(metadata.get("disabled")),
-            available: unavailable_summary.is_none(),
-            raw,
-            body,
-        })
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-struct SkillRequirement {
-    bins: Vec<String>,
-    env: Vec<String>,
-}
-
-impl SkillRequirement {
-    fn from_metadata(metadata: &BTreeMap<String, String>) -> Self {
-        Self {
-            bins: unique_list([
-                parse_list(metadata.get("requires.bins")),
-                parse_list(metadata.get("metadata.nanobot.requires.bins")),
-                parse_list(metadata.get("metadata.openclaw.requires.bins")),
-                parse_inline_metadata_requires(metadata.get("metadata"), "nanobot", "bins"),
-                parse_inline_metadata_requires(metadata.get("metadata"), "openclaw", "bins"),
-            ]),
-            env: unique_list([
-                parse_list(metadata.get("requires.env")),
-                parse_list(metadata.get("metadata.nanobot.requires.env")),
-                parse_list(metadata.get("metadata.openclaw.requires.env")),
-                parse_inline_metadata_requires(metadata.get("metadata"), "nanobot", "env"),
-                parse_inline_metadata_requires(metadata.get("metadata"), "openclaw", "env"),
-            ]),
-        }
-    }
-
-    fn unavailable_summary(&self, configured_env: &BTreeMap<String, String>) -> Option<String> {
-        let missing_bins = self
-            .bins
-            .iter()
-            .filter(|name| !bin_available(name))
-            .cloned()
-            .collect::<Vec<_>>();
-        let missing_env = self
-            .env
-            .iter()
-            .filter(|name| !env_requirement_available(name, configured_env))
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut parts = Vec::new();
-        if !missing_bins.is_empty() {
-            parts.push(format!("missing bins: {}", missing_bins.join(", ")));
-        }
-        if !missing_env.is_empty() {
-            parts.push(format!("missing env: {}", missing_env.join(", ")));
-        }
-        (!parts.is_empty()).then(|| parts.join("; "))
-    }
-}
-
-fn env_requirement_available(name: &str, configured_env: &BTreeMap<String, String>) -> bool {
-    configured_env
-        .get(name)
-        .map(|value| !value.is_empty())
-        .unwrap_or(false)
-        || env::var_os(name)
-            .map(|value| !value.is_empty())
-            .unwrap_or(false)
 }
 
 fn merge_runtime_context(runtime_context: String, user_content: Value) -> Value {
@@ -893,127 +858,6 @@ fn strip_skill_frontmatter(raw: &str) -> &str {
     split_frontmatter(raw).1
 }
 
-fn skill_name_from_path(path: &Path) -> String {
-    if path.file_name().and_then(|value| value.to_str()) == Some("SKILL.md") {
-        return path
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|value| value.to_str())
-            .unwrap_or("skill")
-            .to_owned();
-    }
-    path.file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("skill")
-        .to_owned()
-}
-
-fn parse_frontmatter(frontmatter: &str) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::<String, String>::new();
-    let mut stack = Vec::<(usize, String)>::new();
-    for line in frontmatter.lines() {
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            continue;
-        }
-        let indent = line
-            .chars()
-            .take_while(|character| character.is_whitespace())
-            .count();
-        while stack.last().is_some_and(|(level, _)| *level >= indent) {
-            stack.pop();
-        }
-        let trimmed = line.trim();
-        if let Some(item) = trimmed.strip_prefix("- ") {
-            let full_key = stack
-                .iter()
-                .map(|(_, key)| key.as_str())
-                .collect::<Vec<_>>()
-                .join(".");
-            if !full_key.is_empty() {
-                let item = normalize_frontmatter_value(item);
-                map.entry(full_key)
-                    .and_modify(|value| {
-                        value.push(',');
-                        value.push_str(&item);
-                    })
-                    .or_insert(item);
-            }
-            continue;
-        }
-        let Some((key, value)) = trimmed.split_once(':') else {
-            continue;
-        };
-        let key = key.trim();
-        let full_key = stack
-            .iter()
-            .map(|(_, key)| key.as_str())
-            .chain(std::iter::once(key))
-            .collect::<Vec<_>>()
-            .join(".");
-        let value = normalize_frontmatter_value(value);
-        if value.is_empty() {
-            stack.push((indent, key.to_owned()));
-        } else {
-            map.insert(full_key, value);
-        }
-    }
-    map
-}
-
-fn normalize_frontmatter_value(value: &str) -> String {
-    value.trim().trim_matches('"').trim_matches('\'').to_owned()
-}
-
-fn parse_list(value: Option<&String>) -> Vec<String> {
-    let Some(value) = value else {
-        return Vec::new();
-    };
-    value
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .split(',')
-        .map(|item| item.trim().trim_matches('"').trim_matches('\''))
-        .filter(|item| !item.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-fn parse_inline_metadata_requires(
-    value: Option<&String>,
-    namespace: &str,
-    requirement: &str,
-) -> Vec<String> {
-    let Some(value) = value else {
-        return Vec::new();
-    };
-    let Ok(metadata) = serde_json::from_str::<Value>(value) else {
-        return Vec::new();
-    };
-    metadata
-        .get(namespace)
-        .and_then(|value| value.get("requires"))
-        .and_then(|value| value.get(requirement))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .filter(|item| !item.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-fn unique_list(lists: impl IntoIterator<Item = Vec<String>>) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for item in lists.into_iter().flatten() {
-        if seen.insert(item.clone()) {
-            out.push(item);
-        }
-    }
-    out
-}
-
 fn bin_available(name: &str) -> bool {
     let Some(paths) = env::var_os("PATH") else {
         return false;
@@ -1053,17 +897,6 @@ fn read_bootstrap_file(workspace: &Path, path: &Path) -> Option<String> {
         return None;
     }
     fs::read_to_string(canonical).ok()
-}
-
-fn parse_bool(value: Option<&String>) -> bool {
-    value
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "true" | "yes" | "1"
-            )
-        })
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1108,24 +941,56 @@ mod tests {
         fs::create_dir_all(&skill_dir)?;
         fs::write(
             skill_dir.join("SKILL.md"),
-            "---\ndescription: Configured env skill\nrequires.env: SHACS_CORE_TEST_CONFIGURED_ENV_ONLY\n---\nUse configured env.\n",
+            "---\ndescription: Configured env skill\nalways: true\nrequires.env: SHACS_CORE_TEST_CONFIGURED_ENV_ONLY\n---\nUse configured env.\n",
         )?;
 
-        let unavailable =
-            ContextBuilder::new(workspace.path()).build_skills_summary(&BTreeSet::new());
-        if !unavailable.contains("unavailable: missing env: SHACS_CORE_TEST_CONFIGURED_ENV_ONLY") {
-            return Err(format!(
-                "skill unexpectedly available without configured env: {unavailable}"
-            )
-            .into());
-        }
+        let builder = ContextBuilder::new(workspace.path())
+            .with_skill_config(&workspace.path().join("config.json"));
+        let missing = builder.build_skills_summary(&BTreeSet::new());
+        assert!(
+            missing.contains("missing env: SHACS_CORE_TEST_CONFIGURED_ENV_ONLY"),
+            "missing names stay visible"
+        );
+        assert!(
+            !missing.contains("unavailable: missing env"),
+            "credentials do not disable skills"
+        );
+        assert!(
+            builder
+                .active_always_skill_names()
+                .contains(&"configured-env".to_owned()),
+            "missing credentials do not block always injection"
+        );
+        let prompt = builder.build_system_prompt(None);
+        assert!(
+            prompt.contains("Use configured env."),
+            "always body is injected"
+        );
+        assert!(
+            prompt.contains(&workspace.path().join(".env.json").display().to_string()),
+            "guidance uses the actual data path"
+        );
+        assert!(
+            builder.load_skill("configured-env").is_some_and(
+                |body| body.contains("missing env: SHACS_CORE_TEST_CONFIGURED_ENV_ONLY")
+            ),
+            "explicit loading keeps readiness guidance"
+        );
 
-        let available = ContextBuilder::new(workspace.path())
+        let available = builder
             .with_configured_env(BTreeMap::from([(
                 "SHACS_CORE_TEST_CONFIGURED_ENV_ONLY".to_owned(),
-                "configured".to_owned(),
+                "configured-secret-canary".to_owned(),
             )]))
             .build_skills_summary(&BTreeSet::new());
+        assert!(
+            !available.contains("missing env: SHACS_CORE_TEST_CONFIGURED_ENV_ONLY"),
+            "configured values satisfy readiness"
+        );
+        assert!(
+            !available.contains("configured-secret-canary"),
+            "summary never includes values"
+        );
         let configured_line = available
             .lines()
             .find(|line| line.contains("configured-env"))
@@ -1135,6 +1000,187 @@ mod tests {
                 format!("configured env did not satisfy skill requirement: {available}").into(),
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn unreadable_skill_keeps_good_body_always_injection_and_builtins() -> Result<(), Box<dyn Error>>
+    {
+        use shacs_skills::SkillRegistryStatus;
+
+        let workspace = tempfile::tempdir()?;
+        let good = workspace.path().join("skills/good");
+        fs::create_dir_all(&good)?;
+        fs::write(
+            good.join("SKILL.md"),
+            "---\nname: good\nalways: true\n---\nGood skill body.",
+        )?;
+        fs::write(
+            workspace.path().join("skills/bad.md"),
+            b"private-canary\xff",
+        )?;
+        let context = ContextBuilder::new(workspace.path())
+            .with_skill_config(&workspace.path().join("config.json"));
+
+        assert!(
+            context
+                .load_skill("good")
+                .is_some_and(|raw| raw.contains("Good skill body.")),
+            "one unreadable file must not hide a good skill body"
+        );
+        assert!(
+            context
+                .load_always_skills()
+                .is_some_and(|body| body.contains("Good skill body.")),
+            "one unreadable file must not prevent always injection"
+        );
+        assert!(
+            context
+                .build_skills_summary(&BTreeSet::new())
+                .contains("**skill-creator**"),
+            "virtual builtins must remain listed"
+        );
+        let registry =
+            shacs_skills::discover_skill_registry(SkillRegistryOptions::new(workspace.path()))?;
+        let bad = registry
+            .find("bad")
+            .ok_or("missing malformed skill diagnostic")?;
+        assert_eq!(bad.status, SkillRegistryStatus::Malformed);
+        assert!(
+            bad.raw.is_none(),
+            "unreadable input must not enter the registry"
+        );
+        assert!(
+            !bad.diagnostics.is_empty() && !bad.diagnostics.join(" ").contains("private-canary"),
+            "per-file diagnostics must explain failure without copying input"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn registry_disabled_winners_and_conflicts_do_not_resurrect_lower_sources(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        for (directory, name, fields) in [
+            (
+                root.path().join("skills/lower"),
+                "disabled-winner",
+                "requires.env: LOWER_KEY",
+            ),
+            (
+                workspace.join("skills/winner"),
+                "disabled-winner",
+                "disabled: true\nrequires.env: WINNER_KEY",
+            ),
+            (
+                workspace.join("skills/conflict-a"),
+                "conflict",
+                "requires.env: FIRST_KEY",
+            ),
+            (
+                workspace.join(".shacs-bot/skills/conflict-b"),
+                "conflict",
+                "requires.env: SECOND_KEY",
+            ),
+            (
+                workspace.join("skills/config-disabled"),
+                "config-disabled",
+                "requires.env: DISABLED_KEY",
+            ),
+            (
+                workspace.join("builtin_skills/teams-meeting-pipeline"),
+                "teams-meeting-pipeline",
+                "requires.env: DEFERRED_KEY",
+            ),
+        ] {
+            fs::create_dir_all(&directory)?;
+            fs::write(
+                directory.join("SKILL.md"),
+                format!("---\nname: {name}\n{fields}\n---\n{name} body"),
+            )?;
+        }
+        let builder = ContextBuilder::new(&workspace)
+            .with_skill_config(&root.path().join("config.json"))
+            .with_disabled_skills(["config-disabled".to_owned()]);
+        for name in [
+            "disabled-winner",
+            "conflict",
+            "config-disabled",
+            "teams-meeting-pipeline",
+        ] {
+            assert!(builder.load_skill(name).is_none(), "{name} must not load");
+            assert!(
+                !builder.skill_body_hashes_for_context().contains_key(name),
+                "{name} must not enter context"
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn selected_skills_freeze_bodies_and_values_until_the_next_run() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let skill_dir = root.path().join("skills/frozen");
+        fs::create_dir_all(&skill_dir)?;
+        let path = skill_dir.join("SKILL.md");
+        fs::write(
+            &path,
+            "---\nname: frozen\nrequires.env: OLD_KEY\n---\nOriginal body",
+        )?;
+        fs::write(
+            root.path().join(".env.json"),
+            r#"{"OLD_KEY":"startup-canary","NEW_KEY":"next-key-canary"}"#,
+        )?;
+        let mut config = shacs_config::Config::default();
+        let startup = RuntimeEnvironment::resolve(&mut config, &config_path, &BTreeMap::new())?;
+        let builder = ContextBuilder::new(root.path()).with_skill_config(&config_path);
+        let (selected, values) = builder.clone().select_skills(&startup);
+
+        fs::write(
+            &path,
+            "---\nname: frozen\nrequires.env: NEW_KEY\n---\nChanged body",
+        )?;
+        fs::write(
+            root.path().join(".env.json"),
+            r#"{"NEW_KEY":"rotated-canary"}"#,
+        )?;
+        let child = selected.for_workspace(&root.path().join("child"));
+        assert!(
+            child
+                .load_skill("frozen")
+                .is_some_and(|body| body.contains("Original body")),
+            "children keep the parent's selected source and body"
+        );
+        assert_eq!(
+            values.values(),
+            &BTreeMap::from([("OLD_KEY".to_owned(), "startup-canary".to_owned())])
+        );
+        let (_, next_values) = builder.clone().select_skills(&startup);
+        assert_eq!(
+            next_values.values(),
+            &BTreeMap::from([("NEW_KEY".to_owned(), "next-key-canary".to_owned())])
+        );
+        let restarted = RuntimeEnvironment::resolve(&mut config, &config_path, &BTreeMap::new())?;
+        let (_, restarted_values) = builder.clone().select_skills(&restarted);
+        assert_eq!(
+            restarted_values.values().get("NEW_KEY").map(String::as_str),
+            Some("rotated-canary")
+        );
+        fs::remove_file(root.path().join(".env.json"))?;
+        let deleted = RuntimeEnvironment::resolve(&mut config, &config_path, &BTreeMap::new())?;
+        let (missing, empty) = builder.select_skills(&deleted);
+        assert!(
+            empty.values().is_empty(),
+            "a restarted runtime observes deletion"
+        );
+        assert!(missing
+            .build_skills_summary(&BTreeSet::new())
+            .contains("missing env: NEW_KEY"));
+        assert!(
+            !format!("{startup:?} {values:?}").contains("startup-canary"),
+            "new debug surfaces contain names only"
+        );
         Ok(())
     }
 }

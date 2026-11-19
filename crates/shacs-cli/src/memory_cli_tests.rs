@@ -28,6 +28,7 @@ fn bundle(root: &Path, config: Config) -> Result<ConfigBundle, Box<dyn Error>> {
             workspace,
         },
         migrations: Vec::new(),
+        runtime_environment: None,
     })
 }
 

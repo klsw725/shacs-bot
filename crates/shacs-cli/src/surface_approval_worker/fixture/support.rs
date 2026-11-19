@@ -5,6 +5,7 @@ use crate::{
     write_runtime_marker_atomically, AgentLoopChatCompletionAdapter,
 };
 use serde_json::{json, Map, Value};
+use shacs_config::RuntimeEnvironment;
 use shacs_core::runtime::{
     InboundMessage, PermissionMode, PermissionModeSnapshot, PluginRuntimeSnapshot, SessionTurnLock,
     ToolSearchConfig,
@@ -64,6 +65,7 @@ pub(super) fn adapter(
         exec_path_append: None,
         exec_allowed_env_keys: Vec::new(),
         exec_env: BTreeMap::new(),
+        runtime_environment: RuntimeEnvironment::default(),
         tool_search: ToolSearchConfig::default(),
         containment_snapshot: None,
         #[cfg(not(test))]

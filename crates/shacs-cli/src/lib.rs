@@ -36,6 +36,7 @@ mod runtime_ownership_takeover_tests;
 #[path = "saved_credential_tests.rs"]
 mod saved_credential_tests;
 mod setup_material;
+mod skill_readiness;
 pub mod spec030_cli;
 mod spec030_startup_facts;
 mod spec031_cli;
@@ -56,6 +57,7 @@ mod trajectory_cli;
 mod web_watch_profile;
 pub use consent_prompt::{Prompt, ScriptedPrompt, StdPrompt};
 pub use runtime_cleanup::{RemovedRuntimePath, RemovedRuntimePathKind, RuntimeCleanupReceipt};
+use shacs_config::RuntimeEnvironment;
 use spec035_cli_media::wiring::{
     format_runtime_inspect, production_tool_registry, runtime_inspect_inner,
     runtime_inspect_with_owner,
@@ -186,7 +188,8 @@ use shacs_session::{
 };
 use shacs_skills::{
     discover_skill_registry, discover_workflow_recipes, sync_builtin_skills,
-    SkillBackedWorkflowRecipe, SkillRegistryEntry, SkillRegistryOptions, SkillRegistryStatus,
+    SkillBackedWorkflowRecipe, SkillCredentialStatus, SkillRegistry, SkillRegistryEntry,
+    SkillRegistryOptions, SkillRegistryStatus,
 };
 use shacs_templates::sync_workspace_templates;
 use shacs_utils::attachments::{
@@ -1719,6 +1722,7 @@ pub struct SkillsListReport {
     pub config_path: PathBuf,
     pub workspace: PathBuf,
     pub entries: Vec<SkillRegistryEntry>,
+    pub credential_statuses: Vec<SkillCredentialStatus>,
     pub all: bool,
 }
 
@@ -1727,6 +1731,7 @@ pub struct SkillsShowReport {
     pub config_path: PathBuf,
     pub workspace: PathBuf,
     pub entry: SkillRegistryEntry,
+    pub credential_status: SkillCredentialStatus,
     pub workflow_recipes: Vec<SkillBackedWorkflowRecipe>,
 }
 
@@ -3153,12 +3158,10 @@ fn load_runtime_config_with_admission(
         bundle.config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
     }
     if resolve_env {
-        let env_file = shacs_config::resolve_config_with_env_file(
-            &mut bundle.config,
-            &bundle.context.config_path,
-            env,
-        )?;
-        auto_mode_cli::remember_env_file(&bundle.context.config_path, &env_file);
+        let environment =
+            RuntimeEnvironment::resolve(&mut bundle.config, &bundle.context.config_path, env)?;
+        auto_mode_cli::remember_env_file(&bundle.context.config_path, &environment.file);
+        bundle.runtime_environment = Some(environment);
     }
     bundle.context = config_context(
         Some(bundle.context.config_path.clone()),
@@ -7885,19 +7888,22 @@ fn plugin_block_summary(plugin: &DiscoveredPlugin) -> String {
 }
 
 pub fn skills_list(options: SkillsListOptions) -> Result<SkillsListReport, CliError> {
-    let (config_path, workspace, entries) = load_skill_registry(
+    let (bundle, registry) = load_skill_bundle_and_registry(
         options.config_path.clone(),
         options.workspace_override.clone(),
     )?;
-    let mut entries = entries;
+    let statuses = skill_readiness::statuses(&bundle, &registry)?;
+    let mut rows: Vec<_> = registry.entries.into_iter().zip(statuses).collect();
     if !options.all {
-        entries.retain(|entry| entry.status == SkillRegistryStatus::Active);
+        rows.retain(|(_, status)| status.inactive_reason.is_none());
     }
-    entries.sort_by(|left, right| left.descriptor.name.cmp(&right.descriptor.name));
+    rows.sort_by(|(left, _), (right, _)| left.descriptor.name.cmp(&right.descriptor.name));
+    let (entries, credential_statuses) = rows.into_iter().unzip();
     Ok(SkillsListReport {
-        config_path,
-        workspace,
+        config_path: bundle.context.config_path,
+        workspace: bundle.context.workspace,
         entries,
+        credential_statuses,
         all: options.all,
     })
 }
@@ -7908,35 +7914,36 @@ pub fn skills_show(options: SkillsShowOptions) -> Result<SkillsShowReport, CliEr
             "skills show requires a skill name".to_owned(),
         ));
     }
-    let (config_path, workspace, entries) = load_skill_registry(
+    let (bundle, registry) = load_skill_bundle_and_registry(
         options.config_path.clone(),
         options.workspace_override.clone(),
     )?;
-    let entry = entries
+    let statuses = skill_readiness::statuses(&bundle, &registry)?;
+    let entries = &registry.entries;
+    let index = entries
         .iter()
-        .find(|entry| {
+        .position(|entry| {
             entry.status == SkillRegistryStatus::Active && entry.descriptor.name == options.name
         })
         .or_else(|| {
             entries
                 .iter()
-                .find(|entry| entry.descriptor.name == options.name)
+                .position(|entry| entry.descriptor.name == options.name)
         })
-        .cloned()
         .ok_or_else(|| {
             CliError::InvalidArguments(format!("unknown skill `{}`", options.name.trim()))
         })?;
-    let registry = shacs_skills::SkillRegistry {
-        entries: entries.clone(),
-    };
+    let entry = entries[index].clone();
+    let credential_status = statuses[index].clone();
     let workflow_recipes = discover_workflow_recipes(&registry)
         .into_iter()
         .filter(|recipe| recipe.skill_name == entry.descriptor.name)
         .collect();
     Ok(SkillsShowReport {
-        config_path,
-        workspace,
+        config_path: bundle.context.config_path,
+        workspace: bundle.context.workspace,
         entry,
+        credential_status,
         workflow_recipes,
     })
 }
@@ -7970,6 +7977,18 @@ fn load_skill_registry(
     config_path: Option<PathBuf>,
     workspace_override: Option<PathBuf>,
 ) -> Result<(PathBuf, PathBuf, Vec<SkillRegistryEntry>), CliError> {
+    let (bundle, registry) = load_skill_bundle_and_registry(config_path, workspace_override)?;
+    Ok((
+        bundle.context.config_path,
+        bundle.context.workspace,
+        registry.entries,
+    ))
+}
+
+fn load_skill_bundle_and_registry(
+    config_path: Option<PathBuf>,
+    workspace_override: Option<PathBuf>,
+) -> Result<(ConfigBundle, SkillRegistry), CliError> {
     let config_path = config_path.unwrap_or_else(default_config_path);
     let bundle = load_config_with_env(
         LoadOptions {
@@ -7986,7 +8005,7 @@ fn load_skill_registry(
     options.plugin_roots = enabled_plugin_skill_roots(&discovery.plugins);
     options.plugin_roots_enabled = true;
     let registry = discover_skill_registry(options)?;
-    Ok((config_path, bundle.context.workspace, registry.entries))
+    Ok((bundle, registry))
 }
 
 fn workflow_recipes_for_bundle(
@@ -8827,12 +8846,13 @@ pub fn format_skills_list(report: SkillsListReport) -> String {
         "Skills".to_owned(),
         format!("Config: {}", report.config_path.display()),
         format!("Workspace: {}", report.workspace.display()),
+        skill_readiness::notice(&report.config_path),
     ];
     if report.entries.is_empty() {
         lines.push("No skills found.".to_owned());
         return lines.join("\n");
     }
-    for entry in report.entries {
+    for (entry, credentials) in report.entries.into_iter().zip(report.credential_statuses) {
         let description = entry
             .descriptor
             .description
@@ -8844,12 +8864,19 @@ pub fn format_skills_list(report: SkillsListReport) -> String {
         } else {
             String::new()
         };
+        let readiness = credentials.summary();
+        let readiness = if readiness.is_empty() {
+            String::new()
+        } else {
+            format!("; {readiness}")
+        };
         lines.push(format!(
-            "- {}{} — {} ({})",
+            "- {}{} — {} ({}{})",
             entry.descriptor.name,
             status,
             description,
-            entry.descriptor.source_kind.label()
+            entry.descriptor.source_kind.label(),
+            readiness
         ));
     }
     lines.join("\n")
@@ -8864,6 +8891,12 @@ pub fn format_skills_show(report: SkillsShowReport) -> String {
         format!("Config: {}", report.config_path.display()),
         format!("Workspace: {}", report.workspace.display()),
         format!("Body hash: {}", entry.descriptor.body_hash),
+        skill_readiness::notice(&report.config_path),
+        format!(
+            "Required env: {}",
+            report.credential_status.required.join(", ")
+        ),
+        format!("Credential status: {}", report.credential_status.summary()),
     ];
     if let Some(path) = entry.descriptor.source_path.as_ref() {
         lines.push(format!("Path: {}", path.display()));
@@ -19671,6 +19704,7 @@ pub struct AgentLoopChatCompletionAdapter {
     exec_path_append: Option<String>,
     exec_allowed_env_keys: Vec<String>,
     exec_env: BTreeMap<String, String>,
+    runtime_environment: RuntimeEnvironment,
     tool_search: ToolSearchConfig,
     containment_snapshot: Option<ContainmentSnapshotRef>,
     #[cfg(not(test))]
@@ -19715,10 +19749,19 @@ impl AgentLoopChatCompletionAdapter {
     }
 
     pub fn from_bundle_with_trusted_extensions(
-        bundle: ConfigBundle,
+        mut bundle: ConfigBundle,
         allow_side_effect_tools: bool,
         mut trusted_extensions: shacs_core::runtime::TrustedToolBeforeRegistry,
     ) -> Result<Self, CliError> {
+        let runtime_environment = match bundle.runtime_environment.take() {
+            Some(environment) => environment,
+            None => RuntimeEnvironment::resolve(
+                &mut bundle.config,
+                &bundle.context.config_path,
+                &ProcessEnv,
+            )?,
+        };
+        auto_mode_cli::remember_env_file(&bundle.context.config_path, &runtime_environment.file);
         auto_mode_cli::report_rule_problems(&bundle);
         let defaults = bundle.config.agents.defaults.clone();
         let registry = ProviderRegistry::new();
@@ -19814,6 +19857,7 @@ impl AgentLoopChatCompletionAdapter {
             exec_path_append,
             exec_allowed_env_keys: bundle.config.tools.exec.allowed_env_keys.clone(),
             exec_env: configured_exec_env(&bundle.config),
+            runtime_environment,
             tool_search: runtime_tool_search_config(&bundle.config.tools.tool_search),
             containment_snapshot,
             #[cfg(not(test))]
@@ -20859,7 +20903,19 @@ impl AgentLoopChatCompletionAdapter {
         let outbound_bus = bus.clone();
         let routing_metadata = stream_routing_metadata_from_inbound(&message);
         let reply_to = inbound_reply_to(&message);
-        let context_builder = self.context_builder();
+        let (context_builder, skill_environment) = self
+            .context_builder()
+            .select_skills(&self.runtime_environment);
+        config.skill_environment = skill_environment;
+        config.exec_env = self.exec_env.clone();
+        config.permission_environment = config.permission_environment.take().map(|environment| {
+            Arc::new(
+                environment
+                    .as_ref()
+                    .clone()
+                    .with_skill_environment(&config.skill_environment),
+            )
+        });
         let skill_callback_context = context_builder.clone();
         let skill_notification_callback = selected_skill_notification_callback(
             skill_callback_context,
@@ -20909,7 +20965,7 @@ impl AgentLoopChatCompletionAdapter {
                 runtime
             }
         };
-        let spawn_config = self.subagent_execution_config(&config);
+        let spawn_config = self.subagent_execution_config(&config, &context_builder);
         if let Some(ceiling) = config.permission_ceiling_snapshot.as_mut() {
             if !ceiling
                 .capability_ceiling
@@ -21105,7 +21161,11 @@ impl AgentLoopChatCompletionAdapter {
         }
     }
 
-    fn subagent_execution_config(&self, config: &AgentLoopConfig) -> SubagentExecutionConfig {
+    fn subagent_execution_config(
+        &self,
+        config: &AgentLoopConfig,
+        context: &ContextBuilder,
+    ) -> SubagentExecutionConfig {
         let mut subagent =
             SubagentExecutionConfig::new(&self.workspace, self.resolved_model.clone());
         subagent.tool_images = config.tool_images.clone();
@@ -21131,6 +21191,8 @@ impl AgentLoopChatCompletionAdapter {
         subagent.exec_path_append = self.exec_path_append.clone();
         subagent.exec_allowed_env_keys = self.exec_allowed_env_keys.clone();
         subagent.exec_env = self.exec_env.clone();
+        subagent.skill_environment = config.skill_environment.clone();
+        subagent.skill_context = Some(context.clone());
         subagent
     }
 
@@ -24832,6 +24894,7 @@ mod tests {
             config,
             context,
             migrations: Vec::new(),
+            runtime_environment: None,
         };
 
         assert!(!heartbeat_runtime_enabled(&bundle));
@@ -25803,6 +25866,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
 
@@ -28124,6 +28188,7 @@ mod tests {
                 workspace,
             },
             migrations: Vec::new(),
+            runtime_environment: None,
         };
 
         let specs = mcp_server_specs(&bundle)?;
@@ -28181,6 +28246,7 @@ mod tests {
                 workspace,
             },
             migrations: Vec::new(),
+            runtime_environment: None,
         };
         let discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
 
@@ -28254,6 +28320,7 @@ mod tests {
             exec_sandbox: Some("sandboxed".to_owned()),
             exec_path_append: Some("/configured/bin".to_owned()),
             exec_allowed_env_keys: vec!["HOME".to_owned()],
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::from([(
                 "SHACS_CLI_TEST_CONFIGURED_ENV_ONLY".to_owned(),
                 "configured".to_owned(),
@@ -28291,7 +28358,19 @@ mod tests {
             },
         });
 
-        let subagent = adapter.subagent_execution_config(&loop_config);
+        let (context, environment) = adapter
+            .context_builder()
+            .select_skills(&adapter.runtime_environment);
+        loop_config.skill_environment = environment;
+        let subagent = adapter.subagent_execution_config(&loop_config, &context);
+        assert_eq!(
+            subagent
+                .skill_environment
+                .values()
+                .get("SHACS_CLI_TEST_CONFIGURED_ENV_ONLY")
+                .map(String::as_str),
+            Some("configured")
+        );
         let parent_images = loop_config
             .tool_images
             .as_ref()
@@ -28334,6 +28413,20 @@ mod tests {
                 .map(String::as_str),
             Some("configured")
         );
+        let child_context = subagent
+            .skill_context
+            .as_ref()
+            .ok_or("missing child skill context")?;
+        assert!(
+            !child_context
+                .build_subagent_prompt()
+                .contains("missing env: SHACS_CLI_TEST_CONFIGURED_ENV_ONLY"),
+            "child readiness consumes the same explicit env"
+        );
+        assert!(
+            child_context.load_skill("configured-env").is_some(),
+            "child can load the selected skill"
+        );
         Ok(())
     }
 
@@ -28350,7 +28443,13 @@ mod tests {
         fs::create_dir_all(&skill_dir)?;
         fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: plugin-skill\ndescription: Plugin provided skill\n---\nUse plugin skill.\n",
+            "---\nname: plugin-skill\ndescription: Plugin provided skill\nrequires.env: PLUGIN_SELECTED_KEY\n---\nUse plugin skill.\n",
+        )?;
+        let lower = workspace.join("skills/plugin-skill");
+        fs::create_dir_all(&lower)?;
+        fs::write(
+            lower.join("SKILL.md"),
+            "---\nname: plugin-skill\nrequires.env: LOWER_WORKSPACE_KEY\n---\nLower body",
         )?;
         fs::write(
             plugin_root.join("plugin.json"),
@@ -28371,6 +28470,7 @@ mod tests {
                 workspace: workspace.clone(),
             },
             migrations: Vec::new(),
+            runtime_environment: None,
         };
         let discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
         let plugin_skill_roots = enabled_plugin_skill_roots(&discovery.plugins);
@@ -28384,6 +28484,17 @@ mod tests {
         assert_eq!(
             entry.descriptor.source_kind,
             shacs_skills::SkillSourceKind::PluginProvided
+        );
+        assert_eq!(
+            entry.descriptor.credentials.required,
+            ["PLUGIN_SELECTED_KEY"]
+        );
+        let mut disabled_config = bundle.config.clone();
+        disabled_config.plugins.enabled.clear();
+        let disabled_discovery = discover_plugins(&disabled_config, &bundle.context, &ProcessEnv)?;
+        assert!(
+            enabled_plugin_skill_roots(&disabled_discovery.plugins).is_empty(),
+            "disabled plugins cannot contribute skill roots"
         );
 
         let adapter = AgentLoopChatCompletionAdapter {
@@ -28416,6 +28527,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
             tool_search: ToolSearchConfig::default(),
@@ -28429,6 +28541,11 @@ mod tests {
             .build_skills_summary(&BTreeSet::new());
         assert!(skills.contains("plugin-skill"));
         assert!(skills.contains("Plugin provided skill"));
+        assert!(skills.contains("missing env: PLUGIN_SELECTED_KEY"));
+        assert!(
+            !skills.contains("LOWER_WORKSPACE_KEY"),
+            "context uses the registry winner"
+        );
         Ok(())
     }
 
@@ -28443,6 +28560,9 @@ mod tests {
                 body_hash: "sha256:body".to_owned(),
                 requirements: vec!["pip: requests".to_owned()],
                 install_metadata: Some("pip install requests".to_owned()),
+                credentials: shacs_skills::SkillCredentialDeclaration::default(),
+                always: false,
+                disabled: false,
             },
             status: SkillRegistryStatus::Active,
             diagnostics: Vec::new(),
@@ -28486,6 +28606,7 @@ mod tests {
                 workspace,
             },
             migrations: Vec::new(),
+            runtime_environment: None,
         };
 
         let facts = spec030_fact_store_for_bundle(&bundle);
@@ -28660,6 +28781,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: Some(ContainmentSnapshotRef {
@@ -28798,6 +28920,7 @@ mod tests {
                 workspace,
             },
             migrations: Vec::new(),
+            runtime_environment: None,
         })
     }
 
@@ -28984,6 +29107,7 @@ mod tests {
                 workspace,
             },
             migrations: Vec::new(),
+            runtime_environment: None,
         };
 
         let facts = spec030_fact_store_for_bundle(&bundle);
@@ -29149,6 +29273,7 @@ mod tests {
                 workspace,
             },
             migrations: Vec::new(),
+            runtime_environment: None,
         })
     }
 
@@ -29707,6 +29832,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: Some(ContainmentSnapshotRef {
@@ -29801,6 +29927,7 @@ mod tests {
                 exec_sandbox: None,
                 exec_path_append: None,
                 exec_allowed_env_keys: Vec::new(),
+                runtime_environment: RuntimeEnvironment::default(),
                 exec_env: BTreeMap::new(),
                 tool_search: ToolSearchConfig::default(),
                 containment_snapshot: Some(ContainmentSnapshotRef {
@@ -34201,6 +34328,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
@@ -34900,6 +35028,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
 
             tool_search: ToolSearchConfig::default(),
@@ -34965,6 +35094,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             tool_search: ToolSearchConfig {
                 enabled: ToolSearchMode::On,
@@ -35240,6 +35370,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
 
@@ -35347,6 +35478,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
 
@@ -35477,6 +35609,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
 
@@ -35574,6 +35707,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
 
@@ -35655,6 +35789,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
 
@@ -35755,6 +35890,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
 
@@ -35845,6 +35981,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
 
@@ -35938,6 +36075,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
 
@@ -36057,6 +36195,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
             tool_search: ToolSearchConfig::default(),
@@ -36388,6 +36527,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
             tool_search: ToolSearchConfig::default(),
@@ -36560,6 +36700,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
 
@@ -36639,6 +36780,7 @@ mod tests {
                 exec_sandbox: None,
                 exec_path_append: None,
                 exec_allowed_env_keys: Vec::new(),
+                runtime_environment: RuntimeEnvironment::default(),
                 exec_env: BTreeMap::new(),
                 runtime_verbose: false,
 
@@ -36730,6 +36872,7 @@ mod tests {
                 exec_sandbox: None,
                 exec_path_append: None,
                 exec_allowed_env_keys: Vec::new(),
+                runtime_environment: RuntimeEnvironment::default(),
                 exec_env: BTreeMap::new(),
                 runtime_verbose: false,
 
@@ -36826,6 +36969,7 @@ mod tests {
                 exec_sandbox: None,
                 exec_path_append: None,
                 exec_allowed_env_keys: Vec::new(),
+                runtime_environment: RuntimeEnvironment::default(),
                 exec_env: BTreeMap::new(),
                 runtime_verbose: false,
 
@@ -36934,6 +37078,7 @@ mod tests {
                 exec_sandbox: None,
                 exec_path_append: None,
                 exec_allowed_env_keys: Vec::new(),
+                runtime_environment: RuntimeEnvironment::default(),
                 exec_env: BTreeMap::new(),
                 runtime_verbose: false,
 
@@ -37140,6 +37285,7 @@ mod tests {
                 exec_sandbox: None,
                 exec_path_append: None,
                 exec_allowed_env_keys: Vec::new(),
+                runtime_environment: RuntimeEnvironment::default(),
                 exec_env: BTreeMap::new(),
                 runtime_verbose: false,
 
@@ -37373,6 +37519,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
 
             tool_search: ToolSearchConfig::default(),
@@ -37462,6 +37609,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: Some(ContainmentSnapshotRef {
@@ -37617,6 +37765,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
 
             tool_search: ToolSearchConfig::default(),
@@ -37716,6 +37865,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
 
             tool_search: ToolSearchConfig::default(),
@@ -38316,6 +38466,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
@@ -38578,6 +38729,7 @@ mod tests {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            runtime_environment: RuntimeEnvironment::default(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
             tool_search: ToolSearchConfig::default(),

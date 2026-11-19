@@ -83,8 +83,14 @@ fn native_fallback_reports_unsupported_without_claiming_applied_adapter(
     let root = tempfile::tempdir()?;
     fs::create_dir(root.path().join("private"))?;
     fs::create_dir(root.path().join("output"))?;
-    let mut command = command(root.path(), "printf native");
+    let mut command = command(
+        root.path(),
+        "test \"$SKILL_KEY\" = sandbox-canary && test -z \"$HOME\" && printf native",
+    );
     command.inherit_env = false;
+    command
+        .env
+        .insert("SKILL_KEY".into(), "sandbox-canary".into());
     command.env.insert("PATH".into(), root.path().into());
     let facts = Spec030FactStore::new(WorkspaceTrustObservation::Trusted);
 
@@ -242,12 +248,18 @@ fn active_fact_requires_probe_and_wrapped_execution() -> Result<(), Box<dyn Erro
     let bin = fake_bwrap(
         root.path(),
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$1\" = --version ] && exit 0\nexit 0\n",
+            "#!/bin/sh\n[ \"$SKILL_KEY\" = sandbox-canary ] && [ -z \"$HOME\" ] || exit 11\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$1\" = --version ] && exit 0\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
             log.display()
         ),
     )?;
-    let mut command = command(root.path(), "printf wrapped");
+    let mut command = command(
+        root.path(),
+        "test \"$SKILL_KEY\" = sandbox-canary && test -z \"$HOME\" && printf wrapped",
+    );
     command.inherit_env = false;
+    command
+        .env
+        .insert("SKILL_KEY".into(), "sandbox-canary".into());
     command.env.insert("PATH".into(), bin.into());
 
     // When
@@ -273,6 +285,7 @@ fn active_fact_requires_probe_and_wrapped_execution() -> Result<(), Box<dyn Erro
         }
     );
     assert_eq!(fs::read_to_string(log)?.lines().count(), 3);
+    assert_eq!(execution.receipt.stdout.captured, b"wrapped");
     Ok(())
 }
 

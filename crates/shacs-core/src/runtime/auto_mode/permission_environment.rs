@@ -13,6 +13,7 @@ use super::secret_values::SecretValues;
 use super::user_only_file::UserOnlyFiles;
 use super::{real_path, shell_command};
 use shacs_cron::{CronAccess, CronPermission};
+use shacs_skills::SkillEnvironment;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +64,11 @@ pub struct PermissionEnvironment {
 }
 
 impl PermissionEnvironment {
+    pub fn with_skill_environment(mut self, environment: &SkillEnvironment) -> Self {
+        self.secret_values.extend(environment.values());
+        self
+    }
+
     pub fn new(input: PermissionEnvironmentInput<'_>) -> Self {
         let config_folder = input
             .config_file
@@ -136,7 +142,7 @@ impl PermissionEnvironment {
         inside(&pair.requested) && inside(&pair.real)
     }
 
-    /// The `.env.json` values this environment masks.
+    /// File values and declared values passed to exec that this environment masks.
     pub fn secret_values(&self) -> &SecretValues {
         &self.secret_values
     }

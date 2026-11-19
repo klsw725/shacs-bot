@@ -34,10 +34,18 @@ fn the_longest_value_wins_and_replaced_text_is_not_looked_at_again() {
 #[test]
 fn a_value_under_two_names_keeps_the_first_name() {
     // Given
-    let secrets = values(r#"{"SHACS_B": "same-value-1", "SHACS_A": "same-value-1"}"#);
+    let mut secrets = values(r#"{"SHACS_B": "same-value-1", "SHACS_A": "same-value-1"}"#);
+    secrets.extend(&BTreeMap::from([
+        ("SHACS_A".to_owned(), "startup-value".to_owned()),
+        ("SHACS_0".to_owned(), "same-value-1".to_owned()),
+        ("SHORT".to_owned(), "tiny".to_owned()),
+    ]));
 
     // When / Then
-    assert_eq!(secrets.mask("same-value-1"), "[secret SHACS_A]");
+    assert_eq!(
+        secrets.mask("same-value-1 startup-value tiny"),
+        "[secret SHACS_0] [secret SHACS_A] tiny"
+    );
 }
 
 #[test]

@@ -5,6 +5,7 @@ use crate::runtime::{
 };
 use serde_json::{json, Map, Value};
 use shacs_providers::ProviderInvocation;
+use shacs_skills::SkillEnvironment;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -96,6 +97,7 @@ pub struct BrowserHandoffOrigin {
 
 #[derive(Debug, Clone, Default)]
 pub struct ToolCallExecutionContext {
+    pub skill_environment: SkillEnvironment,
     pub browser_context: Option<BrowserCallContext>,
     pub browser_binding_digest: Option<String>,
     pub browser_handoff_origin: Option<BrowserHandoffOrigin>,
@@ -113,6 +115,7 @@ pub struct ToolCallExecutionContext {
 impl ToolCallExecutionContext {
     pub fn new(process_gate_input: Option<ProcessGateInput>) -> Self {
         Self {
+            skill_environment: SkillEnvironment::default(),
             browser_context: None,
             browser_binding_digest: None,
             browser_handoff_origin: None,
@@ -153,6 +156,11 @@ impl ToolCallExecutionContext {
 
     pub fn with_hidden_paths(mut self, environment: Option<Arc<PermissionEnvironment>>) -> Self {
         self.hidden_paths = environment;
+        self
+    }
+
+    pub fn with_skill_environment(mut self, environment: SkillEnvironment) -> Self {
+        self.skill_environment = environment;
         self
     }
 

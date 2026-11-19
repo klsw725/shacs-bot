@@ -389,6 +389,7 @@ fn assert_generation_environment(viewer: &ViewerFacts, facts: &Facts) {
             "OPENAI_API_KEY",
             "SHACS_BROWSER_VIEW_PASSWORD",
             "SHACS_SPEC049_VIEW_PASSWORD",
+            "NOTION_API_KEY",
         ] {
             assert!(!spec.environment.contains_key(key));
         }
@@ -412,6 +413,7 @@ fn with_parent_secret_markers(test: &str) -> Result<bool, Box<dyn Error>> {
         .env("SHACS_BROWSER_TEST_SECRETS", "present")
         .env("OPENAI_API_KEY", "provider-secret-marker")
         .env("SHACS_BROWSER_VIEW_PASSWORD", "viewer-password-marker")
+        .env("NOTION_API_KEY", "spec054-browser-excluded")
         .output()?;
     assert!(
         output.status.success(),

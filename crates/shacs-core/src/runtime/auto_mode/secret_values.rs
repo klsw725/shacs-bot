@@ -1,9 +1,9 @@
-//! `.env.json` values that what people and providers see shows by name only
-//! (Spec 048 PRD 010 scope 10). Decisions use the text before masking.
+//! File and declared exec values shown by name on the auto-mode surfaces
+//! (Specs 048 and 054 PRD 010). Decisions use the text before masking.
 
 use serde_json::Value;
 use shacs_config::EnvFile;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// Shorter values would also hide common words and spoil what they mask.
@@ -36,15 +36,30 @@ impl fmt::Debug for SecretValues {
 
 impl SecretValues {
     pub fn new(env_file: &EnvFile) -> Self {
+        let mut values = Self::default();
+        values.extend(
+            &env_file
+                .entries()
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .collect(),
+        );
+        values
+    }
+
+    /// Keeps both startup and current values, even when their names coincide.
+    pub fn extend(&mut self, values: &BTreeMap<String, String>) {
+        self.entries.extend(
+            values
+                .iter()
+                .filter(|(_, value)| value.chars().count() >= MIN_MASKED_CHARS)
+                .map(|(name, value)| (value.clone(), name.clone())),
+        );
+        self.entries
+            .sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
         let mut seen = BTreeSet::new();
-        let mut entries = env_file
-            .entries()
-            .filter(|(_, value)| value.chars().count() >= MIN_MASKED_CHARS)
-            .filter(|(_, value)| seen.insert(*value))
-            .map(|(name, value)| (value.to_owned(), name.to_owned()))
-            .collect::<Vec<_>>();
-        entries.sort_by_key(|(value, _)| std::cmp::Reverse(value.len()));
-        Self { entries }
+        self.entries.retain(|(value, _)| seen.insert(value.clone()));
+        self.entries
+            .sort_by_key(|(value, _)| std::cmp::Reverse(value.len()));
     }
 
     pub fn is_empty(&self) -> bool {

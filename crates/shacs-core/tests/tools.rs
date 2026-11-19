@@ -30,6 +30,7 @@ use shacs_core::tools::{
 use shacs_cron::{
     system_job, CronJobState, CronRunStatus, CronSchedule, CronService, InMemoryCronService,
 };
+use shacs_skills::SkillEnvironment;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::{Arc, Barrier, Mutex};
@@ -1712,23 +1713,29 @@ fn exec_tool_injects_configured_env_after_allowed_process_env() -> Result<(), Bo
     config.env = BTreeMap::from([
         ("HOME".to_owned(), "/configured-home".to_owned()),
         ("SHACS_CONFIG_ONLY".to_owned(), "configured".to_owned()),
+        ("SHACS_EMPTY".to_owned(), String::new()),
     ]);
+    config.path_append = Some("/skill-test-bin".to_owned());
     let tool = ExecTool::new(config);
 
     let result = tool
         .execute_with_context(
             json_map(json!({
-                "command": "printf '%s|%s' \"$SHACS_CONFIG_ONLY\" \"$HOME\"",
+                "command": "test \"$SHACS_SKILL\" = skill-canary && test \"$SHACS_CONFIG_ONLY\" = configured && test \"$HOME\" = /configured-home && test -z \"$SHACS_EMPTY\" && case \"$PATH\" in *:/skill-test-bin) printf env-ok;; *) exit 7;; esac",
                 "timeout": 5
             }))?,
             &exec_tool_call_context(
                 PermissionMode::BypassPermissions,
                 ProcessGateTerminalPrecondition::Ready,
                 false,
-            )?,
+            )?.with_skill_environment(SkillEnvironment::new(BTreeMap::from([
+                ("SHACS_SKILL".to_owned(), "skill-canary".to_owned()),
+                ("SHACS_CONFIG_ONLY".to_owned(), "skill-loses".to_owned()),
+                ("SHACS_EMPTY".to_owned(), "skill-cleared".to_owned()),
+            ]))),
         )
         .into_text();
-    if !result.contains("configured|/configured-home") || !result.contains("Exit code: 0") {
+    if !result.contains("env-ok") || !result.contains("Exit code: 0") {
         return Err(
             format!("configured env was not injected after allowed process env: {result}").into(),
         );

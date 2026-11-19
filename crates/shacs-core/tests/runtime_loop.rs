@@ -3225,6 +3225,7 @@ fn subagent_permissioned_action_context_inherits_snapshots_and_origin() -> Resul
         scope_ref: Some("scope:test".to_owned()),
     };
     let context = ToolExecutionContext {
+        skill_environment: Default::default(),
         browser_context: None,
         browser_reviewed_action_digest: None,
         channel: "cli".to_owned(),
@@ -3458,6 +3459,13 @@ fn subagent_failed_timedout_and_cancelled_finishes_record_formal_outcomes(
 #[test]
 fn subagent_run_spawn_executes_agent_and_publishes_result() -> Result<(), Box<dyn Error>> {
     let workspace = tempfile::tempdir()?;
+    let data = tempfile::tempdir()?;
+    let user_skill = data.path().join("skills/parent-selected");
+    std::fs::create_dir_all(&user_skill)?;
+    std::fs::write(
+        user_skill.join("SKILL.md"),
+        "---\nname: parent-selected\nrequires.env: SHACS_CHILD_MISSING_KEY\n---\nParent skill body",
+    )?;
     let skill_dir = workspace.path().join("skills").join("configured-env");
     std::fs::create_dir_all(&skill_dir)?;
     std::fs::write(
@@ -3482,6 +3490,11 @@ fn subagent_run_spawn_executes_agent_and_publishes_result() -> Result<(), Box<dy
         "SHACS_SUBAGENT_TEST_CONFIGURED_ENV_ONLY".to_owned(),
         "configured".to_owned(),
     )]);
+    config.skill_context = Some(
+        ContextBuilder::new(workspace.path())
+            .with_skill_config(&data.path().join("config.json"))
+            .with_configured_env(config.exec_env.clone()),
+    );
     let result = runtime.run_spawn(outcome.envelope.clone(), &client, config);
     if result.status != ChildResultStatus::Completed
         || result.summary != "subagent done"
@@ -3516,7 +3529,10 @@ fn subagent_run_spawn_executes_agent_and_publishes_result() -> Result<(), Box<dy
             .any(|tool| tool.to_string().contains("spawn"))
         || !system_prompt.contains("# Subagent")
         || !system_prompt.contains("**configured-env**")
-        || system_prompt.contains("SHACS_SUBAGENT_TEST_CONFIGURED_ENV_ONLY")
+        || !system_prompt.contains("**parent-selected**")
+        || !system_prompt.contains("missing env: SHACS_CHILD_MISSING_KEY")
+        || !system_prompt.contains(&data.path().join(".env.json").display().to_string())
+        || system_prompt.contains("missing env: SHACS_SUBAGENT_TEST_CONFIGURED_ENV_ONLY")
     {
         return Err(format!("run_spawn provider request drifted: {requests:?}").into());
     }
@@ -11118,6 +11134,9 @@ fn test_skill_registry(source_kind: SkillSourceKind, raw: Option<&str>) -> Skill
                 body_hash: "skill-digest-prd010".to_owned(),
                 requirements: Vec::new(),
                 install_metadata: None,
+                credentials: shacs_skills::SkillCredentialDeclaration::default(),
+                always: false,
+                disabled: false,
             },
             status: SkillRegistryStatus::Active,
             diagnostics: Vec::new(),

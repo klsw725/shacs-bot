@@ -13,6 +13,9 @@ mod spec051_login_watch;
 mod spec051_rendered_browser;
 #[cfg(all(unix, feature = "spec031-test-fixture"))]
 mod spec051_web_watch_cli;
+mod spec054_exec_environment;
+mod spec054_exec_environment_support;
+mod spec054_skill_readiness;
 
 #[path = "readiness_owner_parity.rs"]
 pub mod readiness_owner_parity;

@@ -41,6 +41,7 @@ fn production_startup_projects_configured_and_failed_mcp_transport_outcomes(
                 workspace,
             },
             migrations: Vec::new(),
+            runtime_environment: None,
         },
         false,
     )?;

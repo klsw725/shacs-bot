@@ -24,6 +24,18 @@ pub struct BuiltinSkillFile {
 
 mod builtins_generated;
 use builtins_generated::{BUILTIN_SKILLS, DEFERRED_BUILTIN_SKILLS};
+mod credential_declaration;
+mod credential_resolution;
+#[cfg(test)]
+mod credential_tests;
+mod frontmatter;
+mod skill_environment;
+pub use credential_declaration::SkillCredentialDeclaration;
+pub use credential_resolution::{
+    resolve_skill_credentials, SkillCredentialResolution, SkillCredentialSources,
+    SkillCredentialStatus,
+};
+pub use skill_environment::SkillEnvironment;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltinSkillsSyncOutcome {
@@ -95,6 +107,12 @@ pub struct SkillDescriptor {
     pub body_hash: String,
     pub requirements: Vec<String>,
     pub install_metadata: Option<String>,
+    #[serde(default)]
+    pub credentials: SkillCredentialDeclaration,
+    #[serde(default)]
+    pub always: bool,
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -654,13 +672,21 @@ fn discover_root(
             ));
             continue;
         }
-        if !metadata.is_dir() {
+        let (skill_path, name) = if metadata.is_dir() {
+            (path.join("SKILL.md"), name)
+        } else if metadata.is_file() && path.extension().is_some_and(|extension| extension == "md")
+        {
+            let name = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or(name);
+            (path, name)
+        } else {
             continue;
-        }
+        };
         if source_kind == SkillSourceKind::MaterializedBuiltin && is_deferred_builtin_skill(&name) {
             continue;
         }
-        let skill_path = path.join("SKILL.md");
         match fs::read_to_string(&skill_path) {
             Ok(raw) => builder.push(entry_from_raw(raw, name, source_kind, Some(skill_path))),
             Err(error) if error.kind() == io::ErrorKind::NotFound => builder.push(malformed_entry(
@@ -669,7 +695,12 @@ fn discover_root(
                 Some(skill_path),
                 "missing SKILL.md".to_owned(),
             )),
-            Err(error) => return Err(error),
+            Err(error) => builder.push(malformed_entry(
+                name,
+                source_kind,
+                Some(skill_path),
+                format!("skill file could not be read ({:?})", error.kind()),
+            )),
         }
     }
     Ok(())
@@ -681,8 +712,14 @@ fn entry_from_raw(
     source_kind: SkillSourceKind,
     source_path: Option<PathBuf>,
 ) -> SkillRegistryEntry {
-    match parse_skill_frontmatter(&raw) {
-        Ok(frontmatter) => {
+    match frontmatter::parse(&raw) {
+        Ok(structure) => {
+            let frontmatter = frontmatter_fields(&raw, &structure);
+            let credentials = SkillCredentialDeclaration::from_frontmatter(&structure);
+            let mut requirements = extract_requirements(&frontmatter);
+            if !credentials.required.is_empty() {
+                requirements.push(format!("requires.env: {}", credentials.required.join(", ")));
+            }
             let mut diagnostics = Vec::new();
             let name = frontmatter
                 .get("name")
@@ -699,8 +736,23 @@ fn entry_from_raw(
                     source_kind,
                     source_path,
                     body_hash: stable_hash_hex(&raw),
-                    requirements: extract_requirements(&frontmatter),
+                    requirements,
                     install_metadata: extract_install_metadata(&frontmatter),
+                    always: [
+                        "always",
+                        "metadata.nanobot.always",
+                        "metadata.openclaw.always",
+                    ]
+                    .iter()
+                    .any(|key| {
+                        frontmatter.get(*key).is_some_and(|value| {
+                            matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "1")
+                        })
+                    }),
+                    disabled: frontmatter.get("disabled").is_some_and(|value| {
+                        matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "1")
+                    }),
+                    credentials,
                 },
                 status: SkillRegistryStatus::Active,
                 diagnostics,
@@ -726,6 +778,9 @@ fn malformed_entry(
             body_hash: String::new(),
             requirements: Vec::new(),
             install_metadata: None,
+            credentials: SkillCredentialDeclaration::default(),
+            always: false,
+            disabled: false,
         },
         status: SkillRegistryStatus::Malformed,
         diagnostics: vec![diagnostic],
@@ -734,25 +789,25 @@ fn malformed_entry(
 }
 
 fn parse_skill_frontmatter(raw: &str) -> Result<BTreeMap<String, String>, String> {
-    let Some(after_open) = raw.strip_prefix("---") else {
-        return Ok(BTreeMap::new());
-    };
-    let after_open = after_open.trim_start_matches(['\r', '\n']);
-    let Some(close_index) = after_open.find("\n---") else {
-        return Err("unterminated skill frontmatter".to_owned());
-    };
-    let frontmatter = &after_open[..close_index];
-    let mut fields = BTreeMap::new();
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once(':') {
-            fields.insert(key.trim().to_owned(), trim_frontmatter_value(value));
+    Ok(frontmatter_fields(raw, &frontmatter::parse(raw)?))
+}
+
+fn frontmatter_fields(raw: &str, structure: &frontmatter::Node) -> BTreeMap<String, String> {
+    let mut fields = frontmatter::flatten(structure);
+    // Preserve the existing inline JSON metadata contract for workflow/install consumers.
+    let lines = raw
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.starts_with("---"));
+    for line in lines {
+        if let Some(value) = line.strip_prefix("metadata:") {
+            let value = trim_frontmatter_value(value);
+            if !value.is_empty() {
+                fields.insert("metadata".to_owned(), value);
+            }
         }
     }
-    Ok(fields)
+    fields
 }
 
 fn trim_frontmatter_value(value: &str) -> String {
@@ -763,11 +818,8 @@ fn extract_requirements(frontmatter: &BTreeMap<String, String>) -> Vec<String> {
     let mut requirements = Vec::new();
     for key in [
         "requires.bins",
-        "requires.env",
         "metadata.nanobot.requires.bins",
-        "metadata.nanobot.requires.env",
         "metadata.openclaw.requires.bins",
-        "metadata.openclaw.requires.env",
     ] {
         if let Some(value) = frontmatter.get(key).filter(|value| !value.is_empty()) {
             requirements.push(format!("{key}: {value}"));
@@ -789,7 +841,20 @@ fn extract_install_metadata(frontmatter: &BTreeMap<String, String>) -> Option<St
     }
     frontmatter
         .iter()
-        .find(|(key, value)| key.contains("install") || value.contains("install"))
+        .filter(|(key, _)| {
+            ![
+                "prerequisites.env_vars",
+                "required_environment_variables",
+                "requires.env",
+                "metadata.nanobot.requires.env",
+                "metadata.openclaw.requires.env",
+            ]
+            .iter()
+            .any(|prefix| key.as_str() == *prefix || key.starts_with(&format!("{prefix}.")))
+        })
+        .find(|(key, value)| {
+            key.contains("install") || (key.as_str() != "metadata" && value.contains("install"))
+        })
         .map(|(key, value)| format!("{key}: {value}"))
 }
 
@@ -808,11 +873,6 @@ fn extract_metadata_requirements(metadata: &str) -> Vec<String> {
         collect_json_requirement(
             requires.get("bins"),
             &format!("metadata.{namespace}.requires.bins"),
-            &mut requirements,
-        );
-        collect_json_requirement(
-            requires.get("env"),
-            &format!("metadata.{namespace}.requires.env"),
             &mut requirements,
         );
     }
@@ -1205,6 +1265,51 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(entries.len(), 5);
+        let process = BTreeMap::from([
+            ("BUILTIN".to_owned(), "builtin-value".to_owned()),
+            ("USER".to_owned(), "user-value".to_owned()),
+            ("LEGACY".to_owned(), "legacy-value".to_owned()),
+            ("WORKSPACE".to_owned(), "workspace-value".to_owned()),
+            ("PLUGIN".to_owned(), "plugin-value".to_owned()),
+        ]);
+        let file = shacs_config::EnvFile::default();
+        let explicit = BTreeMap::new();
+        let selected: BTreeMap<String, String> = entries
+            .iter()
+            .flat_map(|entry| {
+                resolve_skill_credentials(
+                    entry,
+                    &[],
+                    SkillCredentialSources {
+                        process: &process,
+                        file: &file,
+                        explicit: &explicit,
+                    },
+                )
+                .into_values()
+            })
+            .collect();
+        assert_eq!(
+            selected,
+            BTreeMap::from([("PLUGIN".to_owned(), "plugin-value".to_owned())])
+        );
+        let disabled = vec![name.to_owned()];
+        assert!(
+            entries.iter().all(|entry| {
+                resolve_skill_credentials(
+                    entry,
+                    &disabled,
+                    SkillCredentialSources {
+                        process: &process,
+                        file: &file,
+                        explicit: &explicit,
+                    },
+                )
+                .values()
+                .is_empty()
+            }),
+            "disabling the winner must not resurrect another source"
+        );
         assert!(entries.iter().any(|entry| {
             entry.status == SkillRegistryStatus::Active
                 && entry.descriptor.source_kind == SkillSourceKind::PluginProvided
@@ -1244,6 +1349,24 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            let resolution = resolve_skill_credentials(
+                entry,
+                &[],
+                SkillCredentialSources {
+                    process: &BTreeMap::from([
+                        ("PLUGIN_A".to_owned(), "a-value".to_owned()),
+                        ("PLUGIN_B".to_owned(), "b-value".to_owned()),
+                    ]),
+                    file: &shacs_config::EnvFile::default(),
+                    explicit: &BTreeMap::new(),
+                },
+            );
+            assert!(
+                resolution.values().is_empty(),
+                "conflicted candidates cannot supply values"
+            );
+        }
         assert!(entries.iter().all(|entry| {
             entry.status == SkillRegistryStatus::Conflicted
                 && entry.descriptor.source_kind == SkillSourceKind::PluginProvided
@@ -1342,6 +1465,7 @@ mod tests {
             entry.descriptor.source_kind,
             SkillSourceKind::WorkspaceLocal
         );
+        assert_eq!(entry.descriptor.credentials.required, ["USER_OVERRIDE"]);
         Ok(())
     }
 
@@ -1400,9 +1524,10 @@ mod tests {
     fn write_test_skill(root: &std::path::Path, name: &str, description: &str) -> io::Result<()> {
         let skill_dir = root.join(name);
         fs::create_dir_all(&skill_dir)?;
+        let key = description.to_ascii_uppercase().replace(' ', "_");
         fs::write(
             skill_dir.join("SKILL.md"),
-            format!("---\nname: {name}\ndescription: {description}\n---\n{description}"),
+            format!("---\nname: {name}\ndescription: {description}\nrequires.env: {key}\n---\n{description}"),
         )
     }
 

@@ -13,8 +13,12 @@ use shacs_core::runtime::{
     SessionManager, SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolSearchConfig,
     ToolSearchMode,
 };
-use shacs_core::tools::{JsonMap, SchemaFragment, SpawnRequest, Tool, ToolParameters, ToolResult};
+use shacs_core::tools::{
+    ExecTool, JsonMap, SchemaFragment, SpawnRequest, Tool, ToolParameters, ToolResult,
+};
 use shacs_providers::ProviderInvocation;
+use shacs_skills::SkillEnvironment;
+use std::collections::BTreeMap;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -454,9 +458,27 @@ fn env_values_are_masked_in_the_check_only() -> TestResult {
         format!("{{\"SHACS_CHANNELS_DISCORD_TOKEN\": \"{value}\"}}"),
     )?;
     let (mut registry, _) = setup.registry(Exec::Gated);
-    let output = format!("weather report {value}");
-    registry.register(fixed("web_fetch", &output));
-    let provider = RoutingProvider::new(vec![fetch("f1"), answer("done")], vec![Ok("no")]);
+    registry.register(ExecTool::with_workspace(&setup.workspace));
+    let skill_environment = SkillEnvironment::new(BTreeMap::from([
+        ("PROCESS_KEY".to_owned(), "process-winner-7713".to_owned()),
+        ("EXPLICIT_KEY".to_owned(), "explicit-winner-7713".to_owned()),
+        (
+            "SHACS_CHANNELS_DISCORD_TOKEN".to_owned(),
+            "startup-value-7713".to_owned(),
+        ),
+    ]));
+    let output = "process-winner-7713 explicit-winner-7713 startup-value-7713";
+    let provider = RoutingProvider::new(
+        vec![
+            calls(vec![tool_call(
+                "f1",
+                "exec",
+                json!({"command": "printf '%s %s %s' \"$PROCESS_KEY\" \"$EXPLICIT_KEY\" \"$SHACS_CHANNELS_DISCORD_TOKEN\""}),
+            )]),
+            answer("done"),
+        ],
+        vec![Ok("no")],
+    );
     let mut run = spec(
         &setup,
         &registry,
@@ -466,7 +488,16 @@ fn env_values_are_masked_in_the_check_only() -> TestResult {
     );
     let mut masking = classifier(&provider, "main-model");
     masking.secrets = setup.environment(&Rules::default()).secret_values().clone();
+    masking.secrets.extend(skill_environment.values());
     run.auto_mode_classifier = Some(masking);
+    run.tool_context.skill_environment = skill_environment.clone();
+    run.tool_context.permission_environment = Some(Arc::new(
+        setup
+            .environment(&Rules::default())
+            .as_ref()
+            .clone()
+            .with_skill_environment(&skill_environment),
+    ));
 
     // When
     AgentRunner::new().run(run)?;
@@ -477,11 +508,15 @@ fn env_values_are_masked_in_the_check_only() -> TestResult {
         .first()
         .cloned()
         .ok_or("no check")?;
-    assert_eq!(
-        payload["result"],
-        "weather report [secret SHACS_CHANNELS_DISCORD_TOKEN]"
+    let masked = payload["result"].as_str().ok_or("result text")?;
+    assert!(
+        masked.contains(
+            "[secret PROCESS_KEY] [secret EXPLICIT_KEY] [secret SHACS_CHANNELS_DISCORD_TOKEN]"
+        ),
+        "{masked}"
     );
-    assert_eq!(read_back(&provider, "f1"), output);
+    assert!(!masked.contains(output), "{masked}");
+    assert!(read_back(&provider, "f1").contains(output));
     Ok(())
 }
 

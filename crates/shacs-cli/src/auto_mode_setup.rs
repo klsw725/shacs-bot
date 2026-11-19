@@ -94,6 +94,7 @@ impl ReadConfig {
             config,
             context,
             migrations,
+            runtime_environment: None,
         })
     }
 }

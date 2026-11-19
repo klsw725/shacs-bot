@@ -165,6 +165,10 @@ impl Home {
 struct NoEnvironment;
 
 impl EnvSource for NoEnvironment {
+    fn snapshot(&self) -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
+
     fn var(&self, _name: &str) -> Option<String> {
         None
     }

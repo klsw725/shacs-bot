@@ -45,6 +45,7 @@ fn spec030_cli_provider_builder_uses_local_auth_for_transport_and_shared_status(
             workspace,
         },
         migrations: Vec::new(),
+        runtime_environment: None,
     })?;
 
     adapter.complete_chat(ChatCompletionInvocation {
@@ -100,6 +101,7 @@ fn spec030_cli_provider_builder_reaches_configured_command_source() -> Result<()
             workspace,
         },
         migrations: Vec::new(),
+        runtime_environment: None,
     })?;
 
     adapter.complete_chat(chat_invocation())?;

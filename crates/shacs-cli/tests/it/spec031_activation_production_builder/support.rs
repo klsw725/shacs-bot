@@ -42,6 +42,7 @@ pub fn run() -> Result<ExecutionSnapshot, Box<dyn Error>> {
             config,
             context,
             migrations: Vec::new(),
+            runtime_environment: None,
         },
         false,
     )?;

@@ -179,6 +179,7 @@ fn bundle(root: &Path, workspace: &Path, enabled: bool, trusted: bool) -> Config
             workspace: workspace.to_path_buf(),
         },
         migrations: Vec::new(),
+        runtime_environment: None,
     }
 }
 

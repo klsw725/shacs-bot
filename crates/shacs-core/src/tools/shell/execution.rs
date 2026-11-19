@@ -64,7 +64,7 @@ impl ExecTool {
                 ))
             }
         };
-        let mut env = self.build_env();
+        let mut env = self.build_env(&context.skill_environment);
         if let Some(path_append) = &self.config.path_append {
             let path = env.get("PATH").cloned().unwrap_or_default();
             let separator = if cfg!(windows) { ";" } else { ":" };

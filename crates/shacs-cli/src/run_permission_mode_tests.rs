@@ -48,7 +48,7 @@ fn a_config_without_a_mode_starts_interactive_runs_in_auto_and_others_in_default
     // When
     let background = unset.loop_config();
     let turn = interactive(&unset);
-    let child = unset.subagent_execution_config(&turn);
+    let child = unset.subagent_execution_config(&turn, &unset.context_builder());
 
     // Then
     assert_eq!(

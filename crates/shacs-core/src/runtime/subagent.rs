@@ -27,6 +27,7 @@ use shacs_session::durable_child::{
     DurableChildRecorder, DurableChildReplayState, ReplayChildTaskState,
 };
 use shacs_session::durable_work::WorkTerminalKind;
+use shacs_skills::SkillEnvironment;
 use shacs_templates::{render_agent_template, template_variables, AgentTemplate};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -404,6 +405,9 @@ pub struct SubagentExecutionConfig {
     pub exec_path_append: Option<String>,
     pub exec_allowed_env_keys: Vec<String>,
     pub exec_env: BTreeMap<String, String>,
+    pub skill_environment: SkillEnvironment,
+    /// Parent's frozen skill sources, bodies and readiness guidance.
+    pub skill_context: Option<ContextBuilder>,
     pub allowed_tools: Option<Vec<String>>,
     pub permission_session_remembered_rules: Vec<SessionRememberedPermissionRule>,
     pub project_permission_store: Option<crate::runtime::ProjectPermissionStoreConfig>,
@@ -448,6 +452,8 @@ impl SubagentExecutionConfig {
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+            skill_environment: SkillEnvironment::default(),
+            skill_context: None,
             allowed_tools: None,
             permission_session_remembered_rules: Vec::new(),
             permission_environment: None,
@@ -907,8 +913,12 @@ impl SubagentRuntime {
         cancellation_token: CancellationToken,
     ) -> ChildResultEnvelope {
         let registry = build_subagent_tool_registry(config);
-        let context_builder =
-            ContextBuilder::new(&config.workspace).with_configured_env(config.exec_env.clone());
+        let context_builder = match &config.skill_context {
+            Some(context) => context.for_workspace(&config.workspace),
+            None => {
+                ContextBuilder::new(&config.workspace).with_configured_env(config.exec_env.clone())
+            }
+        };
         // Spec 048 PRD 030: an auto mode child gets its own classifier,
         // guidance and return review.
         let auto_mode = config.permission_mode_snapshot.mode == PermissionMode::Auto
@@ -978,6 +988,7 @@ impl SubagentRuntime {
             project_permission_store: config.project_permission_store.clone(),
             active_workspace: Some(config.workspace.clone()),
             permission_environment: config.permission_environment.clone(),
+            skill_environment: config.skill_environment.clone(),
             in_cron_context: false,
             automation_source: None,
             // A child never uses its cron parent's approved list (Spec 053

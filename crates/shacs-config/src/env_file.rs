@@ -174,6 +174,16 @@ impl<E: EnvSource + ?Sized> EnvSource for ConfigEnv<'_, E> {
             first => self.file.get(name).map(str::to_owned).or(first),
         }
     }
+
+    fn snapshot(&self) -> BTreeMap<String, String> {
+        let mut values = self.first.snapshot();
+        for (name, value) in self.file.entries() {
+            if values.get(name).is_none_or(String::is_empty) {
+                values.insert(name.to_owned(), value.to_owned());
+            }
+        }
+        values
+    }
 }
 
 impl<E: ?Sized> ConfigEnv<'_, E> {

@@ -107,6 +107,7 @@ fn bundle(data_dir: std::path::PathBuf, workspace: std::path::PathBuf) -> Config
             workspace,
         },
         migrations: Vec::new(),
+        runtime_environment: None,
     }
 }
 
