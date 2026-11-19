@@ -29,11 +29,17 @@ Talk to Notion two ways. Same integration token works for both — pick by what'
 
 1. Create an integration at https://notion.so/my-integrations
 2. Copy the API key (starts with `ntn_` or `secret_`)
-3. Store in `~/.shacs-bot/.env`:
-   ```
-   NOTION_API_KEY=ntn_your_key_here
+3. Edit `.env.json` beside the actual `config.json` in your data folder (default `~/.shacs-bot/.env.json`). Preserve other keys in the JSON object and replace this example locally in your editor:
+   ```json
+   {
+     "NOTION_API_KEY": "ntn_example_replace_locally"
+   }
    ```
 4. **Share target pages/databases with the integration** in Notion: page menu `...` → `Connect to` → your integration name. Without this, the API returns 404 for that page even though it exists.
+
+In Docker, the default host file `~/.shacs-bot/.env.json` appears as `/home/shacs/.shacs-bot/.env.json` inside the container. If the mount or config path differs, edit the host file beside that config. This is not Compose's repository `.env`; do not add shell assignments or `export` to the JSON. For a file you create, use `chmod 600` on its actual path.
+
+Restart the running shacs-bot runtime after saving. When this skill is active, its declared `NOTION_API_KEY` reaches every `exec`, even before the skill is read; no config env entry is required. A non-empty process value wins over the file, and explicit top-level `env` / `tools.exec.env` can override it. Never ask for or paste secrets in chat: the user must edit the file locally. Check `shacs-bot skills show notion` for missing names, then use a task that does not print the key. The CLI reads current inputs, not the running gateway's saved values, and readiness does not prove API access. Do not inspect secrets with `env`, `printenv`, or `echo`; general output, transcripts, and logs can retain them.
 
 ### 2. Install `ntn` (preferred path on macOS / Linux)
 
@@ -47,13 +53,12 @@ npm install --global ntn
 ntn --version    # verify
 ```
 
-**Skip `ntn login` — use the integration token instead.** This works headlessly, no browser needed:
+**Skip `ntn login` — use the integration token instead.** Set the CLI aliases inside the **same `exec` command** that calls `ntn`:
 ```bash
-export NOTION_API_TOKEN=$NOTION_API_KEY      # ntn reads NOTION_API_TOKEN
-export NOTION_KEYRING=0                       # don't try to use the OS keychain
+NOTION_API_TOKEN="$NOTION_API_KEY" NOTION_KEYRING=0 ntn api v1/users
 ```
 
-Add those exports to your shell profile (or to `~/.shacs-bot/.env`) so every session inherits them.
+Only `NOTION_API_KEY` is declared by this skill. Do not put `$NOTION_API_KEY` in `.env.json`, add these aliases to config env, or rely on an export from another `exec` or a shell profile. For every `ntn` invocation below, including Workers commands, prepend `NOTION_API_TOKEN="$NOTION_API_KEY" NOTION_KEYRING=0` in that same command. The examples abbreviate this prefix; the shell expands the already-delivered key when the command runs.
 
 ### 3. Choose path at runtime
 

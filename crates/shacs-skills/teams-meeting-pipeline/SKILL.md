@@ -46,15 +46,23 @@ Multilingual trigger examples (not exhaustive):
 
 ## Prerequisites
 
-Before using the pipeline, verify these are set in `~/.shacs-bot/.env`:
+This skill remains **disabled and deferred** in shacs-bot. Adding Graph keys does not activate or add support for the Teams pipeline, and this builtin's declarations do not cause automatic exec forwarding. The commands below remain upstream Hermes reference material.
 
-```bash
-MSGRAPH_TENANT_ID=...
-MSGRAPH_CLIENT_ID=...
-MSGRAPH_CLIENT_SECRET=...
+If you keep Graph credentials for a separately supported use, edit `.env.json` beside the actual `config.json` in your data folder (default `~/.shacs-bot/.env.json`). Preserve other keys and replace these examples locally in your editor:
+
+```json
+{
+  "MSGRAPH_TENANT_ID": "tenant_example_replace_locally",
+  "MSGRAPH_CLIENT_ID": "client_example_replace_locally",
+  "MSGRAPH_CLIENT_SECRET": "secret_example_replace_locally"
+}
 ```
 
-If any are missing, direct the user to the Azure app registration guide at `/docs/guides/microsoft-graph-app-registration` — they need an Azure AD app registration with admin-consented Graph application permissions before the pipeline will work.
+In Docker, the default host file `~/.shacs-bot/.env.json` appears as `/home/shacs/.shacs-bot/.env.json` inside the container. If the mount or config path differs, edit the host file beside that config. This is not Compose's repository `.env`; do not add shell assignments or `export` to the JSON. For a file you create, use `chmod 600` on its actual path.
+
+Restart the running shacs-bot runtime after changing credentials; only keys declared by an active skill are automatically forwarded to exec, so restarting does not enable this deferred builtin. Never ask for or paste secrets in chat: the user must edit the file locally. Do not verify them with `env`, `printenv`, or `echo`; general output, transcripts, and logs can retain them.
+
+For upstream Hermes prerequisites, the Azure app registration guide at `/docs/guides/microsoft-graph-app-registration` describes an Azure AD app registration with admin-consented Graph application permissions. These permissions do not supply the missing shacs-bot pipeline support.
 
 ## Command reference
 

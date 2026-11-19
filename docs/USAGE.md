@@ -94,7 +94,7 @@ Docker가 도는 그 컴퓨터에서 어시스턴트가 조작하는 브라우�
 {"SHACS_BROWSER_VIEW_PASSWORD": "example-only-change-me-7Qp2"}
 ```
 
-`${이름}`은 다른 비밀과 같은 순서로 풉니다. 비어 있지 않은 process 환경 변수가 먼저, 그다음 `.env.json`이며 runtime이 `.env.json` 값을 환경에 내보내지는 않습니다. 이 칸만은 값이 아직 없어도 설정 오류가 아닙니다. `"${SHACS_BROWSER_VIEW_PASSWORD}"`를 적어 두고 값을 어디에도 두지 않으면(화면 보기를 꺼 둔 채로도) shacs-bot과 브라우저는 그대로 시작하고, 화면 보기를 켰다면 `password_missing`으로 화면 보기만 쓸 수 없습니다. 다른 칸의 `${이름}` 누락은 지금처럼 설정 오류입니다. config에 비밀번호를 직접 적었다면 `runtime config-migrate`가 다른 `password` 키처럼 `SHACS_TOOLS_BROWSER_VIEW_PASSWORD`로 옮깁니다. `onboard`는 기존 `view` 값을 보존하고 없을 때만 `enable: false`, `password: ""` stub을 더하며, 비밀번호를 대신 만들어 주지 않습니다.
+`${이름}`은 다른 비밀과 같은 순서로 풉니다. 비어 있지 않은 process 환경 변수가 먼저, 그다음 `.env.json`입니다. runtime 자체의 process 환경은 바꾸지 않으며, [활성 스킬이 선언한 키만 exec 자식에 자동 전달](#스킬-api-키-설정)합니다. browser/viewer 자식의 빈 환경 규칙은 그대로입니다. 이 칸만은 값이 아직 없어도 설정 오류가 아닙니다. `"${SHACS_BROWSER_VIEW_PASSWORD}"`를 적어 두고 값을 어디에도 두지 않으면(화면 보기를 꺼 둔 채로도) shacs-bot과 브라우저는 그대로 시작하고, 화면 보기를 켰다면 `password_missing`으로 화면 보기만 쓸 수 없습니다. 다른 칸의 `${이름}` 누락은 지금처럼 설정 오류입니다. config에 비밀번호를 직접 적었다면 `runtime config-migrate`가 다른 `password` 키처럼 `SHACS_TOOLS_BROWSER_VIEW_PASSWORD`로 옮깁니다. `onboard`는 기존 `view` 값을 보존하고 없을 때만 `enable: false`, `password: ""` stub을 더하며, 비밀번호를 대신 만들어 주지 않습니다.
 
 브라우저가 뜨면 gateway는 `http://127.0.0.1:6080/shacs-view.html`, api는 `http://127.0.0.1:6081/shacs-view.html`을 host의 브라우저에서 열고 noVNC 화면의 비밀번호 칸에 값을 칩니다(주소에 비밀번호를 넣지 않습니다). 이 페이지는 noVNC 화면과 그 아래 붙여넣기 칸으로 되어 있고 밖의 자원을 부르지 않습니다. `vnc.html`을 직접 열려면 주소 뒤에 `?path=websockify%3Ftoken%3Dview`를 붙여야 연결됩니다. 한 번 실행하고 끝나는 CLI의 안내 주소는 6080이며 실제 publish는 사용자의 Compose 설정에 따릅니다. 어시스턴트가 조작하는 동안 화면은 보기 전용입니다. 보기 페이지를 고쳐 클릭·키를 보내도 `x11vnc`가 서버에서 버리고(`-viewonly`), selection·clipboard 교환은 넘겨받은 동안에도 양방향으로 끕니다(`-nosel -noclipboard`). 화면을 보는 사람이 있어도 어시스턴트의 동작·한도·승인 판정은 같습니다.
 
@@ -649,6 +649,45 @@ shacs-bot --config /tmp/shacs-config.json onboard --wizard --workspace /tmp/ws
 
 Config 문자열 값은 load 시 `${이름}` 형태의 참조를 풉니다. 값은 비어 있지 않은 process 환경 변수에서 먼저 찾고, 없으면 config 파일과 같은 폴더(data 폴더)의 `.env.json`에서 찾습니다. 둘 다 없고 빈 process 환경 변수만 있으면 빈 글이 되고, 그것도 없으면 config load가 이름만 적은 오류로 실패합니다. Docker Compose는 정하지 않은 provider 변수도 빈 값으로 넘기므로, 빈 값은 `.env.json`을 가리지 않습니다. 예를 들어 provider key는 config에 `"apiKey": "${OPENROUTER_API_KEY}"`로 남겨두고 실행 환경이나 `.env.json`에서 값을 제공할 수 있으며, migration write-back은 실제 secret 값을 config 파일에 저장하지 않습니다.
 
+활성 스킬이 선언한 키는 config에 `${이름}`이나 env 항목을 다시 적지 않아도 됩니다. 아래 [스킬 API 키 설정](#스킬-api-키-설정)을 따르세요.
+
+#### 스킬 API 키 설정
+
+스킬에 필요한 키는 **사용자가 실제 data 폴더의 `config.json` 옆 `.env.json`을 직접 편집**해 넣습니다. 기본 파일은 `~/.shacs-bot/.env.json`입니다. `--config`로 다른 설정 파일을 골랐다면 그 파일 옆에 둡니다. 기존 파일이 있으면 다른 키를 보존하고 JSON 객체 안에 항목만 추가하세요. 다음 값은 예시이며, 실제 키는 자신의 편집기에서 바꿉니다.
+
+```json
+{
+  "NOTION_API_KEY": "ntn_example_replace_locally"
+}
+```
+
+이름과 값은 모두 문자열이어야 합니다. `KEY=value`, `export`, `$NOTION_API_KEY` 같은 shell 변수 확장을 JSON에 적지 마세요. 파일 값은 다시 확장되지 않습니다. 직접 만든 파일은 `chmod 600 ~/.shacs-bot/.env.json`으로 소유자만 읽고 쓰게 하세요(다른 data 폴더를 쓰면 경로도 바꿉니다). 키를 채팅·질문 도구·승인 답변에 붙여 넣거나 명령줄에 실제 값으로 적지 마세요. 어시스턴트는 사용자에게 직접 편집하도록 안내하고, 도구로 비밀 파일을 읽어 확인하지 않습니다.
+
+Docker의 기본 mount에서 host 파일 `~/.shacs-bot/.env.json`은 container의 `/home/shacs/.shacs-bot/.env.json`입니다. mount source를 바꿨으면 **그 host 폴더**의 파일을 편집하세요. container의 다른 일회용 폴더에 만들지 않습니다. 어시스턴트가 실제 host 경로를 모르면 경로를 추측하지 않고 사용자가 mount한 data 폴더를 안내합니다. 저장소 루트의 `.env`는 Compose 치환용이며 이 비밀 파일과 다릅니다. 스킬 키를 Compose의 environment 항목에 복사할 필요는 없습니다.
+
+저장한 뒤 gateway/API 등 **실제로 실행 중인 runtime을 재시작**하세요. `.env.json`·process 환경·명시 env의 값은 runtime 시작 때 읽은 것을 계속 쓰므로, 파일에서 키를 바꾸거나 지워도 재시작 전에는 옛 값이 쓰입니다. 기본 gateway는 `docker compose restart shacs-gateway`, API를 쓰는 경우에는 `docker compose restart shacs-api`로 다시 시작합니다. Compose 환경 설정을 바꿨다면 container를 다시 만들어야 합니다([Docker Compose 운영](#docker-compose)). 별도 CLI 조회만 실행해도 gateway가 새 값을 읽는 것은 아닙니다.
+
+같은 config·workspace에서 이름 상태를 확인합니다:
+
+```sh
+shacs-bot skills list
+shacs-bot skills show notion
+```
+
+Docker에서는 같은 Compose 설정으로 `docker compose run --rm shacs-cli skills list`와 `docker compose run --rm shacs-cli skills show notion`을 씁니다. 다른 config·workspace를 쓰면 조회에도 같은 `--config`·`--workspace`를 지정하세요. 조회는 그 명령을 시작한 현재 파일·process 기준입니다. `missing env`가 없다는 것은 값이 준비됐다는 뜻이며, 실행 중 gateway의 값이나 API 키의 유효성·접근 권한까지 확인한 것은 아닙니다. 키를 출력하는 `env`, `printenv`, `echo $KEY` 대신 missing 이름과 키를 출력하지 않는 실제 작업의 성공으로 확인하세요. 키가 없어도 스킬은 목록과 본문에 남습니다.
+
+전달 범위와 우선순위는 다음과 같습니다.
+
+- 활성 스킬의 frontmatter에 선언된 이름만 자동 전달합니다. 내장·사용자·현재 workspace·enabled plugin 스킬 중 선택된 원본이 대상이며, disabled·shadowed·conflicted·malformed 원본과 deferred builtin은 제외합니다. `teams-meeting-pipeline`은 계속 disabled/deferred이며 Graph 키를 넣어도 지원되거나 활성화되지 않습니다.
+- 선언 키마다 비어 있지 않은 process 값, 그다음 `.env.json` 값을 사용합니다. 둘 다 없거나 파일 값도 빈 문자열이면 missing입니다. 자동 전달은 `HOME`·`PATH`·`LANG`·`TERM`을 덮지 않으며, 이 이름은 missing 대신 `reserved (excluded)`로 보입니다.
+- exec 환경은 기본 네 이름 → 기존 허용 목록(`allowed_env_keys`)의 process 값 → 스킬 자동 전달 → top-level `env` → `tools.exec.env` 순으로 합치고 기존 `path_append`를 적용합니다. 뒤의 명시 설정이 이깁니다. 명시한 빈 문자열도 파일 값을 가리며 `overridden_empty`와 missing으로 보이므로 그 명시 설정을 고쳐야 합니다. 사용자가 직접 적는 기존 env 설정의 의미는 유지됩니다.
+- 본문을 먼저 읽지 않아도 그 실행의 **모든 exec**에 전달합니다. 본 대화·채널·local API, 일반 하위 작업, cron·heartbeat의 agent 실행이 같은 규칙을 씁니다. 실행 도구가 허용된 workflow 자식도 부모의 선택을 받지만, 기본 workflow의 꺼진 exec를 켜지는 않습니다. 스킬 원본·선언은 각 실행 시작에 선택하고 자식에게 그대로 넘기며, 실행 도중 변경은 다음 실행에서 반영합니다.
+- browser/viewer(Chromium·Xvfb·x11vnc·websockify), provider, MCP, plugin command, agent 없이 도는 자동화 script에는 이 자동 전달을 적용하지 않습니다. 명령 실행·workspace 밖 접근 승인도 그대로 필요합니다.
+
+활성 스킬 하나가 선언한 키는 그 실행의 다른 exec와 그 자식 프로그램도 읽을 수 있습니다. 프로그램이 키를 출력하면 **일반 도구 결과·모델 입력·대화 기록(transcript)·로그에 원문이 남을 수 있습니다.** auto mode의 classifier 입력·결과 검사와 기존 승인 표시 등 정해진 표면에서만 알려진 8자 이상 값을 가립니다. process나 명시 env가 이긴 실제 전달값도 이 대상에 포함되지만, 짧은 값·인코딩한 값이나 일반 출력을 전부 가려 주지는 않습니다.
+
+이미 설치된 `workspace/builtin_skills/<이름>/SKILL.md`는 업데이트나 `onboard`가 자동으로 덮어쓰지 않습니다. 오래된 `.env` 안내가 보이면 사용자 변경을 보존하며 현재 배포 원본(`crates/shacs-skills/<이름>/SKILL.md`)의 설정 절과 비교해 수동 반영하세요. 기존 `.env` 파일은 자동 변환하거나 삭제하지 않습니다.
+
 #### `.env.json`과 비밀 옮기기
 
 `.env.json`은 data 폴더(기본 `~/.shacs-bot`)에 두는 비밀 파일입니다. 이름은 `[A-Z_][A-Z0-9_]*`이고 값은 글인 JSON 객체 하나입니다:
@@ -662,9 +701,9 @@ Config 문자열 값은 load 시 `${이름}` 형태의 참조를 풉니다. 값�
 
 - 직접 만들면 `chmod 600 ~/.shacs-bot/.env.json`으로 소유자만 읽고 쓰게 하세요. shacs-bot이 쓸 때는 0600으로 씁니다.
 - 모양이 틀리면(JSON 아님, 객체 아님, 이름 형식, 글이 아닌 값, 같은 이름 두 번) `${이름}`을 푸는 config 읽기(runtime 시작 등)가 몇 번째 항목인지만 적은 오류로 실패합니다. 이름과 값은 출력하지 않습니다. `status`·`onboard`처럼 `${이름}`을 풀지 않는 명령은 이 파일을 읽지 않습니다.
-- 값은 process 환경 변수로 내보내지 않습니다. `exec`·skill·MCP에는 지금처럼 top-level `env`, `tools.exec.env`, `tools.mcpServers.<name>.env`에 적은 변수만 들어가고, 그 값에 `${이름}`을 쓸 수 있습니다.
+- runtime 자체의 process 환경은 바꾸지 않습니다. [활성 스킬의 선언 키는 exec 자식에 자동 전달](#스킬-api-키-설정)하고, 기존 top-level `env`·`tools.exec.env`는 그 값을 덮습니다. MCP 서버의 환경은 계속 `tools.mcpServers.<name>.env`에 따로 적으며, 명시 env 값에는 `${이름}`을 쓸 수 있습니다.
 - provider의 `apiKeyRef`·`credentialSource.environment`(onboard wizard가 쓰는 환경 변수 참조)와 provider 기본 환경 변수(`OPENROUTER_API_KEY` 등)는 지금처럼 process 환경 변수에서만 찾습니다. `.env.json` 값을 provider key로 쓰려면 `apiKey`에 `${이름}`을 적으세요.
-- `onboard`와 `onboard --wizard`는 비밀 값을 받지 않습니다. onboard 뒤에는 비밀 값을 `.env.json`에 적고 config에 `${이름}`을 쓰거나, config에 값을 적은 뒤 아래처럼 `runtime config-migrate --apply`로 옮기세요. Discord bot 토큰은 `channels connect discord --token-stdin`이 `.env.json`에 넣고 config에 `${이름}`을 남깁니다([Discord 연결](#discord-연결)).
+- `onboard`와 `onboard --wizard`는 비밀 값을 받지 않습니다. onboard 뒤에는 비밀 값을 `.env.json`에 적고, config에서 참조할 값에는 `${이름}`을 쓰거나 config에 값을 적은 뒤 아래처럼 `runtime config-migrate --apply`로 옮기세요. 활성 스킬의 선언 키는 별도 config 참조 없이 전달합니다. Discord bot 토큰은 `channels connect discord --token-stdin`이 `.env.json`에 넣고 config에 `${이름}`을 남깁니다([Discord 연결](#discord-연결)).
 
 `runtime config-migrate`는 schema migration에 더해 config의 비밀 값을 `.env.json`으로 옮깁니다. 출력 JSON의 `secrets`에 옮길 칸(`moved`), 옮기지 않은 칸(`kept`), 멈춘 까닭(`conflicts`)이 칸 경로와 이름으로만 나오고 값은 나오지 않습니다.
 
@@ -674,7 +713,7 @@ Config 문자열 값은 load 시 `${이름}` 형태의 참조를 풉니다. 값�
 - `--apply`는 진행 표시(`config.json.secrets-migration-in-progress`)와 백업을 먼저 쓰고 `.env.json`, `config.json` 순서로 씁니다. 그래서 중간에 끊겨도 config는 옮기기 전과 같은 값으로 풀립니다. 진행 표시가 남아 있으면 apply, runtime 시작, `onboard`·`onboard --wizard`, `channels connect discord`가 아무것도 바꾸지 않고 멈추며(오류 글 "config migration is interrupted; run runtime config-migrate --recover first"), `--recover`가 두 파일을 옮기기 전으로 되돌립니다. 031 schema migration의 진행 표시도 같습니다. 진행 표시는 없는데 백업만 남았으면(끝난 apply나 되돌리기가 백업을 지우기 전에 끊김) `--recover`나 다음 apply가 백업만 지웁니다(`removedBackups`).
 - 옮기기가 끝나면 되돌릴 백업이 없고, 이 판으로 옮긴 config는 이전 판이 읽지 못합니다. 이전 판으로 돌아가려면 `${이름}` 자리에 값을 다시 적어야 합니다.
 
-스킬의 `requires.env` 확인이나 `exec`/subagent 실행에 필요한 환경 변수는 top-level `env`에 직접 둘 수 있습니다. `tools.exec.env`도 계속 지원하며 같은 key가 있으면 더 구체적인 `tools.exec.env` 값이 우선합니다. 이 값은 exec 실행 환경과 subagent exec 실행 환경에 주입되고, MCP 서버별 환경 변수는 기존처럼 `tools.mcpServers.<name>.env`에 따로 둡니다. MCP `tools.mcpServers.<name>.enabledTools`는 기본값이 빈 배열인 default-deny opt-in입니다. MCP tools/resources/prompts를 노출하려면 `*`, raw capability name, 또는 `mcp_<server>_<kind>_<name>` 형태의 wrapped capability name을 명시하세요. MCP 도구가 결과에 `isError: true`를 붙여 스스로 실패를 알리면, 그 결과는 성공 내용이 아니라 `(MCP tool call failed: <도구가 보낸 글>)` 형식의 실패로 전달됩니다. 빈 문자열은 `requires.env`를 만족하지 않습니다. 비밀 값은 `.env.json`에 두고 config에는 `${이름}`을 쓰세요. Secret 값을 넣은 config 파일이나 `.env.json`은 커밋하거나 공유하지 마세요.
+`exec`/subagent 환경을 직접 지정하려면 top-level `env`와 `tools.exec.env`를 쓸 수 있습니다. 같은 key는 `tools.exec.env`가 이기며, 둘 다 [스킬 키 자동 전달](#스킬-api-키-설정)보다 우선합니다. 선언 키를 쓰기 위해 이 설정을 따로 추가할 필요는 없습니다. 빈 명시 값은 스킬 키 상태를 missing으로 만듭니다. MCP 서버별 환경 변수는 기존처럼 `tools.mcpServers.<name>.env`에 따로 둡니다. MCP `tools.mcpServers.<name>.enabledTools`는 기본값이 빈 배열인 default-deny opt-in입니다. MCP tools/resources/prompts를 노출하려면 `*`, raw capability name, 또는 `mcp_<server>_<kind>_<name>` 형태의 wrapped capability name을 명시하세요. MCP 도구가 결과에 `isError: true`를 붙여 스스로 실패를 알리면, 그 결과는 성공 내용이 아니라 `(MCP tool call failed: <도구가 보낸 글>)` 형식의 실패로 전달됩니다. 명시 설정에서 비밀 값을 참조할 때는 `.env.json`에 값을 두고 config에는 `${이름}`을 쓰세요. Secret 값을 넣은 config 파일이나 `.env.json`은 커밋하거나 공유하지 마세요.
 
 `web_fetch`가 받은 png·jpeg·gif·webp 그림은 모델에 그림으로 전달합니다. 그림 바이트는 실행의 file tool이 쓰는 media 폴더 아래 `tool-results/<sha256>.<확장자>`에 저장하며, 같은 그림은 한 파일을 씁니다. 도구 결과와 세션 기록에는 원래 글과 `[image: tool-results/…]` 참조만 남깁니다. 요청마다 최근 그림 3개만 해당 도구 결과 묶음 바로 뒤에 붙입니다. 그림 입력을 받지 않는 모델에는 참조 글만 보내며, 제공자가 그림을 거절하면 재시도도 참조 글로 보냅니다. 그림이 5 MiB를 넘거나 종류를 알 수 없거나 저장할 수 없으면 까닭을 글로 남기고 실행을 이어 갑니다.
 

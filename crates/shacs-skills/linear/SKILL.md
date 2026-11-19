@@ -23,7 +23,16 @@ Manage Linear issues, projects, and teams directly via the GraphQL API using `cu
 ## Setup
 
 1. Get a personal API key from **Linear Settings > Account > Security & access > Personal API keys** (URL: https://linear.app/settings/account/security). Note: the org-level *Settings > API* page only shows OAuth apps and workspace-member keys, not personal keys.
-2. Set `LINEAR_API_KEY` in your environment (via shacs-bot config/env or your env config)
+2. Edit `.env.json` beside the actual `config.json` in your data folder (default `~/.shacs-bot/.env.json`). Preserve other keys in the JSON object and replace this example locally in your editor:
+   ```json
+   {
+     "LINEAR_API_KEY": "linear_example_replace_locally"
+   }
+   ```
+
+In Docker, the default host file `~/.shacs-bot/.env.json` appears as `/home/shacs/.shacs-bot/.env.json` inside the container. If the mount or config path differs, edit the host file beside that config. This is not Compose's repository `.env`; do not add shell assignments or `export` to the JSON. For a file you create, use `chmod 600` on its actual path.
+
+Restart the running shacs-bot runtime after saving. When this skill is active, its declared key reaches every `exec`, even before the skill is read; no config env entry is required. A non-empty process value wins over the file, and explicit top-level `env` / `tools.exec.env` can override it. Never ask for or paste secrets in chat: the user must edit the file locally. Check `shacs-bot skills show linear` for missing names, then use a task that does not print the key. The CLI reads current inputs, not the running gateway's saved values, and readiness does not prove API access. Do not inspect secrets with `env`, `printenv`, or `echo`; general output, transcripts, and logs can retain them.
 
 ## API Basics
 

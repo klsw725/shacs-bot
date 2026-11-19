@@ -26,11 +26,17 @@ Useful for finding reaction GIFs, creating visual content, and sending GIFs in c
 
 ## Setup
 
-Set your Tenor API key in your environment (add to `~/.shacs-bot/.env`):
+Edit `.env.json` beside the actual `config.json` in your data folder (default `~/.shacs-bot/.env.json`). Preserve other keys in the JSON object and replace this example locally in your editor:
 
-```bash
-TENOR_API_KEY=your_key_here
+```json
+{
+  "TENOR_API_KEY": "tenor_example_replace_locally"
+}
 ```
+
+In Docker, the default host file `~/.shacs-bot/.env.json` appears as `/home/shacs/.shacs-bot/.env.json` inside the container. If the mount or config path differs, edit the host file beside that config. This is not Compose's repository `.env`; do not add shell assignments or `export` to the JSON. For a file you create, use `chmod 600` on its actual path.
+
+Restart the running shacs-bot runtime after saving. When this skill is active, its declared key reaches every `exec`, even before the skill is read; no config env entry is required. A non-empty process value wins over the file, and explicit top-level `env` / `tools.exec.env` can override it. Never ask for or paste secrets in chat: the user must edit the file locally. Check `shacs-bot skills show gif-search` for missing names, then use a task that does not print the key. The CLI reads current inputs, not the running gateway's saved values, and readiness does not prove API access. Do not inspect secrets with `env`, `printenv`, or `echo`; general output, transcripts, and logs can retain them.
 
 Get a free API key at https://developers.google.com/tenor/guides/quickstart — the Google Cloud Console Tenor API key is free and has generous rate limits.
 
